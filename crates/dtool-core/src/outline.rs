@@ -1,6 +1,6 @@
 use crate::curve::{Contour, CornerKind, Curve, PathPoint, PointId};
 use crate::object::{Dimension, Object, ObjectKind};
-use crate::shape::{CornerRecipe, ShapeKind};
+use crate::shape::{CornerRecipe, CornerStyle, ShapeKind};
 use kurbo::{Affine, Arc, BezPath, Ellipse, PathEl, Point, Rect, RoundedRect, RoundedRectRadii, Shape, Vec2};
 use std::f64::consts::{FRAC_1_SQRT_2, PI};
 
@@ -131,10 +131,7 @@ fn shape_outline(object: &Object) -> Option<BezPath> {
     match recipe.kind {
         ShapeKind::Rectangle => Some(bounds.to_path(OUTLINE_TOLERANCE)),
         ShapeKind::Ellipse => Some(crate::geometry::ellipse_to_bez_path(w * 0.5, h * 0.5, w * 0.5, h * 0.5)),
-        ShapeKind::RoundedRectangle => {
-            let r = corner_radii(recipe.corner.as_ref()?, w, h);
-            Some(RoundedRect::from_rect(bounds, RoundedRectRadii::new(r[0], r[1], r[2], r[3])).to_path(OUTLINE_TOLERANCE))
-        }
+        ShapeKind::RoundedRectangle => Some(rounded_outline(bounds, recipe.corner.as_ref()?)),
         ShapeKind::Polygon => {
             let polygon = recipe.polygon.as_ref()?;
             if polygon.number_of_sides < 3 {
@@ -512,6 +509,41 @@ fn corner_radii(corner: &CornerRecipe, w: f64, h: f64) -> [f64; 4] {
         let value = if corner.absolute { r } else { short * r.clamp(0.0, 50.0) / 100.0 };
         value.clamp(0.0, short * 0.5)
     })
+}
+
+fn rounded_outline(bounds: Rect, recipe: &CornerRecipe) -> BezPath {
+    let radii = corner_radii(recipe, bounds.width(), bounds.height());
+    if recipe.styles == [CornerStyle::Rounded; 4] {
+        let [tl, tr, br, bl] = radii;
+        return RoundedRect::from_rect(bounds, RoundedRectRadii::new(tl, tr, br, bl)).to_path(OUTLINE_TOLERANCE);
+    }
+    let corners = [
+        (Point::new(bounds.x0, bounds.y0), Vec2::new(0.0, -1.0), Vec2::new(1.0, 0.0)),
+        (Point::new(bounds.x1, bounds.y0), Vec2::new(1.0, 0.0), Vec2::new(0.0, 1.0)),
+        (Point::new(bounds.x1, bounds.y1), Vec2::new(0.0, 1.0), Vec2::new(-1.0, 0.0)),
+        (Point::new(bounds.x0, bounds.y1), Vec2::new(-1.0, 0.0), Vec2::new(0.0, -1.0)),
+    ];
+    let mut path = BezPath::new();
+    for (index, ((corner, enter, exit), (radius, style))) in corners.into_iter().zip(radii.into_iter().zip(recipe.styles)).enumerate() {
+        let r = if style == CornerStyle::None { 0.0 } else { radius };
+        let start = corner - enter * r;
+        let end = corner + exit * r;
+        if index == 0 { path.move_to(start); } else { path.line_to(start); }
+        if r == 0.0 { continue; }
+        let tangent = r * 0.552_284_749_830_793_6;
+        match style {
+            CornerStyle::None => {}
+            CornerStyle::Rounded => path.curve_to(start + enter * tangent, end - exit * tangent, end),
+            CornerStyle::Straight => path.line_to(end),
+            CornerStyle::Concave => path.curve_to(start + exit * tangent, end - enter * tangent, end),
+            CornerStyle::Cutout => {
+                path.line_to(start + exit * r);
+                path.line_to(end);
+            }
+        }
+    }
+    path.close_path();
+    path
 }
 
 fn radial(w: f64, h: f64, count: usize, radius: impl Fn(usize) -> f64) -> BezPath {

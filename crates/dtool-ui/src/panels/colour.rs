@@ -583,7 +583,7 @@ impl ColourPanel {
     ) -> [(ColourTarget, egui::Response); 2] {
         let size = if rail { egui::vec2(30.0, TOOL_SWATCH_HEIGHT) } else { egui::vec2(33.0, 29.0) };
         let (id, rect) = ui.allocate_space(size);
-        let (offset, stroke_hit, fill_hit) = if rail {
+        let (offset, rear_hit, front_hit) = if rail {
             let split = rect.top() + 14.0;
             (
                 egui::vec2(7.0, 12.0),
@@ -600,9 +600,13 @@ impl ColourPanel {
         };
         let rear = rect.min + egui::vec2(10.5, 10.5);
         let backing = if rail { dtool_design::theme::surface(ui.ctx(), "bars") } else { ui.visuals().panel_fill };
+        let (rear_target, rear_key, front_key) = match self.target {
+            ColourTarget::Fill => (ColourTarget::Stroke, "stroke.well", "fill.well"),
+            ColourTarget::Stroke => (ColourTarget::Fill, "fill.well", "stroke.well"),
+        };
         [
-            (ColourTarget::Stroke, "stroke.well", rear, stroke_hit),
-            (ColourTarget::Fill, "fill.well", rear + offset, fill_hit),
+            (rear_target, rear_key, rear, rear_hit),
+            (self.target, front_key, rear + offset, front_hit),
         ].map(|(target, key, centre, hit)| {
             let response = ui.interact(hit, id.with(key), egui::Sense::click());
             let active = self.target == target;

@@ -217,7 +217,7 @@ pub const SVG_ICONS: [(&str, &str); 206] = [
     ("tool-flood-fill", include_str!("../assets/icons/tool-flood-fill.svg")),
 ];
 
-pub const TOOL_ICON_ALIASES: [(&str, &str); 64] = [
+pub const TOOL_ICON_ALIASES: [(&str, &str); 65] = [
     ("tool.select.object", "tool-object-selection"),
     ("tool.shape.polygon", "tool-polygon"),
     ("tool.vector_crop", "tool-vector-crop"),
@@ -229,6 +229,7 @@ pub const TOOL_ICON_ALIASES: [(&str, &str); 64] = [
     ("tool.boolean.intersect", "cmd-bool-intersect"),
     ("tool.boolean.subtract", "cmd-bool-subtract"),
     ("tool.boolean.xor", "cmd-bool-xor"),
+    ("tool.boolean.divide", "cmd-bool-divide"),
     ("tool.align", "cmd-align"),
     ("tool.clone", "px-clone"),
     ("tool.eraser", "px-eraser"),

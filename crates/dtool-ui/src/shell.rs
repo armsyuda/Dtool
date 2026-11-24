@@ -708,6 +708,7 @@ impl AppShell {
             session.selection.ids.is_empty() || crate::artboard_bar::setup_available(session)
         });
         let mut warp_action = None;
+        let mut corner_action = None;
         let context_bar = egui::Panel::top("dtool.shell.context_bar")
             .exact_size(dtool_design::size("bar.context.height"))
             .resizable(false)
@@ -775,6 +776,13 @@ impl AppShell {
                         brush_action = crate::context_bar::show_vector_brush_tip(ui, session);
                         true
                     });
+                    let rounded = self.workspace.session().and_then(|session| {
+                        crate::rounded_corners::selected(session).map(|object| (session, object))
+                    });
+                    if let Some((session, object)) = rounded {
+                        corner_action = crate::rounded_corners::show(ui, session, object);
+                        ui.separator();
+                    }
                     let model = self.context_model.as_ref().filter(|_| has_model).map(|(_, _, _, _, model)| {
                         let mask_gradient = self.workspace.session().is_some_and(|session| {
                             session.quick_mask.active && matches!(tool_kind(&session.active_tool), ToolKind::Gradient(_))
@@ -783,11 +791,12 @@ impl AppShell {
                             matches!(tool_kind(&session.active_tool), ToolKind::Gradient(_))
                                 && session.appearance_focus.is_some_and(|focus| session.selection.ids.as_slice() == [focus.node])
                         });
-                        if mask_gradient || focused_appearance || show_text || model.tool.as_deref() == Some("tool.move") {
+                        if mask_gradient || focused_appearance || show_text || rounded.is_some() || model.tool.as_deref() == Some("tool.move") {
                             let mut model = model.clone();
                             model.items.retain(|item| {
                                 !(show_text && item.id.starts_with("text.")
                                     || item.id == "move.align" || item.id.starts_with("move.align.")
+                                    || rounded.is_some() && item.id == dtool_core::context_toolbar::SHAPE_CORNER_RADIUS
                                     || (mask_gradient || focused_appearance) && item.id == "gradient.target")
                             });
                             if mask_gradient {
@@ -849,7 +858,7 @@ impl AppShell {
         for command in artboard_actions {
             if let Err(error) = self.run_and_reconcile(command) { self.status_bar.set_hint_key(&error.message_key); }
         }
-        if let Some(command) = qr_action.or(blend_action).or(measure_action).or(gradient_action).or(warp_action).or(brush_action) {
+        if let Some(command) = qr_action.or(corner_action).or(blend_action).or(measure_action).or(gradient_action).or(warp_action).or(brush_action) {
             if let Err(error) = self.run_and_reconcile(command) { self.status_bar.set_hint_key(&error.message_key); }
         }
         if let Some(command) = picked {
@@ -1488,6 +1497,9 @@ impl AppShell {
     }
 
     pub fn pick_tool(&mut self, tool: &str) -> dtool_core::CommandResult {
+        if let Some(command) = crate::tools_panel::boolean_tool_command(tool) {
+            return self.run_and_reconcile(Command::with_params(command, serde_json::json!({})));
+        }
         let session = self.workspace.session_mut().ok_or_else(dtool_core::CommandError::no_document)?;
         if session.active_tool != tool {
             crate::canvas::frame_text_input::commit_pending(session);

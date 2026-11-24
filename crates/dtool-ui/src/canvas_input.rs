@@ -2352,16 +2352,17 @@ impl CanvasInput {
             for (kind, at) in shape_tool::param_handles(preview.as_ref().unwrap_or(object)) {
                 let pos = match self.drag {
                     Some(Drag::ShapeParam { target, kind: dragging, current, grab_offset, .. })
-                        if target == object.id && dragging == kind && !matches!(kind, ShapeParamKind::Recipe(_)) =>
+                        if target == object.id && dragging == kind && !matches!(kind, ShapeParamKind::Recipe(_) | ShapeParamKind::Corner(_)) =>
                             [current[0] + grab_offset[0], current[1] + grab_offset[1]],
                     _ => at,
                 };
                 let at = screen(rect, view, pos);
-                if matches!(kind, ShapeParamKind::Recipe(_)) {
+                if matches!(kind, ShapeParamKind::Recipe(_) | ShapeParamKind::Corner(_)) {
                     let r = HANDLE_PX * 0.65;
                     painter.add(egui::Shape::convex_polygon(
                         vec![at + egui::vec2(0.0, -r), at + egui::vec2(r, 0.0), at + egui::vec2(0.0, r), at + egui::vec2(-r, 0.0)],
-                        marker, Stroke::new(1.0, egui::Color32::WHITE),
+                        if matches!(kind, ShapeParamKind::Corner(_)) { egui::Color32::from_rgb(225, 58, 58) } else { marker },
+                        Stroke::new(1.0, egui::Color32::WHITE),
                     ));
                 } else {
                     painter.circle(at, HANDLE_PX * 0.75, egui::Color32::WHITE, stroke);

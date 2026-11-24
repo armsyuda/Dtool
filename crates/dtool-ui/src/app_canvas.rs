@@ -207,24 +207,13 @@ struct FillTexture {
     used: bool,
 }
 
-pub const WHEEL_ZOOM_RATE: f32 = 0.0025;
-
-pub fn wheel_view(view: &mut ViewState, scroll: [f32; 2], zoom_delta: f32, pointer: Option<[f32; 2]>, pan_held: bool) -> bool {
-    if zoom_delta != 1.0 && zoom_delta.is_finite() {
-        let Some(point) = pointer else { return false; };
-        dtool_core::view::zoom_about(view, view.zoom * zoom_delta, point);
-        return true;
+pub fn wheel_view(view: &mut ViewState, scroll: [f32; 2], zoom_delta: f32, pointer: Option<[f32; 2]>) -> bool {
+    use crate::canvas::CanvasViewCommand;
+    match CanvasViewCommand::from_wheel(view, scroll, zoom_delta, pointer) {
+        Some(CanvasViewCommand::ZoomSet { zoom, around: Some(point) }) => dtool_core::view::zoom_about(view, zoom, point),
+        Some(CanvasViewCommand::Pan { delta }) => dtool_core::command::view_pan_apply(view, delta),
+        _ => return false,
     }
-    if scroll == [0.0, 0.0] {
-        return false;
-    }
-    if pan_held || scroll[1] == 0.0 || pointer.is_none() {
-        view.scroll[0] += scroll[0];
-        view.scroll[1] += scroll[1];
-        return true;
-    }
-    let point = pointer.unwrap_or([0.0, 0.0]);
-    dtool_core::view::zoom_about(view, view.zoom * (scroll[1] * WHEEL_ZOOM_RATE).exp(), point);
     true
 }
 
@@ -606,8 +595,7 @@ impl AppCanvas {
         self.panning = ui.input(|state| {
             let space = state.key_down(egui::Key::Space);
             let middle = state.pointer.middle_down();
-            let wheel = response.hovered() && state.smooth_scroll_delta != egui::Vec2::ZERO
-                && (space || middle || state.smooth_scroll_delta.y == 0.0);
+            let wheel = response.hovered() && state.smooth_scroll_delta != egui::Vec2::ZERO;
             let pointer_drag = response.dragged() || (response.hovered() && (middle || state.pointer.primary_down()));
             wheel || (!input && pointer_drag
                 && crate::canvas_input::nav_mode(&session.active_tool, space, middle) == crate::canvas_input::NavMode::Pan)
@@ -798,9 +786,9 @@ impl AppCanvas {
         }
         let before = view.zoom;
         let rect = response.rect;
-        let (scroll, zoom, pos, pan_held) = ui.input(|i| (i.smooth_scroll_delta, i.zoom_delta(), i.pointer.hover_pos(), i.key_down(egui::Key::Space) || i.pointer.middle_down()));
+        let (scroll, zoom, pos) = ui.input(|i| (i.smooth_scroll_delta, i.zoom_delta(), i.pointer.hover_pos()));
         let pointer = pos.map(|p| [p.x - rect.min.x, p.y - rect.min.y]);
-        if wheel_view(view, [scroll.x, scroll.y], zoom, pointer, pan_held) {
+        if wheel_view(view, [scroll.x, scroll.y], zoom, pointer) {
             ui.ctx().request_repaint();
         }
         view.zoom != before

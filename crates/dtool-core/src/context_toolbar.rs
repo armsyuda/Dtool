@@ -88,6 +88,7 @@ pub const TOOL_IDS: &[&str] = &[
     "tool.boolean.subtract",
     "tool.boolean.intersect",
     "tool.boolean.xor",
+    "tool.boolean.divide",
     "tool.eraser",
     "tool.eraser.erase",
     "tool.eraser.smudge",

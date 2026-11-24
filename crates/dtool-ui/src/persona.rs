@@ -213,6 +213,20 @@ pub fn refuse_excluded(entry:&PersonaEntry)->Result<(),CommandError>{
 
 pub fn persona_status(entry:&PersonaEntry)->&'static str{if refuse_excluded(entry).is_err(){"planned"}else{"supported"}}
 
+fn refresh_legacy_flyout(layout: &mut PersonaLayout, flyout: &crate::tools_panel::ToolFlyout, is_new: impl Fn(&str) -> bool) {
+    if !layout.tools.contains(&flyout.parent) {
+        return;
+    }
+    let legacy = flyout.children.iter().filter(|tool| !is_new(tool.0));
+    let existing = layout.tools.iter().filter(|tool| flyout.children.contains(tool));
+    if !existing.eq(legacy) {
+        return;
+    }
+    let index = layout.tools.iter().rposition(|tool| flyout.children.contains(tool))
+        .expect("matched a legacy flyout with children") + 1;
+    layout.tools.splice(index..index, flyout.children.iter().filter(|tool| is_new(tool.0)).cloned());
+}
+
 #[derive(Debug,Clone)]
 pub struct PersonaStore {pub dir:PathBuf}
 impl PersonaStore {
@@ -230,6 +244,18 @@ impl PersonaStore {
                 state.live.toolbar.clear();
             }
             state.toolbar_defaults_updated = true;
+        }
+        let flyouts = default_flyouts();
+        let shapes = flyouts.iter().find(|group| group.parent.0 == "tool.shapes").unwrap();
+        let boolean = flyouts.iter().find(|group| group.parent.0 == "tool.boolean").unwrap();
+        let live_builtin = matches!(state.active, PersonaEntry::Builtin(_));
+        let saved = state.layouts.iter_mut().filter(|(key, _)| !key.starts_with("custom:")).map(|(_, layout)| layout);
+        for layout in saved.chain(live_builtin.then_some(&mut state.live)) {
+            refresh_legacy_flyout(layout, shapes, dtool_core::context_toolbar::is_advanced_shape_tool);
+            refresh_legacy_flyout(layout, boolean, |id| id == "tool.boolean.divide");
+            if layout.tool.as_ref().is_some_and(|tool| crate::tools_panel::boolean_tool_command(tool.0).is_some()) {
+                layout.tool = Some(ToolId("tool.move"));
+            }
         }
         if let Some(definition) = persona_catalog().into_iter()
             .find(|definition| definition.entry == PersonaEntry::Builtin(PersonaId::Layout))

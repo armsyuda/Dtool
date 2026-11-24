@@ -56,6 +56,7 @@ type Placed = ([f32; 2], [f32; 2], Vec<Contour>);
 
 enum Conversion {
     Shape(Curve),
+    Compound,
     Text(crate::text_lines::TextOutline),
 }
 
@@ -92,6 +93,12 @@ fn plan(session: &Session, name: &str, params: &Value) -> Result<Vec<(ObjectId, 
                 }
                 let path = object_outline(object).ok_or_else(|| CommandError::new("UNSUPPORTED_SHAPE"))?;
                 out.push((id, Conversion::Shape(Curve::from_kurbo(&path).with_source(id.0))));
+            }
+            ObjectKind::Compound(_) if name == CONVERT => {
+                if object.locked {
+                    return Err(CommandError::new("LOCKED"));
+                }
+                out.push((id, Conversion::Compound));
             }
             ObjectKind::ArtText { .. } | ObjectKind::FrameText { .. } | ObjectKind::PathText(_) if name == CONVERT => {
                 if object.locked {
@@ -131,6 +138,17 @@ fn convert(session: &mut Session, name: &str, params: &Value) -> CommandResult {
                     object.shape = None;
                     object.qr_payload = None;
                     object.qr_content = None;
+                }
+            }
+            Conversion::Compound => {
+                let object = session.document.find_object_mut(id.0).expect("planned compound");
+                let ObjectKind::Compound(spec) = &object.kind else { unreachable!("planned compound") };
+                match crate::boolean::expanded_compound_curve(spec, crate::boolean::DEFAULT_TOLERANCE) {
+                    Ok(curve) => object.kind = ObjectKind::Curve(curve),
+                    Err(error) => {
+                        crate::commands::arrange::restore(session, &before);
+                        return Err(error);
+                    }
                 }
             }
             Conversion::Text(outline) => {

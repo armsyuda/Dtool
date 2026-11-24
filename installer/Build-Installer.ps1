@@ -20,6 +20,12 @@ $null = New-Item -ItemType Directory -Path (Join-Path $payload 'docs')
 
 Copy-Item -LiteralPath $AppExe -Destination (Join-Path $payload 'dtool.exe')
 Copy-Item -LiteralPath $VCRuntimeDll -Destination (Join-Path $payload 'vcruntime140.dll')
+# An ICO directory entry can point directly to the app's 256 × 256 PNG.
+$iconPng = [IO.File]::ReadAllBytes((Join-Path $releaseRoot 'crates/dtool-design/assets/icons/dtool-256.png'))
+$iconHeader = [byte[]](0, 0, 1, 0, 1, 0, 0, 0, 0, 0, 1, 0, 32, 0)
+$iconSize = [BitConverter]::GetBytes([uint32]$iconPng.Length)
+$iconOffset = [BitConverter]::GetBytes([uint32]22)
+[IO.File]::WriteAllBytes((Join-Path $payload 'DTool.ico'), ($iconHeader + $iconSize + $iconOffset + $iconPng))
 foreach ($folder in 'kiwi', 'hunspell', 'licenses') {
     Copy-Item -LiteralPath (Join-Path $RuntimeDirectory $folder) -Destination $payload -Recurse
 }

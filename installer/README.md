@@ -8,4 +8,4 @@ PowerShell 7과 NSIS 3을 사용합니다. 앱을 먼저 빌드하고, 배포용
     -VCRuntimeDll <vcruntime140.dll-경로> -MakeNsis <makensis.exe-경로>
 ```
 
-스크립트는 Windows 설치 실행 파일과 SHA-256 파일을 만듭니다. 설치 프로그램은 현재 사용자 계정에 DTool을 설치하고, 시작 메뉴에 앱과 HTML 설명서 두 개의 바로가기를 만듭니다.
+스크립트는 Windows 설치 실행 파일과 SHA-256 파일을 만듭니다. 설치 프로그램은 현재 사용자 계정에 설치하며 기본 위치는 `%LOCALAPPDATA%\Programs\DTool`입니다. 설치 마법사에서 폴더를 선택할 수 있고, 재설치 시에는 이전에 사용한 위치를 기본값으로 표시합니다. 바탕화면에 DTool 바로가기를 만들고, 시작 메뉴에 앱과 HTML 설명서 두 개의 바로가기를 만듭니다.

@@ -6,7 +6,6 @@ use dtool_core::workspace::Workspace;
 
 pub use dtool_core::view::{clamp_zoom, doc_to_view, view_to_doc};
 pub use dtool_core::view_state::{ZOOM_MAX, ZOOM_MIN};
-pub const WHEEL_ZOOM_RATE: f32 = 0.0015;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum CanvasViewCommand {
@@ -16,6 +15,18 @@ pub enum CanvasViewCommand {
 }
 
 impl CanvasViewCommand {
+    pub(crate) fn from_wheel(
+        view: &ViewState, scroll: [f32; 2], zoom_delta: f32, pointer: Option<[f32; 2]>,
+    ) -> Option<Self> {
+        // Egui separates Ctrl+wheel and pinch zoom from unmodified scrolling.
+        if zoom_delta.is_finite() && zoom_delta > 0.0 && zoom_delta != 1.0 {
+            let around = pointer?;
+            let zoom = clamp_zoom(view.zoom * zoom_delta);
+            return (zoom != view.zoom).then_some(Self::ZoomSet { zoom, around: Some(around) });
+        }
+        (scroll != [0.0, 0.0]).then_some(Self::Pan { delta: scroll })
+    }
+
     pub fn name(&self) -> &'static str {
         match self {
             CanvasViewCommand::Pan { .. } => "view.pan",
@@ -56,10 +67,10 @@ impl CanvasView {
         let rect = response.rect;
         let view_size = [rect.width(), rect.height()];
 
-        let (space_down, wheel_y, pinch, rotation_delta) = ui.input(|i| {
+        let (space_down, scroll, zoom_delta, rotation_delta) = ui.input(|i| {
             (
                 i.key_down(egui::Key::Space),
-                i.smooth_scroll_delta.y,
+                i.smooth_scroll_delta,
                 i.zoom_delta(),
                 i.rotation_delta(),
             )
@@ -79,15 +90,8 @@ impl CanvasView {
         }
 
         if response.hovered() {
-            let mut factor = pinch;
-            if factor == 1.0 && wheel_y != 0.0 {
-                factor = (wheel_y * WHEEL_ZOOM_RATE).exp();
-            }
-            if factor != 1.0 {
-                let zoom = clamp_zoom(state.zoom * factor);
-                if zoom != state.zoom {
-                    commands.push(CanvasViewCommand::ZoomSet { zoom, around: pointer });
-                }
+            if let Some(command) = CanvasViewCommand::from_wheel(state, [scroll.x, scroll.y], zoom_delta, pointer) {
+                commands.push(command);
             }
 
             if rotation_delta != 0.0 {

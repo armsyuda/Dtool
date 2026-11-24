@@ -4,7 +4,9 @@ Unicode true
 
 Name "DTool"
 OutFile "${SETUP_EXE}"
+!define UNINSTALL_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\DTool"
 InstallDir "$LOCALAPPDATA\Programs\DTool"
+InstallDirRegKey HKCU "${UNINSTALL_KEY}" "InstallLocation"
 RequestExecutionLevel user
 SetCompressor lzma
 VIProductVersion "${DTOOL_VERSION}.0"
@@ -13,8 +15,8 @@ VIAddVersionKey /LANG=1033 "FileDescription" "DTool Windows Installer"
 VIAddVersionKey /LANG=1033 "FileVersion" "${DTOOL_VERSION}"
 VIAddVersionKey /LANG=1033 "ProductVersion" "${DTOOL_VERSION}"
 
-!define UNINSTALL_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\DTool"
 !insertmacro MUI_PAGE_WELCOME
+!insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
 !insertmacro MUI_PAGE_FINISH
 !insertmacro MUI_UNPAGE_CONFIRM
@@ -34,11 +36,13 @@ Section "DTool"
   SetOutPath "$INSTDIR"
   File /r "${PAYLOAD}\*"
   WriteUninstaller "$INSTDIR\Uninstall.exe"
+  CreateShortcut "$DESKTOP\DTool.lnk" "$INSTDIR\dtool.exe" "" "$INSTDIR\DTool.ico"
   CreateDirectory "$SMPROGRAMS\DTool"
-  CreateShortcut "$SMPROGRAMS\DTool\DTool.lnk" "$INSTDIR\dtool.exe"
+  CreateShortcut "$SMPROGRAMS\DTool\DTool.lnk" "$INSTDIR\dtool.exe" "" "$INSTDIR\DTool.ico"
   CreateShortcut "$SMPROGRAMS\DTool\DTool User Guide.lnk" "$INSTDIR\docs\User-Guide.html"
   CreateShortcut "$SMPROGRAMS\DTool\DTool MCP Guide.lnk" "$INSTDIR\docs\MCP-Guide.html"
   WriteRegStr HKCU "${UNINSTALL_KEY}" "DisplayName" "DTool"
+  WriteRegStr HKCU "${UNINSTALL_KEY}" "DisplayIcon" '"$INSTDIR\DTool.ico"'
   WriteRegStr HKCU "${UNINSTALL_KEY}" "DisplayVersion" "${DTOOL_VERSION}"
   WriteRegStr HKCU "${UNINSTALL_KEY}" "InstallLocation" "$INSTDIR"
   WriteRegStr HKCU "${UNINSTALL_KEY}" "UninstallString" '"$INSTDIR\Uninstall.exe"'
@@ -48,6 +52,7 @@ SectionEnd
 
 Section "Uninstall"
   SetShellVarContext current
+  Delete "$DESKTOP\DTool.lnk"
   Delete "$SMPROGRAMS\DTool\DTool.lnk"
   Delete "$SMPROGRAMS\DTool\DTool User Guide.lnk"
   Delete "$SMPROGRAMS\DTool\DTool MCP Guide.lnk"

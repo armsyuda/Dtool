@@ -1,4 +1,4 @@
-use dtool_core::shape::{CornerRecipe, ShapeKind};
+use dtool_core::shape::{CornerRecipe, CornerStyle, ShapeKind};
 use dtool_core::{Command, Object};
 use dtool_core::geometry::{apply_matrix, invert_matrix, object_matrix};
 
@@ -237,18 +237,14 @@ pub fn param_handles(object: &Object) -> Vec<(ShapeParamKind, [f32; 2])> {
             vec![(ShapeParamKind::TriangleApex, [x + t * w, y])]
         }
         ShapeKind::RoundedRectangle => {
-            let locked = recipe.corner.as_ref().is_none_or(|c| c.lock);
-            let radii = [0, 1, 2, 3].map(|i| recipe.corner.as_ref().map(|c| corner_px(c, object.size, i)).unwrap_or(0.0));
-            if locked {
-                vec![(ShapeParamKind::Corner(0), [x + radii[0], y])]
-            } else {
-                vec![
-                    (ShapeParamKind::Corner(0), [x + radii[0], y]),
-                    (ShapeParamKind::Corner(1), [x + w - radii[1], y]),
-                    (ShapeParamKind::Corner(2), [x + w - radii[2], y + h]),
-                    (ShapeParamKind::Corner(3), [x + radii[3], y + h]),
-                ]
-            }
+            let Some(corner) = &recipe.corner else { return Vec::new(); };
+            let [tl, tr, br, bl] = [0, 1, 2, 3].map(|index| corner_px(corner, object.size, index));
+            let [w, h] = object.size.map(f32::abs);
+            let matrix = object_matrix(object);
+            [[x + tl, y], [x + w - tr, y], [x + w - br, y + h], [x + bl, y + h]]
+                .into_iter().enumerate().filter(|(index, _)| corner.styles[*index] != CornerStyle::None)
+                .take(if corner.lock { 1 } else { 4 })
+                .map(|(index, at)| (ShapeParamKind::Corner(index as u8), apply_matrix(&matrix, at))).collect()
         }
         _ => Vec::new(),
     }
@@ -277,6 +273,20 @@ fn radius_value(corner: &CornerRecipe, size: [f32; 2], px: f32) -> f32 {
     } else {
         (px / short * 100.0).clamp(0.0, 50.0)
     }
+}
+
+fn corner_drag(object: &Object, index: u8, point: [f32; 2]) -> Option<CornerRecipe> {
+    let mut corner = object.shape.as_ref()?.corner.clone()?;
+    let [px, _] = apply_matrix(&invert_matrix(&object_matrix(object))?, point);
+    let x = object.pos[0];
+    let local = match index {
+        1 | 2 => x + object.size[0].abs() - px,
+        _ => px - x,
+    };
+    let value = radius_value(&corner, object.size, local);
+    if corner.lock { corner.radii.fill(value); }
+    else { *corner.radii.get_mut(usize::from(index))? = value; }
+    Some(corner)
 }
 
 pub fn apply_param_drag(object: &Object, kind: ShapeParamKind, point: [f32; 2]) -> Option<Command> {
@@ -311,20 +321,7 @@ pub fn apply_param_drag(object: &Object, kind: ShapeParamKind, point: [f32; 2]) 
             command.params["triangle"]["points"] = points.to_vec().into();
         }
         ShapeParamKind::Corner(index) => {
-            let mut corner = recipe.corner.clone().unwrap_or(CornerRecipe { radii: [0.0; 4], absolute: false, lock: true });
-            let px = match index {
-                1 | 2 => x + w - point[0],
-                _ => point[0] - x,
-            };
-            let value = radius_value(&corner, object.size, px);
-            if corner.lock {
-                corner.radii = [value; 4];
-            } else if let Some(slot) = corner.radii.get_mut(index as usize) {
-                *slot = value;
-            }
-            command.params["corner"]["radii"] = corner.radii.to_vec().into();
-            command.params["corner"]["absolute"] = corner.absolute.into();
-            command.params["corner"]["lock"] = corner.lock.into();
+            command.params["corner"] = dtool_core::serde_json::to_value(corner_drag(object, index, point)?).ok()?;
         }
         ShapeParamKind::Recipe(_) => unreachable!(),
     }
@@ -347,6 +344,11 @@ fn recipe_drag_value(object: &Object, field: &str, point: [f32; 2]) -> Option<(&
 }
 
 pub fn preview_recipe_drag(object: &Object, kind: ShapeParamKind, point: [f32; 2]) -> Option<Object> {
+    if let ShapeParamKind::Corner(index) = kind {
+        let mut preview = object.clone();
+        preview.shape.as_mut()?.corner = Some(corner_drag(object, index, point)?);
+        return Some(preview);
+    }
     let ShapeParamKind::Recipe(field) = kind else { return None };
     let (key, value) = recipe_drag_value(object, field, point)?;
     let mut preview = object.clone();

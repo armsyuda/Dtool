@@ -137,7 +137,11 @@ fn execute(session: &mut Session, command: &Command) -> CommandResult {
         if let Some(value)=params.get("size"){recipe.size=serde_json::from_value(value.clone()).map_err(|_|CommandError::invalid_params())?;}
         if let Some(value)=params.get("corner") {
             if recipe.kind!=ShapeKind::RoundedRectangle{return Err(CommandError::invalid_params());}
-            recipe.corner=Some(serde_json::from_value(value.clone()).map_err(|_|CommandError::invalid_params())?);
+            let mut corner: CornerRecipe = serde_json::from_value(value.clone()).map_err(|_| CommandError::invalid_params())?;
+            if value.get("styles").is_none() && let Some(previous) = &recipe.corner {
+                corner.styles = previous.styles;
+            }
+            recipe.corner = Some(corner);
         }
         if let Some(value)=params.get("triangle") {
             if recipe.kind!=ShapeKind::Triangle{return Err(CommandError::invalid_params());}

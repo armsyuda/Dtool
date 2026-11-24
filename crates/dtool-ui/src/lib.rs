@@ -22,6 +22,7 @@ pub mod context {
     pub mod text_bar;
 }
 pub mod context_bar;
+mod rounded_corners;
 mod qr_editor;
 mod artboard_bar;
 mod qr_merge;

@@ -191,6 +191,7 @@ fn base_flyouts() -> Vec<ToolFlyout> {
                 ToolId("tool.boolean.subtract"),
                 ToolId("tool.boolean.intersect"),
                 ToolId("tool.boolean.xor"),
+                ToolId("tool.boolean.divide"),
             ],
         },
         ToolFlyout {
@@ -266,6 +267,18 @@ pub const P0_SHAPE_TOOLS: &[&str] = &[
 
 pub fn is_p0_shape_tool(id: &str) -> bool {
     P0_SHAPE_TOOLS.contains(&id)
+}
+
+pub(crate) fn boolean_tool_command(id: &str) -> Option<&'static str> {
+    use dtool_core::boolean::{BOOLEAN_ADD, BOOLEAN_DIVIDE, BOOLEAN_INTERSECT, BOOLEAN_SUBTRACT, BOOLEAN_XOR};
+    match id {
+        "tool.boolean.add" => Some(BOOLEAN_ADD),
+        "tool.boolean.subtract" => Some(BOOLEAN_SUBTRACT),
+        "tool.boolean.intersect" => Some(BOOLEAN_INTERSECT),
+        "tool.boolean.xor" => Some(BOOLEAN_XOR),
+        "tool.boolean.divide" => Some(BOOLEAN_DIVIDE),
+        _ => None,
+    }
 }
 
 pub fn is_held_shape_tool(id: &str) -> bool {

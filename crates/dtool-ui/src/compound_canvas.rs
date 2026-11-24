@@ -39,15 +39,20 @@ pub fn show_operands(ui: &mut Ui, workspace: &Workspace) {
     let current = chosen(ui, owner);
     egui::CollapsingHeader::new(dtool_strings::text("compound.operand"))
         .id_salt((owner, object.id))
+        .default_open(true)
         .show(ui, |ui| {
-            for source in &spec.operands {
-                let target = OperandTarget { compound: object.id, operand: source.id };
-                let selected = current == Some(target);
-                let name = crate::panels::layers::display_name(source.id.0, &source.name);
-                if ui.add_enabled(!source.locked, egui::Button::selectable(selected, name)).clicked() {
-                    choose(ui, owner, (!selected).then_some(target));
+            egui::ScrollArea::vertical().max_height(112.0).show(ui, |ui| {
+                for source in &spec.operands {
+                    let target = OperandTarget { compound: object.id, operand: source.id };
+                    let selected = current == Some(target);
+                    let name = crate::panels::layers::display_name(source.id.0, &source.name);
+                    let response = ui.add_enabled(!source.locked, egui::Button::selectable(selected, name))
+                        .on_hover_text(dtool_strings::text("compound.operand.move"));
+                    if response.clicked() {
+                        choose(ui, owner, (!selected).then_some(target));
+                    }
                 }
-            }
+            });
         });
 }
 

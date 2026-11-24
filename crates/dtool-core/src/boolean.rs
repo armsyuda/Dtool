@@ -616,9 +616,8 @@ fn release_supported(object: &Object) -> bool {
     object.rotation_deg.is_finite() && object.shear_deg == 0.0 && object.size.iter().all(|side| *side >= 0.0)
 }
 
-fn run_expand(session: &mut Session, params: &Value) -> CommandResult {
-    let (index, compound, spec) = compound_target(session, params)?;
-    let mut curves = compound_curves(&spec, tolerance_of(params)).map_err(degenerate)?;
+pub(crate) fn expanded_compound_curve(spec: &CompoundSpec, tolerance: f64) -> Result<Curve, CommandError> {
+    let mut curves = compound_curves(spec, tolerance).map_err(degenerate)?;
     if curves.is_empty() {
         return Err(CommandError::new("BOOLEAN_EMPTY"));
     }
@@ -635,6 +634,12 @@ fn run_expand(session: &mut Session, params: &Value) -> CommandResult {
         }
     }
     shift_curve(&mut curve, [f64::from(spec.origin[0]), f64::from(spec.origin[1])]);
+    Ok(curve)
+}
+
+fn run_expand(session: &mut Session, params: &Value) -> CommandResult {
+    let (index, compound, spec) = compound_target(session, params)?;
+    let curve = expanded_compound_curve(&spec, tolerance_of(params))?;
     let before = snapshot(session);
     session.document.objects[index].kind = ObjectKind::Curve(curve);
     commit_snapshot(session, COMPOUND_EXPAND, before, json!({ "id": compound.id.0 }))

@@ -9,8 +9,25 @@ pub enum ShapeKind { Rectangle, Triangle, Ellipse, RoundedRectangle, Star, Arrow
 #[serde(rename_all="snake_case")]
 pub enum SpiralStyle { Linear, Decaying, SemiCircular, CounterSemiCircular, Fibonacci, Plotted }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CornerStyle {
+    None,
+    #[default]
+    Rounded,
+    Straight,
+    Concave,
+    Cutout,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct CornerRecipe { pub radii: [f32;4], pub absolute: bool, pub lock: bool }
+pub struct CornerRecipe {
+    pub radii: [f32; 4],
+    pub absolute: bool,
+    pub lock: bool,
+    #[serde(default)]
+    pub styles: [CornerStyle; 4],
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TriangleRecipe { pub points: [f32;3] }
