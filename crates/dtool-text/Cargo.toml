@@ -1,0 +1,23 @@
+[package]
+name = "dtool-text"
+description = "Fonts, shaping and text layout"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+skrifa.workspace = true
+serde.workspace = true
+dtool-core.workspace = true
+
+parley = { workspace = true, features = ["system", "complex-scripts"] }
+memmap2.workspace = true
+regex.workspace = true
+spellbook.workspace = true
+libloading = "0.8"
+unicode-segmentation = "1.13.3"
+unicode-vo = "0.1"
+
+[dev-dependencies]
+dtool-mcp = { path = "../dtool-mcp" }

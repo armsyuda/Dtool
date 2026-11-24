@@ -1,0 +1,59 @@
+Unicode true
+!include "MUI2.nsh"
+!include "x64.nsh"
+
+Name "DTool"
+OutFile "${SETUP_EXE}"
+InstallDir "$LOCALAPPDATA\Programs\DTool"
+RequestExecutionLevel user
+SetCompressor lzma
+VIProductVersion "${DTOOL_VERSION}.0"
+VIAddVersionKey /LANG=1033 "ProductName" "DTool"
+VIAddVersionKey /LANG=1033 "FileDescription" "DTool Windows Installer"
+VIAddVersionKey /LANG=1033 "FileVersion" "${DTOOL_VERSION}"
+VIAddVersionKey /LANG=1033 "ProductVersion" "${DTOOL_VERSION}"
+
+!define UNINSTALL_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\DTool"
+!insertmacro MUI_PAGE_WELCOME
+!insertmacro MUI_PAGE_INSTFILES
+!insertmacro MUI_PAGE_FINISH
+!insertmacro MUI_UNPAGE_CONFIRM
+!insertmacro MUI_UNPAGE_INSTFILES
+!insertmacro MUI_LANGUAGE "Korean"
+!insertmacro MUI_LANGUAGE "English"
+
+Function .onInit
+  ${IfNot} ${RunningX64}
+    MessageBox MB_OK|MB_ICONSTOP "DTool requires 64-bit Windows."
+    Abort
+  ${EndIf}
+FunctionEnd
+
+Section "DTool"
+  SetShellVarContext current
+  SetOutPath "$INSTDIR"
+  File /r "${PAYLOAD}\*"
+  WriteUninstaller "$INSTDIR\Uninstall.exe"
+  CreateDirectory "$SMPROGRAMS\DTool"
+  CreateShortcut "$SMPROGRAMS\DTool\DTool.lnk" "$INSTDIR\dtool.exe"
+  CreateShortcut "$SMPROGRAMS\DTool\DTool User Guide.lnk" "$INSTDIR\docs\User-Guide.html"
+  CreateShortcut "$SMPROGRAMS\DTool\DTool MCP Guide.lnk" "$INSTDIR\docs\MCP-Guide.html"
+  WriteRegStr HKCU "${UNINSTALL_KEY}" "DisplayName" "DTool"
+  WriteRegStr HKCU "${UNINSTALL_KEY}" "DisplayVersion" "${DTOOL_VERSION}"
+  WriteRegStr HKCU "${UNINSTALL_KEY}" "InstallLocation" "$INSTDIR"
+  WriteRegStr HKCU "${UNINSTALL_KEY}" "UninstallString" '"$INSTDIR\Uninstall.exe"'
+  WriteRegDWORD HKCU "${UNINSTALL_KEY}" "NoModify" 1
+  WriteRegDWORD HKCU "${UNINSTALL_KEY}" "NoRepair" 1
+SectionEnd
+
+Section "Uninstall"
+  SetShellVarContext current
+  Delete "$SMPROGRAMS\DTool\DTool.lnk"
+  Delete "$SMPROGRAMS\DTool\DTool User Guide.lnk"
+  Delete "$SMPROGRAMS\DTool\DTool MCP Guide.lnk"
+  RMDir "$SMPROGRAMS\DTool"
+  !include "${UNINSTALL_FILES}"
+  Delete "$INSTDIR\Uninstall.exe"
+  RMDir "$INSTDIR"
+  DeleteRegKey HKCU "${UNINSTALL_KEY}"
+SectionEnd

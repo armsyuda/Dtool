@@ -1,0 +1,15 @@
+[package]
+name = "dtool-export"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+dtool-core.workspace = true
+dtool-protocol.workspace = true
+krilla.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+lcms2.workspace = true
+image.workspace = true
+zip.workspace = true

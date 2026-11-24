@@ -1,0 +1,11 @@
+[package]
+name = "dtool-io"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+dtool-core.workspace = true
+lopdf.workspace = true
+usvg.workspace = true
+roxmltree.workspace = true
+zip.workspace = true

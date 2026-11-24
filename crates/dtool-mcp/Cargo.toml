@@ -1,0 +1,20 @@
+[package]
+name = "dtool-mcp"
+description = "MCP server for AI control (stdio first, local HTTP later)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+dtool-render.workspace = true
+dtool-protocol.workspace = true
+dtool-core.workspace = true
+dtool-text.workspace = true
+dtool-export.workspace = true
+dtool-io.workspace = true
+serde_json.workspace = true
+
+[[bin]]
+name = "dtool-mcp"
+path = "src/main.rs"

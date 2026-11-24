@@ -1,0 +1,78 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/dtool-strings",
+    "crates/dtool-design",
+    "crates/dtool-protocol",
+    "crates/dtool-core",
+    "crates/dtool-text",
+    "crates/dtool-render",
+    "crates/dtool-tools",
+    "crates/dtool-io",
+    "crates/dtool-export",
+    "crates/dtool-ui",
+    "crates/dtool-app",
+    "crates/dtool-mcp",
+    "crates/dtool-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+publish = false
+
+[workspace.dependencies]
+dtool-strings = { path = "crates/dtool-strings" }
+dtool-design = { path = "crates/dtool-design" }
+dtool-protocol = { path = "crates/dtool-protocol" }
+dtool-core = { path = "crates/dtool-core" }
+dtool-text = { path = "crates/dtool-text" }
+dtool-render = { path = "crates/dtool-render" }
+dtool-tools = { path = "crates/dtool-tools" }
+dtool-io = { path = "crates/dtool-io" }
+dtool-export = { path = "crates/dtool-export" }
+dtool-ui = { path = "crates/dtool-ui" }
+eframe = "0.37"
+egui = "0.37"
+egui_tiles = { version = "0.18", features = ["serde"] }
+wgpu = "30"
+vello = "0.11"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+kurbo = "0.13"
+linesweeper = "0.5"
+i_overlay = "9.1"
+tiny-skia = "0.11"
+usvg = { version = "0.48", default-features = false, features = ["text"] }
+resvg = { version = "=0.48.1", default-features = false }
+roxmltree = "0.21.1"
+parley = { version = "0.12", default-features = false, features = ["std"] }
+skrifa = "0.42"
+memmap2 = "0.9"
+krilla = "0.8.2"
+lopdf = { version = "0.45", default-features = false }
+flate2 = "1"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "tiff", "bmp", "tga", "hdr", "exr"] }
+zune-jpeg = "0.5"
+zune-core = "0.5"
+png = "0.17"
+jpeg-encoder = "0.6"
+lcms2 = "=6.1.0"
+libwebp-sys = "=0.14.4"
+regex = "=1.13.1"
+spellbook = { git = "https://github.com/helix-editor/spellbook", rev = "119625e5b6fb374e818e2372c8860aa7202e16bb" }
+jxl-oxide = "=0.12.6"
+heic-rs = "=0.1.4"
+zip = { version = "9", default-features = false, features = ["deflate"] }
+plist = "1"
+uuid = { version = "1", features = ["v4"] }
+zstd = "0.13"
+boa_engine = "0.22.0"
+ureq = "2.12"
+
+[profile.validation]
+inherits = "release"
+opt-level = 2
+codegen-units = 64

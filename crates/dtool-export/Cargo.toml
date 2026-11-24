@@ -1,0 +1,31 @@
+[package]
+name = "dtool-export"
+description = "PNG, JPEG, PDF, SVG and other exports"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+base64.workspace = true
+fontdb = { version = "0.24", default-features = false, features = ["fs"] }
+resvg = { workspace = true, features = ["raster-images", "text"] }
+dtool-core.workspace = true
+dtool-render.workspace = true
+dtool-protocol.workspace = true
+dtool-text.workspace = true
+krilla.workspace = true
+kurbo.workspace = true
+lcms2.workspace = true
+libwebp-sys.workspace = true
+image.workspace = true
+zip.workspace = true
+jpeg-encoder.workspace = true
+tempfile = "3"
+
+serde.workspace = true
+
+serde_json.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "=0.62.2", features = ["Data_Pdf", "Graphics_Imaging", "Storage_Streams", "Win32_System_WinRT"] }

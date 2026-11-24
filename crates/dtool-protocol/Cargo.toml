@@ -1,0 +1,11 @@
+[package]
+name = "dtool-protocol"
+description = "Command, result and error types shared by GUI, MCP and CLI"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true

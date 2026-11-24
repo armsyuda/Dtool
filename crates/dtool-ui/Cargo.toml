@@ -1,0 +1,28 @@
+[package]
+name = "dtool-ui"
+description = "Panels, menus, toolbars and canvas widgets"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+egui.workspace = true
+egui_tiles.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+dtool-strings.workspace = true
+dtool-design.workspace = true
+dtool-core.workspace = true
+dtool-protocol.workspace = true
+dtool-tools.workspace = true
+dtool-io.workspace = true
+
+dtool-export.workspace = true
+dtool-render.workspace = true
+resvg = { workspace = true, features = ["text"] }
+
+arboard = "=3.7.0"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "=0.61.2", features = ["Win32_Graphics_Gdi", "Win32_Storage_Xps", "Win32_System_Com", "Win32_System_DataExchange", "Win32_System_Memory", "Win32_System_Ole", "Win32_UI_ColorSystem", "Win32_UI_Controls_Dialogs", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell_Common"] }

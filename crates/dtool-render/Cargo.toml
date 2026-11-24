@@ -1,0 +1,15 @@
+[package]
+name = "dtool-render"
+description = "Display list and canvas drawing"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+dtool-core.workspace = true
+dtool-text.workspace = true
+serde.workspace = true
+egui.workspace = true
+dtool-design.workspace = true
+serde_json.workspace = true
