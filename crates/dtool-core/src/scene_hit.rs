@@ -199,7 +199,7 @@ pub fn selection_quad(scene: &Scene, doc: &Document, id: ObjectId) -> Option<cra
         {
             visible_masked_bounds(scene, id, &matrix)
         } else {
-            symbol_content_bounds(doc, root, Some(scene))
+            group_content_bounds(doc, root, Some(scene))
         }?;
         Some(crate::geometry::rect_quad(bounds, &matrix))
     })
@@ -225,21 +225,39 @@ fn visible_masked_bounds(scene: &Scene, id: ObjectId, matrix: &[f32; 6]) -> Opti
     (right > left && bottom > top).then_some([left, top, right - left, bottom - top])
 }
 
-pub(crate) fn symbol_content_bounds(doc: &Document, root: &crate::Object, scene: Option<&Scene>) -> Option<[f32; 4]> {
-    if !root.is_group() || !doc.symbols.instances.iter().any(|entry| entry.root == root.id) {
+pub(crate) fn group_content_bounds(doc: &Document, root: &crate::Object, scene: Option<&Scene>) -> Option<[f32; 4]> {
+    if !root.is_group() {
         return None;
+    }
+    let symbol = doc.symbols.instances.iter().any(|entry| entry.root == root.id);
+    if !symbol && root.is_layer_folder() {
+        return None;
+    }
+    let subtree = doc.subtree_ids(root.id);
+    if !symbol && doc.layer_masks.iter().any(|mask| subtree.contains(&mask.object)) {
+        return None;
+    }
+    let mut members = std::collections::HashSet::new();
+    let mut has_hidden_member = !crate::scene::is_drawn(doc, root.id);
+    for object in doc.objects.iter().filter(|object| subtree.contains(&object.id)) {
+        // Constraints and masks can use the stored frame independently of the children.
+        if !symbol && (object.vector_crop.is_some() || !object.clip_role.is_none()
+            || (object.id != root.id && object.constraint.is_some()))
+        {
+            return None;
+        }
+        has_hidden_member |= !object.pickable;
+        if !object.is_group() {
+            members.insert(object.id);
+        }
     }
     let matrix = crate::geometry::object_matrix(root);
     let inverse = crate::geometry::invert_matrix(&matrix)?;
-    let subtree = doc.subtree_ids(root.id);
-    let members: std::collections::HashSet<_> = doc.objects.iter()
-        .filter(|object| subtree.contains(&object.id) && !object.is_group())
-        .map(|object| object.id).collect();
     let local = |quad: crate::scene::Quad| quad.map(|point| crate::geometry::apply_matrix(&inverse, point));
     let points = match scene {
         Some(scene) => scene.quads.iter().filter(|(id, _)| members.contains(id))
             .flat_map(|(_, quad)| local(*quad)).collect(),
-        None => doc.objects.iter().filter(|object| members.contains(&object.id) && crate::scene::is_drawn(doc, object.id))
+        None => doc.objects.iter().filter(|object| members.contains(&object.id) && (!has_hidden_member || crate::scene::is_drawn(doc, object.id)))
             .flat_map(|object| local(crate::geometry::object_world_quad(object))).collect(),
     };
     contours_bounds(&[points]).map(|[x0, y0, x1, y1]| [x0, y0, x1 - x0, y1 - y0])

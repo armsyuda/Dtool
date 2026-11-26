@@ -1,8 +1,8 @@
-use crate::command::{resolve_target_ids, selection_bounds, Session};
+use crate::command::{resolve_target_ids, selection_bounds, transform_members, Session};
 use crate::commands::curve_edit::{commit_contours, editable_curve, world_contours};
 use crate::curve::PointId;
 use crate::data_merge::layout::{object_page_index, spread_ranges};
-use std::ops::Range;
+use std::{collections::{HashMap, HashSet}, ops::Range};
 use crate::object::ObjectId;
 use dtool_protocol::{Command, CommandError};
 use serde::Deserialize;
@@ -233,6 +233,34 @@ fn spread_updates(
     Ok(updates)
 }
 
+fn alignment_members(doc: &crate::Document, ids: &[ObjectId]) -> Result<HashMap<ObjectId, Vec<ObjectId>>, CommandError> {
+    let members = transform_members(doc, ids);
+    let mut targets: HashSet<_> = ids.iter().copied().collect();
+    // Overlapping selections can assign the same layer two positions, or move the key as a child.
+    if targets.len() != ids.len() || members.values().flatten().any(|&id| !targets.insert(id)) {
+        return Err(CommandError::invalid_params());
+    }
+    Ok(members)
+}
+
+fn translated_objects(
+    doc: &crate::Document, ids: &[ObjectId], moves: &[(ObjectId, [f32; 2])],
+) -> Result<Vec<crate::Object>, CommandError> {
+    let members = alignment_members(doc, ids)?;
+    let mut objects = Vec::new();
+    for &(root, [dx, dy]) in moves {
+        for id in std::iter::once(&root).chain(members.get(&root).into_iter().flatten()) {
+            let mut object = doc.get_object(*id).ok_or_else(CommandError::not_found)?.clone();
+            object.pos = [object.pos[0] + dx, object.pos[1] + dy];
+            if !object.pos.iter().all(|coordinate| coordinate.is_finite()) {
+                return Err(CommandError::invalid_params());
+            }
+            objects.push(object);
+        }
+    }
+    Ok(objects)
+}
+
 fn bounds(session: &Session, id: ObjectId) -> Result<[f32; 4], CommandError> {
     selection_bounds(&session.document, &[id]).ok_or_else(CommandError::not_found)
 }
@@ -326,7 +354,8 @@ pub fn can_execute(session: &Session, command: &Command) -> Option<bool> {
         let Ok(args) = parse(&command.params) else { return false };
         let Ok(ids) = resolve_target_ids(&session.document, &args.ids, &session.selection) else { return false };
         let Ok(layout) = layout_spread(session, &args, &ids) else { return false };
-        deltas(session, &op, &args, &ids, layout.as_ref()).is_ok()
+        (layout.is_some() || alignment_members(&session.document, &ids).is_ok())
+            && deltas(session, &op, &args, &ids, layout.as_ref()).is_ok()
     })())
 }
 
@@ -347,26 +376,19 @@ pub fn run(session: &mut Session, command: &Command) -> Option<Result<serde_json
             .filter(|(_, d)| d[0].abs() > 1e-4 || d[1].abs() > 1e-4)
             .collect();
         let moved: Vec<ObjectId> = moves.iter().map(|(id, _)| *id).collect();
-        if !moved.is_empty() {
-            let (old, new) = if let Some(spread) = &layout {
-                let new = spread_updates(session, spread, &moves)?;
-                let ids: Vec<_> = new.iter().map(|layer| layer.id).collect();
-                let old = session.snapshot_objects(&ids);
-                for layer in &new {
-                    if let Some(current) = session.document.find_object_mut(layer.id.0) {
-                        *current = layer.clone();
-                    }
+        let new = if let Some(spread) = &layout {
+            spread_updates(session, spread, &moves)?
+        } else {
+            translated_objects(&session.document, &ids, &moves)?
+        };
+        if !new.is_empty() {
+            let affected: Vec<_> = new.iter().map(|layer| layer.id).collect();
+            let old = session.snapshot_objects(&affected);
+            for layer in &new {
+                if let Some(current) = session.document.find_object_mut(layer.id.0) {
+                    *current = layer.clone();
                 }
-                (old, new)
-            } else {
-                let old = session.snapshot_objects(&moved);
-                for (id, d) in &moves {
-                    if let Some(obj) = session.document.find_object_mut(id.0) {
-                        obj.pos = [obj.pos[0] + d[0], obj.pos[1] + d[1]];
-                    }
-                }
-                (old, session.snapshot_objects(&moved))
-            };
+            }
             let redo = Command {
                 name: "object.restore".to_string(),
                 params: serde_json::json!({ "objects": new }),

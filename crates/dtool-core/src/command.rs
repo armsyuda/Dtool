@@ -551,7 +551,7 @@ fn extend_transform_targets(ids: &[ObjectId], members: &std::collections::HashMa
     targets
 }
 
-fn transform_members(doc: &Document, ids: &[ObjectId]) -> std::collections::HashMap<ObjectId, Vec<ObjectId>> {
+pub(crate) fn transform_members(doc: &Document, ids: &[ObjectId]) -> std::collections::HashMap<ObjectId, Vec<ObjectId>> {
     let mut sets: std::collections::HashMap<_, Vec<_>> = selected_groups(doc, ids).into_iter()
         .map(|id| (id, crate::commands::arrange::descendant_ids(doc, &[id]).into_iter().skip(1).collect()))
         .collect();
@@ -866,7 +866,7 @@ pub fn transform_box(doc: &Document, object: &Object) -> [f32; 4] {
 }
 
 fn transform_geometry(doc: &Document, object: &Object) -> Option<Object> {
-    let [x, y, w, h] = crate::scene_hit::symbol_content_bounds(doc, object, None)?;
+    let [x, y, w, h] = crate::scene_hit::group_content_bounds(doc, object, None)?;
     if !(w > 0.0 && h > 0.0) { return None; }
     let mut visual = object.clone();
     let centre = crate::geometry::apply_matrix(&crate::geometry::object_matrix(object), [x + w * 0.5, y + h * 0.5]);

@@ -118,7 +118,7 @@ fn rotated_fill_scene(document: &dtool_core::Document, scene: &Scene, angle: f32
     use dtool_core::paint::{Paint, transform_paint_matrix};
 
     // Geometry-dependent compositing needs the original document coordinate system.
-    if !document.layer_masks.is_empty() || document.objects.iter().any(|object| {
+    if document.objects.iter().any(|object| {
         object.tone_blend.is_some() || object.effects.iter().any(|effect| effect.enabled)
     }) {
         return None;
@@ -466,6 +466,16 @@ pub(crate) fn clip_frame_segment(a: [f32; 2], b: [f32; 2], origin: [f32; 2], ext
 fn screen(rect: Rect, view: &ViewState, point: [f32; 2]) -> Pos2 {
     let v = dtool_core::doc_to_view(view, point);
     egui::pos2(rect.min.x + v[0], rect.min.y + v[1])
+}
+
+fn viewport_document_bounds(rect: Rect, view: &ViewState, density: f32) -> Rect {
+    // Include the antialiasing fringe and the extra device-pixel bands used for table lines.
+    let padded = rect.expand(2.0 / density);
+    let corners = [padded.left_top(), padded.right_top(), padded.right_bottom(), padded.left_bottom()];
+    Rect::from_points(&corners.map(|point| {
+        let [x, y] = dtool_core::view::view_to_doc(view, (point - rect.min).into());
+        egui::pos2(x, y)
+    }))
 }
 
 fn paint_thin_table_rect(painter: &Painter, points: &[Pos2], fill: Color32, density: f32) -> bool {
@@ -1484,6 +1494,9 @@ impl AppCanvas {
             }
         }
         let moved = (!composited).then(|| self.translated_ink(session, &view)).flatten();
+        let density = ui.ctx().pixels_per_point();
+        let viewport = viewport_document_bounds(rect, &view, density);
+        let moved_viewport = moved.as_ref().map(|(_, view)| viewport_document_bounds(rect, view, density));
         let prims = std::mem::take(&mut self.scene.prims);
         let mut clip_stack: Vec<Rect> = Vec::new();
         let mut effected: HashMap<ObjectId, bool> = HashMap::new();
@@ -1506,16 +1519,16 @@ impl AppCanvas {
             if composited {
                 match prim {
                     Prim::Text { object, lines, opacity } => self.paint_text_annotations(&clipped, rect, &view, session, *object, lines, *opacity),
-                    Prim::Handle { .. } => self.paint_prim(ui, &clipped, rect, &view, session, index, prim, None),
+                    Prim::Handle { .. } => self.paint_prim(ui, &clipped, rect, &view, viewport, session, index, prim, None),
                     _ => {}
                 }
                 continue;
             }
             let id = prim_object(prim);
             let source = id.and_then(|id| objects.get(&id).copied());
-            let object_view = moved.as_ref().filter(|(ids, _)| {
+            let (object_view, object_viewport) = moved.as_ref().zip(moved_viewport).filter(|((ids, _), _)| {
                 id.is_some_and(|id| ids.contains(&id))
-            }).map_or(&view, |(_, moved_view)| moved_view);
+            }).map_or((&view, viewport), |((_, moved_view), bounds)| (moved_view, bounds));
             if view.canvas_flags.mask_view.is_none()
                 && let Some(object) = id.filter(|id| {
                     staged_ids.contains(id)
@@ -1550,7 +1563,7 @@ impl AppCanvas {
                 }
                 continue;
             }
-            self.paint_prim(ui, &clipped, rect, object_view, session, index, prim, source);
+            self.paint_prim(ui, &clipped, rect, object_view, object_viewport, session, index, prim, source);
         }
         self.scene.prims = prims;
         if !view.canvas_flags.preview_mode && view.canvas_flags.mask_view.is_none() {
@@ -1724,14 +1737,18 @@ impl AppCanvas {
 
     #[allow(clippy::too_many_arguments)]
     fn paint_prim(
-        &mut self, ui: &Ui, painter: &Painter, rect: Rect, view: &ViewState, session: &Session,
-        index: usize, prim: &Prim, source: Option<&dtool_core::Object>,
+        &mut self, ui: &Ui, painter: &Painter, rect: Rect, view: &ViewState, viewport: Rect,
+        session: &Session, index: usize, prim: &Prim, source: Option<&dtool_core::Object>,
     ) {
         let zoom = view.zoom.max(1e-4);
         let version = session.document.version;
         match prim {
             Prim::Page { .. } => {}
             Prim::Fill { contours, origin, paint, opacity, .. } => {
+                let Some([left, top, right, bottom]) = contours_bounds(contours) else { return };
+                if !viewport.intersects(Rect::from_min_max(egui::pos2(left, top), egui::pos2(right, bottom))) {
+                    return;
+                }
                 let transparency = view.canvas_flags.mask_view.is_none()
                     .then_some(source)
                     .flatten()
@@ -1750,7 +1767,6 @@ impl AppCanvas {
                     painter.add(egui::Shape::convex_polygon(points, fill, Stroke::NONE));
                     return;
                 }
-                let Some([left, top, right, bottom]) = contours_bounds(contours) else { return };
                 let clip = painter.clip_rect().intersect(rect);
                 if !clip.is_positive() { return; }
                 let rotation_deg = (view.rotation_deg != 0.0
@@ -1841,6 +1857,9 @@ impl AppCanvas {
             }
             Prim::Image { object, quad, opacity, .. } => {
                 let Some(source) = source else { return };
+                if !viewport.intersects(Rect::from_points(&quad.map(|[x, y]| egui::pos2(x, y)))) {
+                    return;
+                }
                 let doc = &session.document;
                 let texture = if source.path_brush.is_some() {
                     let [top_left, _, bottom_right, _] = *quad;
