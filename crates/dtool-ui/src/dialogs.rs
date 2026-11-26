@@ -3,12 +3,13 @@ use dtool_core::document::Units;
 use dtool_core::command::Session;
 use dtool_core::workspace::{CloseAnswer, ContextId};
 use dtool_strings::{format, text};
-use crate::dialog_chrome::{show_modal, ClosePolicy, DialogResult};
+use crate::dialog_chrome::{options_group, options_scroll, show_modal, ClosePolicy, DialogResult};
 
 pub mod locked_delete;
 pub mod resource_manager;
 pub mod package;
 pub mod compound;
+pub(crate) mod move_duplicate;
 pub mod document_setup;
 pub mod export;
 pub mod longdoc;
@@ -35,6 +36,7 @@ pub struct NewDocumentDialogState {
     saved_presets: SavedPresets,
     favourites_only: bool,
     reset_dimension_edits: bool,
+    option_icons: crate::icon_cache::IconCache,
 }
 
 impl Default for NewDocumentDialogState {
@@ -52,6 +54,7 @@ impl Default for NewDocumentDialogState {
             saved_presets: Default::default(),
             favourites_only: false,
             reset_dimension_edits: true,
+            option_icons: Default::default(),
         }
     }
 }
@@ -59,9 +62,13 @@ impl Default for NewDocumentDialogState {
 pub const NEW_DOCUMENT_MENU: &str = "file.new";
 pub(crate) const NEW_FROM_LAST_PRESET_MENU: &str = "file.new_from_last_preset";
 pub(crate) const NEW_FROM_FAVOURITES_MENU: &str = "file.new_from_favourites";
-pub const NEW_DOCUMENT_PRESETS: [&str; 9] = ["A3", "A4", "A5", "B5 (JIS)", "Letter", "Legal", "Square 1080", "Full HD", "4K UHD"];
-const CMYK_DOCUMENT_PRESETS: [&str; 6] = [
+pub const NEW_DOCUMENT_PRESETS: [&str; 18] = [
+    "A3", "A4", "A5", "B5 (JIS)", "Letter", "Legal", "Ledger", "Trade Paperback", "Half Letter", "Oversize Magazine",
+    "Square 1080", "Full HD", "4K UHD", "4R", "5R", "6R", "8R", "10R",
+];
+const CMYK_DOCUMENT_PRESETS: [&str; 10] = [
     "A3 (CMYK)", "A4 (CMYK)", "A5 (CMYK)", "B5 (JIS) (CMYK)", "Letter (CMYK)", "Legal (CMYK)",
+    "Ledger (CMYK)", "Trade Paperback (CMYK)", "Half Letter (CMYK)", "Oversize Magazine (CMYK)",
 ];
 pub const NEW_DOCUMENT_UNITS: [Units; 5] = [Units::Px, Units::Mm, Units::Cm, Units::In, Units::Pt];
 
@@ -109,7 +116,7 @@ impl NewDocumentDialogState {
         if let Some(preset) = &self.preset {
             params["preset"] = serde_json::json!(preset);
         }
-        self.options.write_params(&mut params);
+        self.options.write_params(&mut params, self.units);
         dtool_core::Command::with_params("doc.new", params)
     }
 }
@@ -154,7 +161,6 @@ pub(crate) fn new_document_dialog_result(
 ) -> NewDocumentOutcome {
     let (title, width, height, units, dpi, pages, preset, ok, cancel) = get_dialog_labels();
     let unit_options = new_document_unit_options();
-    let unit_labels: Vec<&str> = unit_options.iter().map(|(_, caption)| caption.as_str()).collect();
     state.load_saved_presets();
     state.options.kind.get_or_insert_with(|| {
         if dtool_core::commands::persona::layout_active() { DocumentKind::LayoutPages } else { DocumentKind::VectorArtboard }
@@ -166,143 +172,190 @@ pub(crate) fn new_document_dialog_result(
     let mut invalid_dimension = false;
     let mut recent = None;
     let (key_action, button_action) = show_modal(ui.ctx(), "dialog.new_document", &title, ClosePolicy::CancelOnly, true, |ui| {
-        let dialog_width = (ui.ctx().content_rect().width() - 36.0).clamp(450.0, 1020.0);
-        let body_height = (ui.ctx().content_rect().height() - 190.0).clamp(230.0, 550.0);
-        let recent_width = (dialog_width * 0.21).min(206.0);
-        let draw_divider = |ui: &mut egui::Ui| {
-            let (divider, _) = ui.allocate_exact_size(egui::vec2(1.0, body_height), egui::Sense::hover());
-            ui.painter().vline(divider.center().x, divider.y_range(), egui::Stroke::new(1.0, dtool_design::color("border")));
-        };
+        let viewport = ui.ctx().content_rect();
+        let dialog_width = (viewport.width() - 44.0).clamp(280.0, 1140.0);
+        let body_height = (viewport.height() - 180.0).clamp(130.0, 630.0);
+        let show_recent_column = dialog_width >= 760.0;
+        let stacked = dialog_width < 560.0;
+        let gap = 10.0;
+        let inset = 2.0 * (dtool_design::space("sm") + dtool_design::stroke_width("thin"));
+        let recent_width = (dialog_width * 0.19).clamp(148.0, 202.0);
+        let settings_width = (dialog_width * 0.29).clamp(246.0, 328.0);
         ui.set_width(dialog_width);
-        ui.horizontal_top(|ui| {
-            ui.vertical(|ui| {
-                ui.set_width(recent_width);
-                ui.label(egui::RichText::new(text("pref.home.recent")).strong());
-                egui::ScrollArea::vertical().id_salt("new_document.recent")
-                    .max_height(body_height - 50.0).auto_shrink([false, false]).show(ui, |ui| {
-                        let paths = if template_tools.as_ref().is_some_and(|(_, prefs)| !prefs.home_show_recent) {
-                            &[][..]
-                        } else {
-                            workspace.recent()
-                        };
-                        if paths.is_empty() { ui.weak(text("dialog.new_document.no_recent")); }
-                        for path in paths {
-                            let name = path.file_name().unwrap_or(path.as_os_str()).to_string_lossy();
-                            if ui.add(egui::Button::new(name.as_ref()).truncate())
-                                .on_hover_text(path.to_string_lossy()).clicked() {
-                                recent = Some(path.clone());
-                            }
+        let mut draw_recent = |ui: &mut egui::Ui, height: f32| {
+            egui::ScrollArea::vertical().id_salt("new_document.recent")
+                .max_height(height).auto_shrink([false, !show_recent_column]).show(ui, |ui| {
+                    let paths = if template_tools.as_ref().is_some_and(|(_, prefs)| !prefs.home_show_recent) {
+                        &[][..]
+                    } else {
+                        workspace.recent()
+                    };
+                    if paths.is_empty() { ui.weak(text("dialog.new_document.no_recent")); }
+                    for path in paths {
+                        let name = path.file_name().unwrap_or(path.as_os_str()).to_string_lossy();
+                        if ui.add(egui::Button::new(name.as_ref()).truncate())
+                            .on_hover_text(path.to_string_lossy()).clicked() {
+                            recent = Some(path.clone());
                         }
-                    });
-                if template_tools.is_some() && dtool_design::button(ui, text("menu.file.open")).clicked() {
-                    *template_action = Some(crate::home::HomeAction::Browse);
+                    }
+                });
+            if template_tools.is_some() && dtool_design::button(ui, text("menu.file.open")).clicked() {
+                *template_action = Some(crate::home::HomeAction::Browse);
+            }
+        };
+        let mut draw_presets = |ui: &mut egui::Ui, state: &mut NewDocumentDialogState, height: f32| {
+            let search = ui.add(egui::TextEdit::singleline(&mut state.preset_search)
+                .hint_text(text("dialog.new_document.search"))
+                .desired_width(ui.available_width()));
+            text_editing = search.has_focus() || search.lost_focus();
+            let filter_changed = dtool_design::toggle(ui, &mut state.favourites_only, text("pref.home.favourites")).changed();
+            if filter_changed { state.select_visible_favourite(); }
+            let (interacted, create) = show_document_presets(ui, state, (height - 52.0).max(58.0));
+            preset_interacted = interacted || filter_changed;
+            create_from_preset = create;
+        };
+        let mut draw_settings = |ui: &mut egui::Ui, state: &mut NewDocumentDialogState| {
+            let name = state.preset.as_deref().unwrap_or(preset.as_str());
+            ui.add(egui::Label::new(egui::RichText::new(name).strong()).truncate());
+            if state.options.show_kind(ui, &mut state.option_icons) {
+                state.error_message = None;
+            }
+            let layout = state.options.kind == Some(DocumentKind::LayoutPages);
+            let (area, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 100.0), egui::Sense::hover());
+            ui.painter().rect_filled(area, 4.0, dtool_design::theme::surface(ui.ctx(), "pasteboard"));
+            if state.options.facing_preview() && state.width > 0.0 && state.height > 0.0 {
+                let half_width = (76.0 * (state.width / state.width.max(state.height))) * 0.5;
+                let offset = half_width + 1.0;
+                if !state.options.start_on_right() {
+                    paint_page_preview(ui, area.center() - egui::vec2(offset, 0.0), state.width, state.height, 76.0);
+                }
+                if state.options.start_on_right() || state.pages > 1 {
+                    paint_page_preview(ui, area.center() + egui::vec2(offset, 0.0), state.width, state.height, 76.0);
+                }
+            } else {
+                paint_page_preview(ui, area.center(), state.width, state.height, 76.0);
+            }
+            options_group(ui, text("dialog.new_document.dimensions"));
+            ui.horizontal(|ui| {
+                ui.label(text("doc_setup.orientation"));
+                let landscape = state.width > state.height;
+                let can_rotate = state.width != state.height;
+                for (label, target) in [("dialog.new_document.portrait", false), ("dialog.new_document.landscape", true)] {
+                    let direction = ui.add_enabled_ui(can_rotate, |ui| {
+                        orientation_button(ui, target, landscape == target, text(label))
+                    }).inner;
+                    if direction.clicked() && landscape != target {
+                        std::mem::swap(&mut state.width, &mut state.height);
+                        state.preset = None;
+                        state.error_message = None;
+                    }
                 }
             });
-            draw_divider(ui);
-            ui.vertical(|ui| {
-                ui.set_width(dialog_width - recent_width - 272.0);
-                let search = ui.add(egui::TextEdit::singleline(&mut state.preset_search)
-                    .hint_text(text("dialog.new_document.search"))
-                    .desired_width(ui.available_width()));
-                text_editing = search.has_focus() || search.lost_focus();
-                let filter_changed = ui.toggle_value(&mut state.favourites_only, text("pref.home.favourites")).changed();
-                if filter_changed { state.select_visible_favourite(); }
-                let (interacted, create) = show_document_presets(ui, state, body_height - 50.0);
-                preset_interacted = interacted || filter_changed;
-                create_from_preset = create;
-            });
+            let mut values = [f64::from(state.width), f64::from(state.height), f64::from(state.dpi), f64::from(state.pages)];
+            let mut unit = unit_options.iter().position(|(u, _)| *u == state.units).unwrap_or(0);
+            let mut edited = false;
+            let reset = std::mem::take(&mut state.reset_dimension_edits);
+            let mut dimension = |ui: &mut egui::Ui, label: &str, value: &mut f64, decimals| {
+                let label_widget = ui.label(label);
+                let id = ui.make_persistent_id(label);
+                if reset { dtool_design::numeric_cancel_edit(ui.ctx(), id); }
+                let spec = dtool_design::NumericSpec::new("").width(96.0).decimals(decimals);
+                edited |= dtool_design::numeric_value(ui, id, value, &spec)
+                    .labelled_by(label_widget.id).changed();
+                let input = dtool_design::numeric_state(ui.ctx(), id);
+                invalid_dimension |= input.edited && input.buffer.as_deref()
+                    .is_some_and(|draft| spec.parse_text(draft).is_none());
+                ui.end_row();
+            };
+            let unit_changed = egui::Grid::new("dialog.new_document.fields").num_columns(2).show(ui, |ui| {
+                for (label, value) in [width.as_str(), height.as_str()].into_iter().zip(&mut values[..2]) {
+                    dimension(ui, label, value, 2);
+                }
 
-            draw_divider(ui);
-            ui.vertical(|ui| {
-                ui.set_width(232.0);
-                egui::ScrollArea::vertical().id_salt("new_document.settings")
-                    .max_height(body_height).auto_shrink([false, false]).show(ui, |ui| {
-                        let name = state.preset.as_deref().unwrap_or(preset.as_str());
-                        ui.add(egui::Label::new(egui::RichText::new(name).strong()).truncate());
-                        if state.options.show_kind(ui) {
-                            state.error_message = None;
-                        }
-                        let layout = state.options.kind == Some(DocumentKind::LayoutPages);
-                        let (area, _) = ui.allocate_exact_size(egui::vec2(232.0, 100.0), egui::Sense::hover());
-                        if state.options.facing_preview() && state.width > 0.0 && state.height > 0.0 {
-                            let half_width = (76.0 * (state.width / state.width.max(state.height))) * 0.5;
-                            let offset = half_width + 1.0;
-                            if !state.options.start_on_right() {
-                                paint_page_preview(ui, area.center() - egui::vec2(offset, 0.0), state.width, state.height, 76.0);
-                            }
-                            if state.options.start_on_right() || state.pages > 1 {
-                                paint_page_preview(ui, area.center() + egui::vec2(offset, 0.0), state.width, state.height, 76.0);
-                            }
-                        } else {
-                            paint_page_preview(ui, area.center(), state.width, state.height, 76.0);
-                        }
-                        ui.horizontal(|ui| {
-                            let landscape = state.width > state.height;
-                            let can_rotate = state.width != state.height;
-                            for (label, target) in [("dialog.new_document.portrait", false), ("dialog.new_document.landscape", true)] {
-                                let direction = egui::Button::selectable(landscape == target, text(label));
-                                if ui.add_enabled(can_rotate, direction).clicked() && landscape != target {
-                                    std::mem::swap(&mut state.width, &mut state.height);
-                                    state.preset = None;
-                                    state.error_message = None;
-                                }
-                            }
+                ui.label(units.as_str());
+                let former_unit = unit;
+                ui.horizontal_wrapped(|ui| {
+                    for (index, (value, caption)) in unit_options.iter().enumerate() {
+                        let response = dtool_design::with_icon_selection(ui, |ui| {
+                            ui.add(egui::Button::selectable(index == unit, crate::captions::units_identity(*value)))
                         });
-                        ui.separator();
-                        let mut values = [f64::from(state.width), f64::from(state.height), f64::from(state.dpi), f64::from(state.pages)];
-                        let mut unit = unit_options.iter().position(|(u, _)| *u == state.units).unwrap_or(0);
-                        let mut edited = false;
-                        let reset = std::mem::take(&mut state.reset_dimension_edits);
-                        let mut dimension = |ui: &mut egui::Ui, label: &str, value: &mut f64, decimals| {
-                            let label_widget = ui.label(label);
-                            let id = ui.make_persistent_id(label);
-                            if reset { dtool_design::numeric_cancel_edit(ui.ctx(), id); }
-                            let spec = dtool_design::NumericSpec::new("").width(96.0).decimals(decimals);
-                            edited |= dtool_design::numeric_value(ui, id, value, &spec)
-                                .labelled_by(label_widget.id).changed();
-                            let input = dtool_design::numeric_state(ui.ctx(), id);
-                            invalid_dimension |= input.edited && input.buffer.as_deref()
-                                .is_some_and(|draft| spec.parse_text(draft).is_none());
-                            ui.end_row();
-                        };
-                        let unit_changed = egui::Grid::new("dialog.new_document.fields").num_columns(2).show(ui, |ui| {
-                            for (label, value) in [width.as_str(), height.as_str()].into_iter().zip(&mut values[..2]) {
-                                dimension(ui, label, value, 2);
-                            }
-
-                            ui.label(units.as_str());
-                            let unit_changed = dtool_design::dropdown(ui, "dialog.new_document.units", &mut unit, &unit_labels).changed();
-                            ui.end_row();
-
-                            for (index, (label, value)) in [dpi.as_str(), pages.as_str()].into_iter().zip(&mut values[2..]).enumerate() {
-                                if index == 0 || layout {
-                                    dimension(ui, label, value, 0);
-                                } else if reset {
-                                    dtool_design::numeric_cancel_edit(ui.ctx(), ui.make_persistent_id(label));
-                                }
-                            }
-                            unit_changed
-                        }).inner;
-                        edited |= unit_changed;
-                        if edited {
-                            state.width = values[0] as f32;
-                            state.height = values[1] as f32;
-                            state.dpi = values[2] as f32;
-                            state.pages = values[3].max(0.0).round() as u32;
-                            if let Some((units, _)) = unit_options.get(unit) {
-                                state.convert_units(*units);
-                            }
-                            state.preset = None;
-                            state.error_message = None;
+                        if response
+                            .on_hover_text(caption).clicked() {
+                            unit = index;
                         }
-                        let layout_changed = layout && state.options.show_layout(ui);
-                        if state.options.show(ui, state.units, state.dpi, reset, &mut invalid_dimension) || layout_changed {
-                            state.preset = None;
-                            state.error_message = None;
-                        }
+                    }
+                });
+                ui.end_row();
+
+                for (index, (label, value)) in [dpi.as_str(), pages.as_str()].into_iter().zip(&mut values[2..]).enumerate() {
+                    if index == 0 || layout {
+                        dimension(ui, label, value, 0);
+                    } else if reset {
+                        dtool_design::numeric_cancel_edit(ui.ctx(), ui.make_persistent_id(label));
+                    }
+                }
+                unit != former_unit
+            }).inner;
+            edited |= unit_changed;
+            if edited {
+                state.width = values[0] as f32;
+                state.height = values[1] as f32;
+                state.dpi = values[2] as f32;
+                state.pages = values[3].max(0.0).round() as u32;
+                if let Some((units, _)) = unit_options.get(unit) {
+                    state.convert_units(*units);
+                }
+                state.preset = None;
+                state.error_message = None;
+            }
+            let layout_changed = layout && state.options.show_layout(ui);
+            if state.options.show(ui, state.units, state.dpi, reset, &mut invalid_dimension) || layout_changed {
+                state.preset = None;
+                state.error_message = None;
+            }
+        };
+        if !show_recent_column {
+            egui::CollapsingHeader::new(text("pref.home.recent"))
+                .id_salt("new_document.recent_compact")
+                .show(ui, |ui| draw_recent(ui, 68.0));
+        }
+        if stacked {
+            options_scroll(ui, "new_document.compact", (body_height - 42.0).max(110.0), |ui| {
+                    dtool_design::dialog_section(ui, |ui| draw_presets(ui, state, 214.0));
+                    dtool_design::dialog_section(ui, |ui| draw_settings(ui, state));
+                });
+        } else {
+            let height = if show_recent_column { body_height } else { (body_height - 42.0).max(110.0) };
+            let preset_width = dialog_width - settings_width - gap
+                - if show_recent_column { recent_width + gap } else { 0.0 };
+            ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing.x = gap;
+                if show_recent_column {
+                    ui.vertical(|ui| {
+                        ui.set_width(recent_width);
+                        dtool_design::dialog_section(ui, |ui| {
+                            ui.set_width(recent_width - inset);
+                            dtool_design::panel_header(ui, text("pref.home.recent"));
+                            draw_recent(ui, (height - 53.0 - inset).max(58.0));
+                        });
+                    });
+                }
+                ui.vertical(|ui| {
+                    ui.set_width(preset_width);
+                    dtool_design::dialog_section(ui, |ui| {
+                        ui.set_width(preset_width - inset);
+                        draw_presets(ui, state, height - inset);
+                    });
+                });
+                ui.vertical(|ui| {
+                    ui.set_width(settings_width);
+                    dtool_design::dialog_section(ui, |ui| {
+                        ui.set_width(settings_width - inset);
+                        options_scroll(ui, "new_document.settings", height - inset, |ui| draw_settings(ui, state));
+                    });
                 });
             });
-        });
+        }
 
         if let Some((templates, prefs)) = template_tools {
             if let Some(action) = templates.show_template_links(ui, prefs) {
@@ -333,7 +386,8 @@ pub(crate) fn new_document_dialog_result(
         }).inner
     });
     if let Some(path) = recent {
-        return match workspace.open_path(&path) {
+        let command = dtool_protocol::Command::with_params("doc.open", serde_json::json!({ "path": path }));
+        return match workspace.run(dtool_core::Scope::active(), command).1 {
             Ok(_) => NewDocumentOutcome::OpenedRecent,
             Err(error) => {
                 state.error_message = Some(text(&error.message_key).to_string());
@@ -356,9 +410,22 @@ pub(crate) fn new_document_dialog_result(
     }
 }
 
+pub(super) fn orientation_button(ui: &mut egui::Ui, landscape: bool, selected: bool, label: &str) -> egui::Response {
+    let response = dtool_design::with_icon_selection(ui, |ui| {
+        ui.add_sized([24.0, 23.0], egui::Button::new("").selected(selected))
+    });
+    let ink = if selected { dtool_design::selected_icon_ink(ui) } else { ui.style().interact(&response).fg_stroke.color };
+    let size = if landscape { egui::vec2(15.0, 10.0) } else { egui::vec2(10.0, 15.0) };
+    let page = egui::Rect::from_center_size(response.rect.center(), size);
+    ui.painter().rect_stroke(page, 1.0, egui::Stroke::new(1.2, ink), egui::StrokeKind::Inside);
+    response.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, ui.is_enabled(), selected, label));
+    response.on_hover_text(label)
+}
+
 fn show_document_presets(ui: &mut egui::Ui, state: &mut NewDocumentDialogState, height: f32) -> (bool, bool) {
     let filter = state.preset_search.trim().to_lowercase();
-    let (print, digital) = NEW_DOCUMENT_PRESETS.split_at(6);
+    let (print, rest) = NEW_DOCUMENT_PRESETS.split_at(10);
+    let (digital, photo) = rest.split_at(3);
     let mut has_results = false;
     let mut interacted = false;
     let mut create = false;
@@ -371,6 +438,7 @@ fn show_document_presets(ui: &mut egui::Ui, state: &mut NewDocumentDialogState, 
             ("dialog.new_document.print", print),
             ("dialog.new_document.digital", digital),
             ("dialog.new_document.print_cmyk", CMYK_DOCUMENT_PRESETS.as_slice()),
+            ("dialog.new_document.photo", photo),
         ] {
             let matches: Vec<_> = names.iter().copied().filter(|name| state.preset_matches(name, &filter)).collect();
             if matches.is_empty() {
@@ -455,9 +523,18 @@ pub(crate) fn new_document_preset(name: &str) -> Option<(f32, f32, Units, f32)> 
         "B5 (JIS)" => Some((182.0, 257.0, Units::Mm, 300.0)),
         "Letter" => Some((8.5, 11.0, Units::In, 300.0)),
         "Legal" => Some((8.5, 14.0, Units::In, 300.0)),
+        "Ledger" => Some((11.0, 17.0, Units::In, 300.0)),
+        "Trade Paperback" => Some((6.0, 9.0, Units::In, 300.0)),
+        "Half Letter" => Some((5.5, 8.5, Units::In, 300.0)),
+        "Oversize Magazine" => Some((9.0, 12.0, Units::In, 300.0)),
         "Square 1080" => Some((1080.0, 1080.0, Units::Px, 72.0)),
         "Full HD" => Some((1920.0, 1080.0, Units::Px, 72.0)),
         "4K UHD" => Some((3840.0, 2160.0, Units::Px, 72.0)),
+        "4R" => Some((6.0, 4.0, Units::In, 300.0)),
+        "5R" => Some((7.0, 5.0, Units::In, 300.0)),
+        "6R" => Some((8.0, 6.0, Units::In, 300.0)),
+        "8R" => Some((10.0, 8.0, Units::In, 300.0)),
+        "10R" => Some((12.0, 10.0, Units::In, 300.0)),
         _ => None,
     }
 }
@@ -1019,13 +1096,14 @@ pub struct FileDialogState {
     pub close_after_save: bool,
     focus_path: bool,
     overwrite: bool,
+    outline_pdf_text: bool,
 }
 
 impl FileDialogState {
     pub fn new(mode: FileDialogMode) -> Self {
         Self {
             mode, path: String::new(), error_message: None, owner: DialogOwner::App,
-            close_after_save: false, focus_path: true, overwrite: false,
+            close_after_save: false, focus_path: true, overwrite: false, outline_pdf_text: false,
         }
     }
     pub fn for_document(mode: FileDialogMode, id: ContextId) -> Self {
@@ -1034,6 +1112,11 @@ impl FileDialogState {
     pub fn closing(mut self) -> Self {
         self.close_after_save = true;
         self
+    }
+    fn is_pdf_open(&self) -> bool {
+        self.mode == FileDialogMode::Open
+            && std::path::Path::new(self.path.trim()).extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"))
     }
     pub fn apply(&mut self, workspace: &mut dtool_core::Workspace) -> bool {
         if self.path.trim().is_empty() {
@@ -1081,7 +1164,13 @@ impl FileDialogState {
             FileDialogMode::SelectionLoad => serde_json::json!({ "from": "file", "path": self.path.trim() }),
             _ => serde_json::json!({ "path": self.path }),
         };
-        let command = dtool_core::Command { name: self.mode.command_name().into(), params };
+        let command = if self.is_pdf_open() && self.outline_pdf_text {
+            dtool_core::Command::with_params("import.pdf", serde_json::json!({
+                "path": self.path.trim(), "options": {"outline_embedded_text": true}
+            }))
+        } else {
+            dtool_core::Command { name: self.mode.command_name().into(), params }
+        };
         let (_, result) = workspace.run(scope, command);
         match result {
             Ok(_) => { self.error_message = None; true }
@@ -1125,7 +1214,8 @@ pub(crate) fn file_dialog_result(ui: &mut egui::Ui, state: &mut FileDialogState,
     }
     #[cfg(windows)]
     let mut browse = false;
-    let (key_action, button_action) = show_modal(ui.ctx(), "dialog.file", text(state.mode.title_key()), ClosePolicy::CancelOnly, true, |ui| {
+    let title = if state.is_pdf_open() { "import.pdf.title" } else { state.mode.title_key() };
+    let (key_action, button_action) = show_modal(ui.ctx(), "dialog.file", text(title), ClosePolicy::CancelOnly, true, |ui| {
             let label = ui.label(text("dialog.file.path"));
             ui.horizontal(|ui| {
                 let editor = ui.text_edit_singleline(&mut state.path).labelled_by(label.id);
@@ -1137,8 +1227,13 @@ pub(crate) fn file_dialog_result(ui: &mut egui::Ui, state: &mut FileDialogState,
                     browse = dtool_design::button(ui, text("pref.browse")).clicked();
                 }
             });
-            let filter = match state.mode { FileDialogMode::TemplateOpen | FileDialogMode::TemplateSave => "dialog.file.filter.template", FileDialogMode::ImportText => "dialog.file.filter.text", FileDialogMode::ReplaceImage(_) => "dialog.file.filter.image", FileDialogMode::SelectionSave | FileDialogMode::SelectionLoad => "dialog.file.filter.selection", _ => "dialog.file.filter.native" };
-            if dtool_strings::has(filter) { ui.label(text(filter)); }
+            let filter = match state.mode { FileDialogMode::Open => "dialog.file.filter.open", FileDialogMode::TemplateOpen | FileDialogMode::TemplateSave => "dialog.file.filter.template", FileDialogMode::ImportText => "dialog.file.filter.text", FileDialogMode::ReplaceImage(_) => "dialog.file.filter.image", FileDialogMode::SelectionSave | FileDialogMode::SelectionLoad => "dialog.file.filter.selection", _ => "dialog.file.filter.native" };
+            if state.is_pdf_open() {
+                dtool_design::toggle(ui, &mut state.outline_pdf_text, text("import.pdf.outline_embedded_text"));
+                ui.label(text("import.pdf.outline_embedded_text.help"));
+            } else if dtool_strings::has(filter) {
+                ui.label(text(filter));
+            }
             if let Some(message) = &state.error_message { ui.label(message); }
             ui.horizontal(|ui| {
                 let confirm = dtool_design::button(ui, text("button.ok")).clicked();
@@ -1193,7 +1288,10 @@ pub(crate) fn file_dialog_result(ui: &mut egui::Ui, state: &mut FileDialogState,
 
 #[cfg(windows)]
 pub(crate) fn pick_document_path() -> std::io::Result<Option<std::path::PathBuf>> {
-    pick_file_path(text(FileDialogMode::Open.title_key()), text("dialog.file.filter.native"), "dtool", None)
+    pick_file_path_with_extensions(
+        text(FileDialogMode::Open.title_key()), text("dialog.file.filter.open"),
+        &["dtool", "svg", "pdf", "ai", "eps"], None,
+    )
 }
 
 #[cfg(windows)]

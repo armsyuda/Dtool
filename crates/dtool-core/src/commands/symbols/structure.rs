@@ -196,7 +196,9 @@ fn insert_into_definition(doc: &mut Document, source: &Instance, added: &HashSet
 
 pub(crate) fn sync(doc: &mut Document, before: &[Object], shared: bool) -> bool {
     let mut touched = Vec::new();
-    for instance in doc.symbols.instances.iter().filter(|entry| live_instance(doc, entry)) {
+    let previous_ids: HashSet<_> = before.iter().map(|object| object.id).collect();
+    // Newly placed or duplicated instances already have their own link state.
+    for instance in doc.symbols.instances.iter().filter(|entry| previous_ids.contains(&entry.root) && live_instance(doc, entry)) {
         let old = children_of(before, instance.root);
         let mut current = doc.subtree_ids(instance.root);
         current.remove(&instance.root);

@@ -129,12 +129,13 @@ pub fn rasterize(doc: &Document, scene: &Scene, bounds: [f32; 4], width: u32, he
     }
     let mut pixels = vec![0u8; width as usize * height as usize * 4];
     let size = [width, height];
-    let grid = groups::RasterGrid { bounds, size, view };
-    if !groups::render(doc, &scene.prims, crate::layer_style::raster::prim_object, &[], grid, &mut pixels, |mut prims, opacity, target| {
+    let display_to_document = groups::display_to_document(scene.display_rotation);
+    let grid = groups::RasterGrid { bounds, size, view, display_to_document };
+    if !groups::render(doc, &scene.prims, crate::layer_style::raster::prim_object, &[], &Default::default(), grid, &mut pixels, |mut prims, opacity, target| {
         for prim in &mut prims {
             groups::normalize_prim_opacity(prim, opacity);
         }
-        let sub = Scene { version: scene.version, prims, quads: scene.quads.clone() };
+        let sub = Scene { version: scene.version, prims, quads: scene.quads.clone(), display_rotation: scene.display_rotation };
         rasterize_local_over(doc, &sub, bounds, size, view, raster, target);
     }) {
         composite_scene(doc, scene, bounds, size, view, raster, &mut pixels);
@@ -164,6 +165,7 @@ fn rasterize_local_over(doc: &Document, scene: &Scene, bounds: [f32; 4], size: [
 
 fn composite_scene(doc: &Document, scene: &Scene, bounds: [f32; 4], [width, height]: [u32; 2], view: Option<&ViewState>, raster: Raster, pixels: &mut [u8]) {
     let _guard = Guard::enter();
+    let grid = groups::RasterGrid { bounds, size: [width, height], view, display_to_document: groups::display_to_document(scene.display_rotation) };
     let tone_groups = doc.objects.iter().any(|object| object.tone_blend.is_some());
     let mut open: Vec<Prim> = Vec::new();
     let mut prefix: Vec<Prim> = Vec::new();
@@ -172,29 +174,39 @@ fn composite_scene(doc: &Document, scene: &Scene, bounds: [f32; 4], [width, heig
     let flush = |pixels: &mut [u8], prefix: &[Prim], run: &mut Vec<Prim>, key: Option<ObjectId>| {
         if run.iter().any(|p| drawn_object(p).is_some()) {
             let blend = key.and_then(|id| blend_of(doc, id));
+            let object = key.and_then(|id| doc.get_object(id));
+            let transparency = object.and_then(|object| ObjectTransparency::new(doc, object));
+            let tone = if tone_groups { key.and_then(|id| crate::tone_blend::for_layer(doc, id)) } else { None };
             if view.is_none() && std::ptr::fn_addr_eq(raster, crate::scene::rasterize_scene as Raster)
-                && let (Some(id), Some(blend)) = (key, blend.clone())
-                && doc.get_object(id).is_some_and(|object| {
-                    matches!(object.transparency, crate::paint::Transparency::None)
-                        && crate::raster_source::compositing_mask(doc, object).is_none()
-                })
-                && (!tone_groups || crate::tone_blend::for_layer(doc, id).is_none())
-                && crate::scene::blend_single_fill(doc, prefix.iter().chain(run.iter()), bounds, [width, height], pixels, blend)
+                && let Some(object) = object
+                && crate::raster_source::compositing_mask(doc, object).is_none()
+                && tone.is_none()
             {
-                run.clear();
-                return;
+                let blend = blend.clone().unwrap_or((BlendMode::Normal, None));
+                let applied = crate::scene::blend_single_fill(
+                    doc, prefix.iter().chain(run.iter()), bounds, [width, height], grid.display_to_document.is_none(),
+                    |offset, mut source| {
+                        if let Some(transparency) = &transparency {
+                            source[3] = transparency.alpha(source[3], offset / 4, grid);
+                        }
+                        composite_sample(pixels, offset, &source, &blend, 1.0);
+                    },
+                );
+                if applied {
+                    run.clear();
+                    return;
+                }
             }
             let prims = prefix.iter().cloned().chain(run.drain(..)).collect();
-            let sub = Scene { version: scene.version, prims, quads: scene.quads.clone() };
+            let sub = Scene { version: scene.version, prims, quads: scene.quads.clone(), display_rotation: scene.display_rotation };
             let mut layer = raster(doc, &sub, bounds, width, height, view);
-            if let Some(object) = key.and_then(|id| doc.get_object(id)) {
-                let grid = groups::RasterGrid { bounds, size: [width, height], view };
-                if let Some(mask) = groups::PixelMask::new(doc, object) {
-                    mask.apply(&mut layer, grid);
-                }
-                apply_transparency(&mut layer, object, bounds, [width, height], view);
+            if let Some(mask) = object.and_then(|object| groups::PixelMask::new(doc, object)) {
+                mask.apply(&mut layer, grid);
             }
-            if tone_groups && let Some((_, tone)) = key.and_then(|id| crate::tone_blend::for_layer(doc, id)) {
+            if let Some(transparency) = transparency {
+                transparency.apply(&mut layer, grid);
+            }
+            if let Some((_, tone)) = tone {
                 for (index, source) in layer.chunks_exact_mut(4).enumerate() {
                     if source[3] == 0 { continue; }
                     let offset = index * 4;
@@ -229,18 +241,30 @@ fn composite_scene(doc: &Document, scene: &Scene, bounds: [f32; 4], [width, heig
     flush(pixels, &prefix, &mut run, key);
 }
 
-pub(super) fn apply_transparency(layer: &mut [u8], object: &crate::Object, bounds: [f32; 4], [width, height]: [u32; 2], view: Option<&ViewState>) {
-    use crate::geometry::{apply_matrix, invert_matrix, object_matrix};
-    if matches!(object.transparency, crate::paint::Transparency::None) {
-        return;
+struct ObjectTransparency<'a> {
+    sampler: crate::scene::TransparencySampler<'a>,
+    inverse: [f32; 6],
+    origin: [f32; 2],
+}
+
+impl<'a> ObjectTransparency<'a> {
+    fn new(doc: &Document, object: &'a crate::Object) -> Option<Self> {
+        let sampler = crate::scene::TransparencySampler::new(doc, &object.transparency)?;
+        let inverse = crate::geometry::invert_matrix(&crate::geometry::object_matrix(object))?;
+        Some(Self { sampler, inverse, origin: object.pos })
     }
-    let Some(inverse) = invert_matrix(&object_matrix(object)) else { return };
-    for (index, pixel) in layer.chunks_exact_mut(4).enumerate() {
-        if pixel[3] == 0 { continue; }
-        let i = index as u32;
-        let point = crate::scene::doc_point(bounds, width, height, i % width, i / width, view);
-        let [x, y] = apply_matrix(&inverse, point);
-        let local = [f64::from(x - object.pos[0]), f64::from(y - object.pos[1])];
-        pixel[3] = (f32::from(pixel[3]) * object.transparency.alpha_at(local)).round() as u8;
+
+    fn alpha(&self, source: u8, index: usize, grid: groups::RasterGrid<'_>) -> u8 {
+        let [x, y] = crate::geometry::apply_matrix(&self.inverse, grid.point(index));
+        let local = [f64::from(x - self.origin[0]), f64::from(y - self.origin[1])];
+        (f32::from(source) * self.sampler.alpha_at(local)).round() as u8
+    }
+
+    fn apply(&self, layer: &mut [u8], grid: groups::RasterGrid<'_>) {
+        for (index, pixel) in layer.chunks_exact_mut(4).enumerate() {
+            if pixel[3] != 0 {
+                pixel[3] = self.alpha(pixel[3], index, grid);
+            }
+        }
     }
 }

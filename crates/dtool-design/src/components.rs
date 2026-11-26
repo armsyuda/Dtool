@@ -121,11 +121,27 @@ pub fn icon_image_button(ui: &mut Ui, texture: &egui::TextureHandle, state: &Con
     icon_image_button_selected(ui, texture, false, state)
 }
 
+pub fn selected_icon_ink(ui: &Ui) -> egui::Color32 {
+    if ui.visuals().dark_mode { crate::theme::dark().text } else { crate::theme::light().text }
+}
+
+pub fn with_icon_selection<R>(ui: &mut Ui, draw: impl FnOnce(&mut Ui) -> R) -> R {
+    ui.scope(|ui| {
+        let ink = selected_icon_ink(ui);
+        let fill = if ui.visuals().dark_mode { crate::tokens::color_in("dark", "input") }
+            else { egui::Color32::from_gray(197) };
+        let selection = &mut ui.visuals_mut().selection;
+        selection.bg_fill = fill;
+        selection.stroke.color = ink;
+        draw(ui)
+    }).inner
+}
+
 pub fn icon_image_button_selected(ui: &mut Ui, texture: &egui::TextureHandle, selected: bool, state: &ControlState) -> Response {
     let side = size("icon.size.md");
     let image = egui::Image::new(texture).fit_to_exact_size(Vec2::splat(side));
     let button = egui::Button::image(image).selected(selected).corner_radius(corner(radius("sm"))).min_size(Vec2::splat(side));
-    add_button(ui, button, state)
+    with_icon_selection(ui, |ui| add_button(ui, button, state))
 }
 
 pub fn icon_texture_px(ui: &Ui) -> u32 {
@@ -133,7 +149,71 @@ pub fn icon_texture_px(ui: &Ui) -> u32 {
 }
 
 pub fn toggle(ui: &mut Ui, on: &mut bool, label: impl Into<WidgetText>) -> Response {
-    ui.checkbox(on, label)
+    switch(ui, on, label.into(), false, false)
+}
+
+pub fn menu_toggle(ui: &mut Ui, on: &mut bool, label: impl Into<WidgetText>) -> Response {
+    switch(ui, on, label.into(), false, true)
+}
+
+fn switch(ui: &mut Ui, on: &mut bool, label: WidgetText, mixed: bool, menu: bool) -> Response {
+    let track_size = Vec2::new(25.0, 14.0);
+    let gap = if label.is_empty() { 0.0 } else { ui.spacing().icon_spacing.max(6.0) };
+    let padding = if menu { ui.spacing().button_padding.x } else { 0.0 };
+    let name = label.text().to_owned();
+    let label_width = (ui.available_width() - track_size.x - gap - 2.0 * padding).max(0.0);
+    let label = label.into_galley(ui, None, label_width, egui::TextStyle::Button);
+    let desired = if menu {
+        Vec2::new(ui.available_width(), label.size().y.max(size("menu.row.height")))
+    } else {
+        Vec2::new(track_size.x + gap + label.size().x, label.size().y.max(20.0))
+    };
+    let (rect, mut response) = ui.allocate_exact_size(desired, egui::Sense::click());
+    if response.clicked() {
+        *on = mixed || !*on;
+        response.mark_changed();
+    }
+    let mixed = mixed && !response.changed();
+    response.widget_info(|| {
+        if mixed {
+            egui::WidgetInfo::labeled(egui::Role::CheckBox, ui.is_enabled(), &name)
+        } else {
+            egui::WidgetInfo::selected(egui::Role::Switch, ui.is_enabled(), *on, &name)
+        }
+    });
+    if ui.is_rect_visible(rect) {
+        let visuals = ui.style().interact(&response);
+        if menu && (response.hovered() || response.has_focus()) {
+            ui.painter().rect_filled(rect, visuals.corner_radius, visuals.weak_bg_fill);
+        }
+        let track_left = if menu { rect.right() - padding - track_size.x } else { rect.left() };
+        let track = egui::Rect::from_center_size(
+            egui::pos2(track_left + track_size.x * 0.5, rect.center().y), track_size,
+        );
+        let active = *on && !mixed;
+        let fill = if active && response.enabled() {
+            ui.visuals().selection.bg_fill
+        } else {
+            ui.visuals().extreme_bg_color
+        };
+        let stroke = if response.has_focus() || response.hovered() {
+            visuals.fg_stroke
+        } else {
+            egui::Stroke::new(1.0, visuals.fg_stroke.color.gamma_multiply(0.58))
+        };
+        ui.painter().rect(track, 7.0, fill, stroke, egui::StrokeKind::Inside);
+        let x = if mixed { track.center().x } else if active { track.right() - 7.0 } else { track.left() + 7.0 };
+        let knob = if active && response.enabled() { ui.visuals().selection.stroke.color } else { visuals.fg_stroke.color };
+        ui.painter().circle_filled(egui::pos2(x, track.center().y), 4.0, knob);
+        if mixed {
+            let center = egui::pos2(x, track.center().y);
+            ui.painter().line_segment([center - Vec2::new(2.0, 0.0), center + Vec2::new(2.0, 0.0)], egui::Stroke::new(1.0, fill));
+        }
+        let text_x = if menu { rect.left() + padding } else { track.right() + gap };
+        let text_pos = egui::pos2(text_x, rect.center().y - label.size().y * 0.5);
+        ui.painter().galley(text_pos, label, visuals.text_color());
+    }
+    response
 }
 
 /// Small studio state controls use drawn paths, avoiding font-specific glyphs.
@@ -197,11 +277,7 @@ fn state_icon(ui: &mut Ui, value: &mut bool, lock: bool) -> Response {
 }
 
 pub fn toggle_with(ui: &mut Ui, on: &mut bool, label: impl Into<WidgetText>, state: &ControlState) -> Response {
-    let mut shown = *on && !state.mixed;
-    let response = ui.add_enabled(state.enabled, egui::Checkbox::new(&mut shown, label).indeterminate(state.mixed));
-    if response.clicked() && state.enabled {
-        *on = if state.mixed { true } else { shown };
-    }
+    let response = ui.add_enabled_ui(state.enabled, |ui| switch(ui, on, label.into(), state.mixed, false)).inner;
     state.decorate(response)
 }
 
@@ -492,6 +568,15 @@ pub fn dialog_frame<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> egui::Inn
         .stroke(panel_stroke())
         .corner_radius(corner(radius("lg")))
         .inner_margin(space("lg"))
+        .show(ui, add)
+}
+
+pub fn dialog_section<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> egui::InnerResponse<R> {
+    egui::Frame::new()
+        .fill(ui.visuals().extreme_bg_color)
+        .stroke(panel_stroke())
+        .corner_radius(corner(radius("sm")))
+        .inner_margin(space("sm"))
         .show(ui, add)
 }
 

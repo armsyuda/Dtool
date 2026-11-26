@@ -325,6 +325,7 @@ pub struct ExportOptions {
     pub pdf_outline_strokes: bool,
     pub pdf_include_hyperlinks: bool,
     pub pdf_include_bookmarks: bool,
+    pub svg: crate::svg::SvgOptions,
     pub pages: Option<Vec<u32>>,
 }
 
@@ -358,6 +359,7 @@ impl Default for ExportOptions {
             pdf_outline_strokes: false,
             pdf_include_hyperlinks: true,
             pdf_include_bookmarks: true,
+            svg: crate::svg::SvgOptions::default(),
             pages: None,
         }
     }
@@ -385,8 +387,27 @@ impl ExportOptions {
         let Some(fields) = patch.as_object() else {
             return Ok(self.clone());
         };
+        if let Some(value) = fields.get("svg_preset") {
+            let preset = serde_json::from_value(value.clone())
+                .map_err(|_| ExportError::Unavailable("svg_preset".into()))?;
+            base["svg"] = serde_json::to_value(crate::svg::SvgOptions::preset(preset))
+                .map_err(|e| ExportError::Io(e.to_string()))?;
+        }
         let mut next_format = None;
         for (key, value) in fields {
+            if key == "svg_preset" {
+                continue;
+            }
+            if key == "svg" {
+                let options = value.as_object().ok_or_else(|| ExportError::Unavailable(key.clone()))?;
+                for (name, setting) in options {
+                    if base["svg"].get(name).is_none() {
+                        return Err(ExportError::Unavailable(format!("svg.{name}")));
+                    }
+                    base["svg"][name] = setting.clone();
+                }
+                continue;
+            }
             if key == "format" {
                 if let Some(name) = value.as_str() {
                     let format = parse_format(name)?;
@@ -408,6 +429,9 @@ impl ExportOptions {
             base[key] = value.clone();
         }
         let mut merged: ExportOptions = serde_json::from_value(base).map_err(|e| ExportError::Unavailable(e.to_string()))?;
+        if merged.format != ExportFormat::Svg && fields.contains_key("svg_preset") {
+            return Err(ExportError::Unavailable("svg_preset".into()));
+        }
         if let Some(format) = next_format.filter(|format| *format != self.format) {
             if !fields.contains_key("transparent") {
                 merged.transparent = format != ExportFormat::Jpeg;
@@ -467,6 +491,9 @@ impl ExportOptions {
 
     pub fn unapplied_field(&self) -> Option<&'static str> {
         let pdf = self.format == ExportFormat::Pdf;
+        if self.format == ExportFormat::Svg && let Some(field) = self.svg.unapplied_field() {
+            return Some(field);
+        }
         if !pdf && self.pdf_colour_space.is_some() {
             return Some("pdf_colour_space");
         }
@@ -624,7 +651,7 @@ pub fn options_schema() -> Vec<FormatSchema> {
         entry("tiff", "tif", "B54", &["bit_depth"], false, Some(Deferred::Planned)),
         entry("gif", "gif", "B54", &[], false, Some(Deferred::Planned)),
         entry("pdf", "pdf", "B55", &["pdf_colour_space", "icc", "embed_icc", "embed_metadata", "include_bleed", "pdf_crop_marks", "pdf_fold_marks", "pdf_raster_dpi", "pdf_outline_text", "pdf_outline_strokes", "pdf_include_hyperlinks", "pdf_include_bookmarks"], true, None),
-        entry("svg", "svg", "B55", &[], true, None),
+        entry("svg", "svg", "B55", &["svg", "svg_preset"], true, None),
         entry("eps", "eps", "B54", &[], true, None),
         entry("wmf", "wmf", "B55", &[], false, Some(Deferred::Planned)),
         entry("psd", "psd", "B54", &[], false, Some(Deferred::V3)),
@@ -1079,13 +1106,19 @@ pub fn render_pdf_preview_page(bytes: &[u8], doc: &Document, opts: &ExportOption
     }
 }
 
+fn has_rotated_svg_blur(group: &resvg::usvg::Group) -> bool {
+    use resvg::usvg::{Node, filter::Kind};
+    let transform = group.abs_transform();
+    let rotated = transform.kx != 0.0 || transform.ky != 0.0;
+    (rotated && group.filters().iter().any(|filter| {
+        filter.primitives().iter().any(|primitive| matches!(primitive.kind(), Kind::GaussianBlur(_) | Kind::DropShadow(_)))
+    })) || group.children().iter().any(|node| matches!(node, Node::Group(group) if has_rotated_svg_blur(group)))
+}
+
 pub fn encode_svg_preview(doc: &Document, opts: &ExportOptions) -> Result<EncodedPreview, ExportError> {
     use std::sync::{Arc, OnceLock};
 
     let encoded = encode_output(doc, opts, std::path::Path::new(""))?;
-    let region = area_region(doc, &opts.area)?;
-    let per_unit = document_unit_points(doc) * doc.dpi.max(1.0) / 72.0;
-    let (width, height) = target_size((0.0, 0.0, region.2 * per_unit, region.3 * per_unit), doc.dpi, opts)?;
     static FONT_DB: OnceLock<Arc<fontdb::Database>> = OnceLock::new();
     let fontdb = FONT_DB.get_or_init(|| {
         let mut fonts = fontdb::Database::new();
@@ -1098,6 +1131,18 @@ pub fn encode_svg_preview(doc: &Document, opts: &ExportOptions) -> Result<Encode
     let options = resvg::usvg::Options { fontdb: Arc::clone(fontdb), ..Default::default() };
     let tree = resvg::usvg::Tree::from_data(&encoded.bytes, &options).map_err(io_error)?;
     let size = tree.size();
+    let (width, height) = target_size((0.0, 0.0, size.width(), size.height()), 96.0, &ExportOptions::default())?;
+    if has_rotated_svg_blur(tree.root()) {
+        // resvg filters along the output axes even inside a rotated SVG group.
+        // Use the document renderer for the preview and keep the encoded SVG intact.
+        let preview = ExportOptions {
+            width: Some(width), height: Some(height), scale: None, dpi: None,
+            transparent: true, matte: None, icc: None, embed_icc: false,
+            embed_metadata: false, ..opts.clone()
+        };
+        let image = render_preview(doc, &preview)?;
+        return Ok(EncodedPreview { bytes: encoded.bytes, image });
+    }
     let transform = resvg::tiny_skia::Transform::from_scale(width as f32 / size.width(), height as f32 / size.height());
     let mut pixmap = resvg::tiny_skia::Pixmap::new(width, height).ok_or_else(|| ExportError::Unavailable("size".into()))?;
     resvg::render(&tree, transform, &mut pixmap.as_mut());
@@ -1348,7 +1393,16 @@ pub fn encode_output(doc: &Document, options: &ExportOptions, path: &std::path::
             pdf.marks.fold = options.pdf_fold_marks;
             crate::pdf::encode_pdf(doc, &request, &pdf, &control)
         }
-        ExportFormat::Svg => crate::svg::encode_svg(doc, &request, &Default::default(), &control),
+        ExportFormat::Svg => {
+            let size = if options.width.is_some() || options.height.is_some() || options.scale.is_some() || options.dpi.is_some() {
+                let (_, _, width, height) = area_region(doc, &options.area)?;
+                let css = document_unit_points(doc) * (96.0 / 72.0);
+                Some(target_size((0.0, 0.0, width * css, height * css), 96.0, options)?)
+            } else {
+                None
+            };
+            crate::svg::encode_svg(doc, &request, &options.svg, size, &control)
+        }
         ExportFormat::Eps => crate::eps::encode_eps(doc, &request, &control),
         _ => return render_preview(doc, options).and_then(|image| encode_document(doc, &image, options)).map(EncodedExport::from),
     };

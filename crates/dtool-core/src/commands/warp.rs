@@ -188,7 +188,13 @@ pub fn unwarp_point(doc: &crate::Document, object_id: ObjectId, point: [f32; 2])
 
 /// Deform every contour in a world-space outline, including the closing edges.
 pub fn live_warp_outline(doc: &crate::Document, object_id: ObjectId, outline: &BezPath) -> Option<BezPath> {
-    Some(LiveWarp::for_object(doc, object_id)?.outline(outline))
+    live_warp_outline_with_tolerance(doc, object_id, outline, crate::outline::OUTLINE_TOLERANCE)
+}
+
+/// Deform a world-space outline with the given tolerance in document units.
+pub fn live_warp_outline_with_tolerance(doc: &crate::Document, object_id: ObjectId, outline: &BezPath, tolerance: f64) -> Option<BezPath> {
+    let warp = LiveWarp::for_object(doc, object_id)?;
+    Some(warp.outline_with_tolerance(outline, tolerance))
 }
 
 pub(crate) struct LiveWarp(Vec<(WarpGroup, Rect)>);
@@ -213,6 +219,15 @@ pub(crate) fn ancestor_warps(doc: &crate::Document, object: &Object) -> Vec<(War
 }
 
 impl LiveWarp {
+    pub(crate) fn outline_with_tolerance(&self, outline: &BezPath, tolerance: f64) -> BezPath {
+        if tolerance < crate::outline::OUTLINE_TOLERANCE
+            && let Some(precise) = self.outline_precise(outline, tolerance)
+        {
+            return precise;
+        }
+        self.outline(outline)
+    }
+
     pub(crate) fn for_object(doc: &crate::Document, object_id: ObjectId) -> Option<Self> {
         let object = doc.get_object(object_id)?;
         let mut warps = ancestor_warps(doc, object);
@@ -253,6 +268,67 @@ impl LiveWarp {
         }
         result
     }
+
+    fn outline_precise(&self, outline: &BezPath, tolerance: f64) -> Option<BezPath> {
+        let mut result = BezPath::new();
+        let mut budget = crate::boolean::MAX_BOOLEAN_POINTS;
+        // Seed sampling across mesh cells before checking the warped chord error.
+        let smallest_cell = |knots: &[f64], count: u32| {
+            let uniform = 1.0 / f64::from(count.saturating_sub(1).max(1));
+            knots.windows(2).map(|pair| pair[1] - pair[0]).fold(uniform, f64::min)
+        };
+        let step = self.0.iter().map(|(group, bounds)| {
+            let width = bounds.width().abs() * smallest_cell(&group.mesh.column_knots, group.mesh.cols);
+            let height = bounds.height().abs() * smallest_cell(&group.mesh.row_knots, group.mesh.rows);
+            width.min(height) / 8.0
+        }).fold(f64::INFINITY, f64::min).max(tolerance);
+        for (points, closed) in crate::outline::flatten_subpaths(outline, tolerance * 0.25) {
+            budget = budget.checked_sub(points.len())?;
+            let start = self.point(points[0]);
+            result.move_to((start[0], start[1]));
+            let mut mapped_start = start;
+            let ends = points.iter().copied().skip(1).chain(closed.then_some(points[0]));
+            for (from, to) in points.iter().copied().zip(ends) {
+                let parts = ((to[0] - from[0]).hypot(to[1] - from[1]) / step).ceil().clamp(1.0, 128.0) as u32;
+                for index in 0..parts {
+                    let a = interpolate_point(from, to, f64::from(index) / f64::from(parts));
+                    let b = interpolate_point(from, to, f64::from(index + 1) / f64::from(parts));
+                    let mapped_end = self.point(b);
+                    self.append_precise_segment(&mut result, [a, b], [mapped_start, mapped_end], tolerance, &mut budget, 0)?;
+                    mapped_start = mapped_end;
+                }
+            }
+            if closed {
+                result.close_path();
+            }
+        }
+        Some(result)
+    }
+
+    fn append_precise_segment(&self, result: &mut BezPath, [a, b]: [[f64; 2]; 2], [start, end]: [[f64; 2]; 2],
+        tolerance: f64, budget: &mut usize, depth: u8,
+    ) -> Option<()> {
+        *budget = budget.checked_sub(1)?;
+        let middle = interpolate_point(a, b, 0.5);
+        let mapped_middle = self.point(middle);
+        let differs = |ratio, [x, y]: [f64; 2]| {
+            let [cx, cy] = interpolate_point(start, end, ratio);
+            (x - cx).hypot(y - cy) > tolerance * 0.5
+        };
+        if depth < 16 && (differs(0.5, mapped_middle)
+            || [0.25, 0.75].into_iter().any(|ratio| differs(ratio, self.point(interpolate_point(a, b, ratio)))))
+        {
+            self.append_precise_segment(result, [a, middle], [start, mapped_middle], tolerance, budget, depth + 1)?;
+            self.append_precise_segment(result, [middle, b], [mapped_middle, end], tolerance, budget, depth + 1)?;
+        } else {
+            result.line_to((end[0], end[1]));
+        }
+        Some(())
+    }
+}
+
+fn interpolate_point(a: [f64; 2], b: [f64; 2], ratio: f64) -> [f64; 2] {
+    [a[0] + (b[0] - a[0]) * ratio, a[1] + (b[1] - a[1]) * ratio]
 }
 
 fn put_group(doc: &mut crate::document::Document, group: &WarpGroup, bounds: Rect) {

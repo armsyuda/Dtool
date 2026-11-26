@@ -399,7 +399,7 @@ fn column(ui: &mut egui::Ui, active: &str, mut icons: Option<&mut crate::icon_ca
             let badge = tool_button(ui, &mut icons, selected_child.unwrap_or(id), selected, false, false);
             rows.push((ToolId(id), badge.rect.intersect(ui.clip_rect())));
             let c = badge.rect.right_bottom() - egui::vec2(3.0, 3.0);
-            let colour = if selected { ui.visuals().selection.stroke.color } else { dtool_design::icons::current_icon_colour() };
+            let colour = if selected { dtool_design::selected_icon_ink(ui) } else { dtool_design::icons::current_icon_colour() };
             ui.painter().add(egui::Shape::convex_polygon(vec![c, c - egui::vec2(5.0, 0.0), c - egui::vec2(0.0, 5.0)], colour, egui::Stroke::NONE));
             egui::Popup::menu(&badge).align(egui::RectAlign::RIGHT_START).show(|ui| {
                 if id == "tool.shapes" {
@@ -459,7 +459,7 @@ pub(crate) fn scroll_dragged_tool(ui: &egui::Ui, viewport: egui::Rect, start: eg
 }
 
 fn tool_button(ui: &mut egui::Ui, icons: &mut Option<&mut crate::icon_cache::IconCache>, id: &str, selected: bool, labeled: bool, placed: bool) -> egui::Response {
-    let colour = if selected { ui.visuals().selection.stroke.color } else { dtool_design::icons::current_icon_colour() };
+    let colour = if selected { dtool_design::selected_icon_ink(ui) } else { dtool_design::icons::current_icon_colour() };
     let texture = icons.as_deref_mut().and_then(|cache| cache.tool_texture(ui.ctx(), id, colour, dtool_design::icon_texture_px(ui)));
     let label = egui::RichText::new(text(id)).color(colour);
     let button = match texture {
@@ -470,8 +470,10 @@ fn tool_button(ui: &mut egui::Ui, icons: &mut Option<&mut crate::icon_cache::Ico
         None => egui::Button::new(label),
     };
     let enabled = !placed && !is_held_shape_tool(id);
-    let response = ui.add_enabled(enabled, button.selected(selected)
-        .min_size(egui::vec2(30.0, 28.0)).frame(labeled || selected));
+    let response = dtool_design::with_icon_selection(ui, |ui| {
+        ui.add_enabled(enabled, button.selected(selected)
+            .min_size(egui::vec2(30.0, 28.0)).frame(labeled || selected))
+    });
     if !labeled {
         response.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, enabled, selected, text(id)));
     }

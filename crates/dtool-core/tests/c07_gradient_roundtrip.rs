@@ -11,7 +11,7 @@ fn gradient(kind: GradientKind) -> Paint {
             GradientStop { offset: 0.35, colour: Colour::new(0, 128, 255, 64) },
             GradientStop { offset: 1.0, colour: Colour::new(10, 200, 30, 0) },
         ],
-        geom: GradientGeom { start: [12.5, 7.25], end: [80.0, 41.5], ratio: 0.4 },
+        geom: GradientGeom { start: [12.5, 7.25], end: [80.0, 41.5], ratio: 0.4, ..GradientGeom::default() },
     }
 }
 

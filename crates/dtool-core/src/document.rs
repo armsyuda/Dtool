@@ -370,11 +370,15 @@ impl Document {
         }
     }
 
+    pub(crate) fn alloc_object_id(&mut self) -> ObjectId {
+        let id = ObjectId(self.next_object_id.max(1));
+        self.next_object_id = id.0 + 1;
+        id
+    }
+
     pub fn create_object(&mut self, mut object: Object) -> ObjectId {
-        self.next_object_id = self.next_object_id.max(1);
         if object.id == ObjectId(0) || self.get_object(object.id).is_some() {
-            object.id = ObjectId(self.next_object_id);
-            self.next_object_id += 1;
+            object.id = self.alloc_object_id();
         } else {
             let id_val = object.id.0;
             if id_val >= self.next_object_id {
@@ -618,6 +622,7 @@ impl Document {
     }
 
     pub fn detach_objects(&mut self, doomed: &std::collections::HashSet<ObjectId>) {
+        self.preserve_paint_images_on_detach(doomed);
         self.objects.retain(|obj| !doomed.contains(&obj.id));
         self.pixel_layers.entries.retain(|entry| !doomed.contains(&entry.object));
         self.placed_images.retain(|image| !doomed.contains(&image.object_id));
@@ -731,9 +736,13 @@ impl Document {
 
         crate::paint::apply_transform_to_paint(&mut obj.fill, scale_x, scale_y, rotate_rad);
         crate::paint::apply_transform_to_stroke(&mut obj.stroke, scale_x, scale_y, rotate_rad);
-        if let crate::paint::Transparency::Gradient { geom, .. } = &mut obj.transparency {
-            let transform = kurbo::Affine::rotate(rotate_rad) * kurbo::Affine::scale_non_uniform(scale_x, scale_y);
-            *geom = geom.transform(transform.as_coeffs());
+        let transform = kurbo::Affine::rotate(rotate_rad) * kurbo::Affine::scale_non_uniform(scale_x, scale_y);
+        match &mut obj.transparency {
+            crate::paint::Transparency::Gradient { geom, .. } => *geom = geom.transform(transform.as_coeffs()),
+            crate::paint::Transparency::InverseBitmap(bitmap) => {
+                bitmap.matrix = (transform * kurbo::Affine::new(bitmap.matrix)).as_coeffs();
+            }
+            crate::paint::Transparency::None => {}
         }
 
         Ok(())

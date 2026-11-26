@@ -1,6 +1,6 @@
 use dtool_core::document::Document;
 use dtool_core::paint::{
-    Colour, DiffusionPaint, GradientKind, GradientStop, Hatch, MeshPaint, Paint, PatternPaint,
+    Colour, DiffusionPaint, GradientGeom, GradientKind, GradientSpread, GradientStop, Hatch, MeshPaint, Paint, PatternPaint,
     StrokeStyle, BitmapPaint,
 };
 use krilla::color::luma;
@@ -191,7 +191,14 @@ fn gradient_stops(stops: &[GradientStop], output: &OutputColour) -> Vec<Stop> {
     converted
 }
 
-fn mask_stops(stops: &[GradientStop]) -> Vec<Stop> {
+fn mask_stops(stops: &[GradientStop], rgb: bool) -> Vec<Stop> {
+    let colour = |channel| {
+        if rgb {
+            krilla::color::rgb::Color::new(channel, channel, channel).into()
+        } else {
+            luma::Color::new(channel).into()
+        }
+    };
     let mut converted: Vec<Stop> = stops
         .iter()
         .filter_map(|stop| {
@@ -199,7 +206,7 @@ fn mask_stops(stops: &[GradientStop]) -> Vec<Stop> {
             let channel = (opacity * 255.0).round().clamp(0.0, 255.0) as u8;
             Some(Stop {
                 offset: NormalizedF32::new(stop.offset.clamp(0.0, 1.0))?,
-                color: luma::Color::new(channel).into(),
+                color: colour(channel),
                 opacity: NormalizedF32::ONE,
             })
         })
@@ -208,12 +215,12 @@ fn mask_stops(stops: &[GradientStop]) -> Vec<Stop> {
     if converted.is_empty() {
         converted.push(Stop {
             offset: NormalizedF32::ZERO,
-            color: luma::Color::new(255).into(),
+            color: colour(255),
             opacity: NormalizedF32::ONE,
         });
         converted.push(Stop {
             offset: NormalizedF32::ONE,
-            color: luma::Color::new(0).into(),
+            color: colour(0),
             opacity: NormalizedF32::ONE,
         });
     } else if converted.len() == 1 {
@@ -234,9 +241,128 @@ fn mask_stops(stops: &[GradientStop]) -> Vec<Stop> {
     converted
 }
 
-fn gradient_paint(kind: &GradientKind, stops: &[GradientStop], matrix: [f64; 6], output: &OutputColour) -> KrillaPaint {
-    let stops = gradient_stops(stops, output);
-    let transform = affine(matrix);
+/// Expand the visible gradient intervals into ordinary PDF axial or radial stops.
+/// This avoids the RGB-only range of Krilla's repeat/reflect calculator functions.
+pub(crate) fn bounded_gradient(paint: &Paint, bounds: [f32; 4]) -> std::borrow::Cow<'_, Paint> {
+    use dtool_core::paint::{gradient_parameter, interpolate_stops};
+    use std::borrow::Cow;
+    let Paint::Gradient { kind, geom, stops } = paint else { return Cow::Borrowed(paint) };
+    if geom.spread.is_pad() || *kind == GradientKind::Conical || stops.len() < 2 {
+        return Cow::Borrowed(paint);
+    }
+    let mut padded = *geom;
+    padded.spread = GradientSpread::Pad;
+    let [left, top, right, bottom] = bounds.map(f64::from);
+    let positions = [[left, top], [left, bottom], [right, top], [right, bottom]]
+        .map(|[x, y]| f64::from(gradient_parameter(*kind, x, y, &padded)));
+    let linear = *kind == GradientKind::Linear;
+    let radial_growth = 1.0 - geom.focus_radius;
+    let nearest = if linear { positions.into_iter().fold(f64::INFINITY, f64::min).floor() }
+        else { -geom.focus_radius / radial_growth };
+    let farthest = positions.into_iter().fold(f64::NEG_INFINITY, f64::max).ceil().max(nearest + 1.0);
+    let first_interval = nearest.floor();
+    let last_interval = farthest.ceil();
+    let span = last_interval - nearest;
+    if !span.is_finite() || span < 1.0 || (last_interval - first_interval) * (stops.len() + 2) as f64 > 16384.0
+        || nearest.abs() > 1e9 || farthest.abs() > 1e9
+    {
+        return Cow::Borrowed(paint);
+    }
+
+    let [dx, dy, sx, sy, x, y] = if *kind == GradientKind::Radial {
+        GradientGeom { ratio: 1.0, ..*geom }.to_matrix()
+    } else { geom.to_matrix() };
+    let axis_scale = if linear {
+        padded.start = [x + dx * nearest, y + dy * nearest];
+        span
+    } else {
+        let [fx, fy] = geom.focus.unwrap_or([0.0, 0.0]);
+        let shift = 1.0 - last_interval;
+        padded.start = [x + shift * (fx * dx + fy * sx), y + shift * (fx * dy + fy * sy)];
+        let radius = span * radial_growth;
+        padded.focus = geom.focus.map(|[fx, fy]| [fx * span / radius, fy * span / radius]);
+        padded.focus_radius = 0.0;
+        radius
+    };
+    padded.end = [padded.start[0] + axis_scale * dx, padded.start[1] + axis_scale * dy];
+
+    let mut original = stops.clone();
+    original.sort_by(|a, b| a.offset.total_cmp(&b.offset));
+    if original.first().is_some_and(|stop| stop.offset > 0.0) {
+        original.insert(0, GradientStop { offset: 0.0, colour: interpolate_stops(&original, 0.0) });
+    }
+    if original.last().is_some_and(|stop| stop.offset < 1.0) {
+        original.push(GradientStop { offset: 1.0, colour: interpolate_stops(&original, 1.0) });
+    }
+    let mut expanded: Vec<GradientStop> = Vec::new();
+    if first_interval < nearest {
+        expanded.push(GradientStop { offset: 0.0, colour: interpolate_stops(&original, geom.spread.map(nearest)) });
+    }
+    for interval in first_interval as i64..last_interval as i64 {
+        let reversed = geom.spread == GradientSpread::Reflect && interval.rem_euclid(2) != 0;
+        for offset_index in 0..original.len() {
+            let source = if reversed { original.len() - 1 - offset_index } else { offset_index };
+            let stop = original[source];
+            let offset = if reversed { 1.0 - stop.offset } else { stop.offset };
+            let position = interval as f64 + f64::from(offset);
+            if position < nearest {
+                continue;
+            }
+            let offset = ((position - nearest) / span) as f32;
+            if let Some(previous) = expanded.last_mut().filter(|previous| previous.offset == offset) {
+                if previous.colour == stop.colour {
+                    continue;
+                }
+                if offset > 0.0 {
+                    previous.offset = offset.next_down();
+                }
+            }
+            expanded.push(GradientStop { offset, colour: stop.colour });
+        }
+    }
+    Cow::Owned(Paint::Gradient { kind: *kind, stops: expanded, geom: padded })
+}
+
+/// Extend the first colour to the cone apex explicitly so PDF readers fill its tip.
+fn padded_focal_gradient<'a>(
+    kind: GradientKind, stops: &'a [GradientStop], geom: &GradientGeom,
+) -> (std::borrow::Cow<'a, [GradientStop]>, GradientGeom) {
+    use std::borrow::Cow;
+    let inner = geom.focus_radius;
+    if !matches!(kind, GradientKind::Radial | GradientKind::Elliptical)
+        || !geom.spread.is_pad() || !(0.0 < inner && inner < 1.0)
+    {
+        return (Cow::Borrowed(stops), *geom);
+    }
+    let Some(first) = stops.iter().min_by(|a, b| a.offset.total_cmp(&b.offset)) else {
+        return (Cow::Borrowed(stops), *geom);
+    };
+    let growth = 1.0 - inner;
+    let extended = std::iter::once(GradientStop { offset: 0.0, ..*first }).chain(
+        stops.iter().map(|stop| GradientStop { offset: (inner + growth * f64::from(stop.offset)) as f32, ..*stop }),
+    ).collect();
+    let geom = GradientGeom {
+        focus: geom.focus.map(|[fx, fy]| [fx / growth, fy / growth]),
+        focus_radius: 0.0,
+        ..*geom
+    };
+    (Cow::Owned(extended), geom)
+}
+
+fn gradient_paint(kind: &GradientKind, stops: &[GradientStop], geom: &GradientGeom, output: &OutputColour) -> KrillaPaint {
+    let (stops, geom) = padded_focal_gradient(*kind, stops, geom);
+    let stops = gradient_stops(&stops, output);
+    let transform = if matches!(kind, GradientKind::Radial | GradientKind::Conical) {
+        affine(GradientGeom { ratio: 1.0, ..geom }.to_matrix())
+    } else {
+        affine(geom.to_matrix())
+    };
+    let spread_method = match geom.spread {
+        GradientSpread::Pad => SpreadMethod::Pad,
+        GradientSpread::Repeat => SpreadMethod::Repeat,
+        GradientSpread::Reflect => SpreadMethod::Reflect,
+    };
+    let [fx, fy] = geom.focus.unwrap_or([0.0, 0.0]).map(|value| value as f32);
     match kind {
         GradientKind::Linear => LinearGradient {
             x1: 0.0,
@@ -244,42 +370,29 @@ fn gradient_paint(kind: &GradientKind, stops: &[GradientStop], matrix: [f64; 6],
             x2: 1.0,
             y2: 0.0,
             transform,
-            spread_method: SpreadMethod::Pad,
+            spread_method,
             stops,
             anti_alias: true,
         }
         .into(),
-        GradientKind::Radial => RadialGradient {
-            fx: 0.0,
-            fy: 0.0,
-            fr: 0.0,
+        GradientKind::Radial | GradientKind::Elliptical => RadialGradient {
+            fx,
+            fy,
+            fr: geom.focus_radius as f32,
             cx: 0.0,
             cy: 0.0,
             cr: 1.0,
             transform,
-            spread_method: SpreadMethod::Pad,
-            stops,
-            anti_alias: true,
-        }
-        .into(),
-        GradientKind::Elliptical => RadialGradient {
-            fx: 0.5,
-            fy: 0.5,
-            fr: 0.0,
-            cx: 0.5,
-            cy: 0.5,
-            cr: 0.5,
-            transform,
-            spread_method: SpreadMethod::Pad,
+            spread_method,
             stops,
             anti_alias: true,
         }
         .into(),
         GradientKind::Conical => SweepGradient {
-            cx: 0.5,
-            cy: 0.5,
-            start_angle: 180.0,
-            end_angle: 540.0,
+            cx: 0.0,
+            cy: 0.0,
+            start_angle: 0.0,
+            end_angle: 360.0,
             transform,
             spread_method: SpreadMethod::Pad,
             stops,
@@ -289,9 +402,15 @@ fn gradient_paint(kind: &GradientKind, stops: &[GradientStop], matrix: [f64; 6],
     }
 }
 
-fn mask_gradient_paint(kind: &GradientKind, stops: &[GradientStop], matrix: [f64; 6]) -> KrillaPaint {
-    let stops = mask_stops(stops);
+fn mask_gradient_paint(
+    kind: &GradientKind, stops: &[GradientStop], matrix: [f64; 6], geom: &GradientGeom,
+) -> KrillaPaint {
+    let (stops, geom) = padded_focal_gradient(*kind, stops, geom);
+    // Krilla's sweep calculator declares three output channels. Equal RGB
+    // components keep the mask neutral and agree with that function range.
+    let stops = mask_stops(&stops, *kind == GradientKind::Conical);
     let transform = affine(matrix);
+    let [fx, fy] = geom.focus.unwrap_or([0.0, 0.0]).map(|value| value as f32);
     match kind {
         GradientKind::Linear => LinearGradient {
             x1: 0.0,
@@ -305,9 +424,9 @@ fn mask_gradient_paint(kind: &GradientKind, stops: &[GradientStop], matrix: [f64
         }
         .into(),
         GradientKind::Radial | GradientKind::Elliptical => RadialGradient {
-            fx: 0.0,
-            fy: 0.0,
-            fr: 0.0,
+            fx,
+            fy,
+            fr: geom.focus_radius as f32,
             cx: 0.0,
             cy: 0.0,
             cr: 1.0,
@@ -642,7 +761,7 @@ fn paint_for_output<R: PdfPaintResources>(
     match paint {
         Paint::None => None,
         Paint::Solid { colour } => Some(output.colour(*colour).into()),
-        Paint::Gradient { kind, stops, geom } => Some(gradient_paint(kind, stops, geom.to_matrix(), output)),
+        Paint::Gradient { kind, stops, geom } => Some(gradient_paint(kind, stops, geom, output)),
         Paint::Hatch(hatch) => Some(hatch_to_paint(surface, hatch, output)),
         Paint::Bitmap(bitmap) => Some(bitmap_to_paint(surface, bitmap, resources, output)),
         Paint::Pattern(pattern) => Some(pattern_to_paint(surface, pattern, resources)),
@@ -703,7 +822,7 @@ pub fn glyph_paint_to_fill<R: PdfPaintResources>(
 fn stroke_line_cap(cap: dtool_core::paint::Cap) -> LineCap {
     match cap {
         dtool_core::paint::Cap::Butt => LineCap::Butt,
-        dtool_core::paint::Cap::Round => LineCap::Round,
+        dtool_core::paint::Cap::Round | dtool_core::paint::Cap::RoundInset => LineCap::Round,
         dtool_core::paint::Cap::Square => LineCap::Square,
     }
 }
@@ -756,12 +875,18 @@ pub(crate) fn stroke_for_output<R: PdfPaintResources>(
         line_cap: stroke_line_cap(stroke.cap),
         line_join: stroke_line_join(&stroke.join),
         opacity: stroke_opacity,
-        dash: if stroke.dash.is_empty() {
+        dash: if stroke.dash.iter().all(|length| *length == 0.0) {
             None
         } else {
             Some(StrokeDash {
                 array: stroke.dash.clone(),
-                offset: 0.0,
+                offset: if stroke.dash_offset < 0.0 {
+                    // Normalize for older PDF readers that disagree on negative phases.
+                    let period = 2.0 * stroke.dash.iter().copied().map(f64::from).sum::<f64>();
+                    if period > 0.0 { f64::from(stroke.dash_offset).rem_euclid(period) as f32 } else { 0.0 }
+                } else {
+                    stroke.dash_offset
+                },
             })
         },
     })
@@ -785,6 +910,11 @@ pub fn transparency_soft_mask(
     bounds: [f32; 4],
     _opts: &PdfOptions,
 ) -> Option<Mask> {
+    let paint = mask_gradient_paint(kind, stops, matrix, &GradientGeom::default());
+    luminosity_mask(surface, paint, bounds)
+}
+
+fn luminosity_mask(surface: &mut Surface<'_>, paint: KrillaPaint, bounds: [f32; 4]) -> Option<Mask> {
     let [x, y, w, h] = bounds;
     if !w.is_finite() || !h.is_finite() || w <= 0.0 || h <= 0.0 {
         return None;
@@ -795,7 +925,7 @@ pub fn transparency_soft_mask(
         let mut mask_surface = builder.surface();
         mask_surface.set_stroke(None);
         mask_surface.set_fill(Some(Fill {
-            paint: mask_gradient_paint(kind, stops, matrix),
+            paint,
             opacity: NormalizedF32::ONE,
             rule: FillRule::NonZero,
         }));
@@ -820,6 +950,33 @@ pub fn push_transparency_soft_mask(
     } else {
         false
     }
+}
+
+pub(crate) fn push_gradient_transparency(
+    surface: &mut Surface<'_>, kind: &GradientKind, stops: &[GradientStop], geom: &GradientGeom,
+    matrix: [f64; 6], bounds: [f32; 4],
+) -> bool {
+    let paint = mask_gradient_paint(kind, stops, matrix, geom);
+    let Some(mask) = luminosity_mask(surface, paint, bounds) else { return false };
+    surface.push_mask(mask);
+    true
+}
+
+pub(crate) fn push_bitmap_transparency(
+    surface: &mut Surface<'_>, image: krilla::image::Image, matrix: [f64; 6], [x, y, w, h]: [f32; 4],
+) -> bool {
+    let Some(path) = rect_path(x, y, w, h) else { return false };
+    let mut stream = surface.stream_builder();
+    {
+        let mut mask = stream.surface();
+        let paint = tiled_image_paint(&mut mask, None, None, matrix, Some(image));
+        mask.set_fill(Some(Fill { paint, opacity: NormalizedF32::ONE, rule: FillRule::NonZero }));
+        mask.draw_path(&path);
+        mask.finish();
+    }
+    let stream = stream.finish();
+    surface.push_mask(Mask::new(stream, MaskType::Alpha));
+    true
 }
 
 pub(crate) fn appearance_erase_mask(

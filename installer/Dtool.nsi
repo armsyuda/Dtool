@@ -1,6 +1,9 @@
 Unicode true
 !include "MUI2.nsh"
 !include "x64.nsh"
+!include "FileFunc.nsh"
+
+Var UpdateParent
 
 Name "DTool"
 OutFile "${SETUP_EXE}"
@@ -28,6 +31,27 @@ Function .onInit
   ${IfNot} ${RunningX64}
     MessageBox MB_OK|MB_ICONSTOP "DTool requires 64-bit Windows."
     Abort
+  ${EndIf}
+  ${GetParameters} $0
+  ${GetOptions} $0 "/DTOOLUPDATE=" $UpdateParent
+  ClearErrors
+  ${If} $UpdateParent != ""
+    ; The main process starts setup only after all documents have been reviewed.
+    System::Call 'kernel32::OpenProcess(i 0x00100000, i 0, i $UpdateParent) p.r1'
+    ${If} $1 != 0
+      System::Call 'kernel32::WaitForSingleObject(p r1, i 30000) i.r2'
+      System::Call 'kernel32::CloseHandle(p r1)'
+      ${If} $2 != 0
+        SetErrorLevel 2
+        Abort
+      ${EndIf}
+    ${EndIf}
+  ${EndIf}
+FunctionEnd
+
+Function .onInstSuccess
+  ${If} $UpdateParent != ""
+    Exec '"$INSTDIR\dtool.exe"'
   ${EndIf}
 FunctionEnd
 

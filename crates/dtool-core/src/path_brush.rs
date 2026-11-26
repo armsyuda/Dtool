@@ -34,7 +34,15 @@ pub(crate) fn resource_pixels(doc: &Document, resource: &ImageResource) -> Optio
     {
         return Some(pixels);
     }
-    let data = resource.data.as_deref()?;
+    let data = match resource.data.as_deref() {
+        Some(data) => data,
+        None if resource.is_linked() => {
+            let path = resource.resolved_path(None).filter(|path| path.is_absolute())?;
+            let decoded = crate::commands::image_place::decode_path(&path).ok()?;
+            return Some((decoded.resource.pixel_size.map(|side| side as usize), decoded.rgba));
+        }
+        None => return None,
+    };
     let size = resource.pixel_size.map(|side| side as usize);
     let pixel_bytes = size[0].checked_mul(size[1])?.checked_mul(4)?;
     if pixel_bytes == 0 {
@@ -79,7 +87,12 @@ pub(crate) fn snapshot_resource(doc: &Document, reference: &str) -> Option<Image
 
 pub(crate) fn import_snapshot(doc: &mut Document, image: &ImageResource) -> crate::resources::ResourceId {
     let matching = doc.resources.iter().find(|existing| {
-        existing.embedded && existing.pixel_size == image.pixel_size && existing.data == image.data
+        let same_source = if image.is_linked() {
+            existing.is_linked() && existing.path == image.path && existing.hash == image.hash
+        } else {
+            existing.embedded && existing.data == image.data
+        };
+        same_source && existing.pixel_size == image.pixel_size
             && existing.icc == image.icc && existing.colour_space == image.colour_space
             && !doc.placed_images.iter().any(|placed| placed.resource == existing.id)
     });
@@ -89,7 +102,7 @@ pub(crate) fn import_snapshot(doc: &mut Document, image: &ImageResource) -> crat
     }
 }
 
-fn encode_resource(size: [usize; 2], pixels: &[u8], dpi: f32) -> Option<ImageResource> {
+pub(crate) fn encode_resource(size: [usize; 2], pixels: &[u8], dpi: f32) -> Option<ImageResource> {
     let size = [u32::try_from(size[0]).ok()?, u32::try_from(size[1]).ok()?];
     let mut bytes = Vec::new();
     let mut encoder = png::Encoder::new(&mut bytes, size[0], size[1]);
@@ -112,6 +125,17 @@ struct Segment {
     offset: f32,
     first: bool,
     last: bool,
+}
+
+impl Segment {
+    fn inset_cap_distance(&self, along: f32, across: f32, radius: f32) -> f32 {
+        let trim = radius.min(self.length / if self.first && self.last { 2.0 } else { 1.0 });
+        let start = if self.first { trim } else { 0.0 };
+        let end = if self.last { self.length - trim } else { self.length };
+        let overhang = along - along.clamp(start, end.max(start));
+        let cap_radius = if (self.first && along < start) || (self.last && along > end) { trim } else { radius };
+        (across * across + overhang * overhang) * (radius / cap_radius.max(f32::EPSILON)).powi(2)
+    }
 }
 
 pub struct Ink {
@@ -199,6 +223,9 @@ impl Ink {
             let y = point[1] - segment.start[1];
             let along = x * dx + y * dy;
             let across = -x * dy + y * dx;
+            if self.cap == Cap::RoundInset {
+                return segment.inset_cap_distance(along, across, radius) <= radius * radius;
+            }
             let cap = |end| if end { self.cap } else { Cap::Round };
             let (overhang, cap) = if along < 0.0 {
                 (-along, cap(segment.first))
@@ -207,7 +234,7 @@ impl Ink {
             };
             match cap {
                 Cap::Butt => overhang == 0.0 && across.abs() <= radius,
-                Cap::Round => overhang.hypot(across) <= radius,
+                Cap::Round | Cap::RoundInset => overhang.hypot(across) <= radius,
                 Cap::Square => overhang <= radius && across.abs() <= radius,
             }
         })
@@ -292,6 +319,7 @@ impl Ink {
                     let across = -vx * dy + vy * dx;
                     let at_end = (segment.first && along < 0.0) || (segment.last && along > segment.length);
                     let distance = match (at_end, self.cap) {
+                        (_, Cap::RoundInset) => segment.inset_cap_distance(along, across, radius),
                         (true, Cap::Butt) => continue,
                         (true, Cap::Square) if along >= -radius && along <= segment.length + radius => across * across,
                         _ => across * across + (along - along.clamp(0.0, segment.length)).powi(2),

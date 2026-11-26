@@ -43,7 +43,7 @@ fn normal(kind: EffectKind, params: EffectParams) -> LayerEffect {
 }
 
 fn shadow(kind: EffectKind, offset: f32, angle: f32, radius: f32) -> LayerEffect {
-    normal(kind, EffectParams::Shadow { radius, offset, angle, intensity: 0.0, colour: blue(), knock_out: true })
+    normal(kind, EffectParams::Shadow { radius, radius_y: None, blur_angle: None, offset, angle, intensity: 0.0, colour: blue(), knock_out: true })
 }
 
 fn outline(width: f32, align: OutlineAlign) -> LayerEffect {
@@ -80,10 +80,10 @@ fn outer_shadow_offset_moves_the_shadow_by_the_offset_along_the_angle() {
 #[test]
 fn outer_shadow_without_knock_out_shows_under_a_transparent_fill() {
     let mut effect = shadow(EffectKind::OuterShadow, 10.0, 180.0, 0.0);
-    effect.params = EffectParams::Shadow { radius: 0.0, offset: 10.0, angle: 180.0, intensity: 0.0, colour: blue(), knock_out: false };
+    effect.params = EffectParams::Shadow { radius_y: None, blur_angle: None, radius: 0.0, offset: 10.0, angle: 180.0, intensity: 0.0, colour: blue(), knock_out: false };
     let (doc, _) = doc_fill(Paint::Solid { colour: Colour::new(255, 0, 0, 0) }, vec![effect.clone()]);
     assert_eq!(px(&doc, 30.0, 30.0), [0, 0, 255, 255]);
-    effect.params = EffectParams::Shadow { radius: 0.0, offset: 10.0, angle: 180.0, intensity: 0.0, colour: blue(), knock_out: true };
+    effect.params = EffectParams::Shadow { radius_y: None, blur_angle: None, radius: 0.0, offset: 10.0, angle: 180.0, intensity: 0.0, colour: blue(), knock_out: true };
     let (knocked, _) = doc_fill(Paint::Solid { colour: Colour::new(255, 0, 0, 0) }, vec![effect]);
     assert_eq!(px(&knocked, 30.0, 30.0)[3], 0);
     assert_eq!(px(&knocked, 55.0, 30.0), [0, 0, 255, 255]);
@@ -178,7 +178,7 @@ fn colour_overlay_recolours_every_visible_pixel() {
 #[test]
 fn gaussian_blur_radius_zero_changes_nothing() {
     let mut blur = default_effect(EffectKind::GaussianBlur);
-    blur.params = EffectParams::Blur { radius: 0.0, preserve_alpha: false };
+    blur.params = EffectParams::Blur { radius: 0.0, radius_y: None, angle: None, preserve_alpha: false };
     let (doc, _) = doc_with(vec![blur]);
     let (plain, _) = doc_with(Vec::new());
     assert_eq!(region(&doc), region(&plain));
@@ -193,7 +193,7 @@ fn effects_composite_in_spec_order_regardless_of_list_order() {
     assert_eq!(px(&outline_first, 30.0, 30.0), [0, 255, 0, 255]);
     assert_eq!(region(&outline_first), region(&overlay_first));
     let mut shade = shadow(EffectKind::OuterShadow, 4.0, 180.0, 0.0);
-    shade.params = EffectParams::Shadow { radius: 0.0, offset: 4.0, angle: 180.0, intensity: 0.0, colour: blue(), knock_out: true };
+    shade.params = EffectParams::Shadow { radius_y: None, blur_angle: None, radius: 0.0, offset: 4.0, angle: 180.0, intensity: 0.0, colour: blue(), knock_out: true };
     let below = [glow(EffectKind::OuterGlow, 6.0, false), shade];
     let (glow_first, _) = doc_with(below.to_vec());
     let (shadow_first, _) = doc_with(below.iter().rev().cloned().collect());

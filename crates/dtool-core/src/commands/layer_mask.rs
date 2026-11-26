@@ -94,7 +94,7 @@ fn run_inner(session: &mut Session, command: &Command) -> CommandResult {
     if current == coverage { return Ok(json!({"id":id.0,"doc_version":session.generation,"changes":[]})); }
     let mut document = session.document.clone();
     document.layer_masks.retain(|mask| mask.object != id);
-    if let Some(coverage) = coverage { document.layer_masks.push(LayerMask { object: id, coverage }); }
+    if let Some(coverage) = coverage { document.layer_masks.push(LayerMask::new(id, coverage)); }
     let name = command.name.clone();
     super::document_change::commit(session, &name, document, session.selection.ids.clone(), json!({"id":id.0}))
 }

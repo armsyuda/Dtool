@@ -1,5 +1,6 @@
 use base64::Engine;
 use dtool_core::{blend::BlendMode, Document, Object, ObjectId};
+use dtool_core::layer_style::{EffectKind, EffectParams, LayerEffect};
 use dtool_core::layer_style::raster::{EffectLayer, effect_bounds, export_effect_layers};
 use dtool_core::scene::Prim;
 use dtool_protocol::CommandError;
@@ -8,8 +9,10 @@ use std::{collections::{HashMap, HashSet}, fmt::Write};
 use crate::{DocumentExportExt, ExportArea, ExportControl, ExportReceipt, ExportRequest, ObjectExportExt};
 
 const SVG_WARN_SCOPE: &str = "svg";
+pub const MAX_COORDINATE_PRECISION: u8 = 6;
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct SvgOptions {
     pub text_as_curves: bool,
     pub raster_dpi: u32,
@@ -32,7 +35,7 @@ pub enum RasterizeMode {
     Everything,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
 pub enum SvgPreset {
     ForExport,
     DigitalSmall,
@@ -79,12 +82,12 @@ impl SvgOptions {
     }
 
     pub fn unapplied_field(&self) -> Option<&'static str> {
-        let base = Self::default();
-        if self.raster_dpi != base.raster_dpi {
-            return Some("raster_dpi");
+        use dtool_core::effect_raster::{MAX_DPI, MIN_DPI};
+        if self.precision > MAX_COORDINATE_PRECISION {
+            return Some("precision");
         }
-        if self.rasterize != base.rasterize {
-            return Some("rasterize");
+        if !(MIN_DPI as u32..=MAX_DPI as u32).contains(&self.raster_dpi) {
+            return Some("raster_dpi");
         }
         if self.flatten_transforms {
             return Some("flatten_transforms");
@@ -111,7 +114,7 @@ pub fn export_svg(
     opts: &SvgOptions,
     control: &ExportControl,
 ) -> Result<ExportReceipt, CommandError> {
-    let (bytes, warnings) = encode_svg(doc, req, opts, control)?;
+    let (bytes, warnings) = encode_svg(doc, req, opts, None, control)?;
     crate::write_atomic(&req.path, &bytes).map_err(crate::export_io_error)?;
     Ok(ExportReceipt { path: req.path.clone(), bytes: bytes.len() as u64, warnings })
 }
@@ -120,6 +123,7 @@ pub(crate) fn encode_svg(
     doc: &Document,
     req: &ExportRequest,
     opts: &SvgOptions,
+    output_size: Option<(u32, u32)>,
     control: &ExportControl,
 ) -> Result<(Vec<u8>, Vec<String>), CommandError> {
     if control.is_cancelled() {
@@ -155,17 +159,46 @@ pub(crate) fn encode_svg(
     
     let unit_points = crate::raster::document_unit_points(doc);
     let page_scoped = req.area.limits_objects_to_page();
-    write_svg_header(&mut svg_content, width, height, unit_points, page_scoped, opts);
-    let scale = if opts.set_viewbox { 1.0 } else { unit_points * (96.0 / 72.0) };
-    let transformed = origin_x != 0.0 || origin_y != 0.0 || scale != 1.0;
+    write_svg_header(&mut svg_content, width, height, unit_points, output_size, page_scoped, opts);
+    let native_css_scale = unit_points * (96.0 / 72.0);
+    let css_scale = output_size.map_or([native_css_scale; 2], |(w, h)| [w as f32 / width, h as f32 / height]);
+    let vector_tolerance = crate::vector_export_tolerance(f64::from(css_scale[0].max(css_scale[1])) * 0.75);
+    let [scale_x, scale_y] = if opts.set_viewbox { [1.0; 2] } else { css_scale };
+    if opts.rasterize == RasterizeMode::Everything {
+        let region = (origin_x, origin_y, width, height);
+        let resolution = crate::raster::ExportOptions { dpi: Some(opts.raster_dpi as f32), ..Default::default() };
+        let (pixels_w, pixels_h) = crate::raster::target_size(
+            (0.0, 0.0, width * css_scale[0], height * css_scale[1]), 96.0, &resolution,
+        )?;
+        let size = [pixels_w as usize, pixels_h as usize];
+        let pixels = if page_scoped {
+            let pages: Vec<_> = crate::output_page_batches(doc, &req.area, req.pages.as_deref()).into_iter().flatten().collect();
+            if pages.is_empty() { vec![0; size[0] * size[1] * 4] } else { crate::render_pages_rgba_region(doc, &pages, region, size) }
+        } else {
+            crate::raster::render_rgba_for_area(doc, &req.area, region, size)
+        };
+        if control.is_cancelled() { return Err(CommandError::new("export.cancelled")); }
+        let data = png_data(&pixels, pixels_w, pixels_h, image::ExtendedColorType::Rgba8)?;
+        let width = format_float(width * scale_x, opts.precision.max(6));
+        let height = format_float(height * scale_y, opts.precision.max(6));
+        let _ = writeln!(svg_content, "<image width=\"{width}\" height=\"{height}\" preserveAspectRatio=\"none\" xlink:href=\"data:image/png;base64,{data}\"/>");
+        return Ok((finish_svg(svg_content, opts.line_breaks), warnings));
+    }
+    let transformed = origin_x != 0.0 || origin_y != 0.0 || scale_x != 1.0 || scale_y != 1.0;
     if transformed {
+        let x = format_float(scale_x, 6);
+        let scale = if scale_x == scale_y { x } else { format!("{x} {}", format_float(scale_y, 6)) };
         svg_content.push_str(&format!(
-            "<g transform=\"scale({}) translate({} {})\">\n",
-            format_float(scale, opts.precision.max(6)),
+            "<g transform=\"scale({scale}) translate({} {})\">\n",
             format_float(-origin_x, opts.precision),
             format_float(-origin_y, opts.precision)
         ));
     }
+    let scaled_options = output_size.map(|_| {
+        let scale = css_scale[0].max(css_scale[1]) / native_css_scale;
+        SvgOptions { raster_dpi: (opts.raster_dpi as f32 * scale).round().max(1.0) as u32, ..opts.clone() }
+    });
+    let opts = scaled_options.as_ref().unwrap_or(opts);
     
     let mut children = HashMap::<Option<ObjectId>, Vec<&Object>>::new();
     let mut named_ids = HashSet::new();
@@ -216,19 +249,18 @@ pub(crate) fn encode_svg(
     let effect_sources = effect_scene.as_ref().map_or_else(Default::default, |scene| {
         dtool_core::layer_style::raster::export_effect_sources(doc, scene)
     });
-    let bitmap_blurs = dtool_core::layer_style::raster::export_bitmap_blurs(doc, &effect_sources);
+    let bitmap_blurs = if opts.rasterize == RasterizeMode::Nothing { HashMap::new() }
+        else { dtool_core::layer_style::raster::export_bitmap_blurs(doc, &effect_sources) };
     SvgLayers {
         doc, opts, control, children, object_ids, effect_scene, effect_sources, bitmap_blurs, area: [origin_x, origin_y, width, height],
-        ranges: crate::blend_range_mask::RangeMasks::new(doc),
+        ranges: crate::blend_range_mask::RangeMasks::new(doc), vector_tolerance,
         page_area: page_scoped.then_some((origin_x, origin_y, width, height)),
     }.write_children(None, &mut svg_content, &mut warnings)?;
 
     if transformed {
         svg_content.push_str("</g>\n");
     }
-    write_svg_footer(&mut svg_content);
-
-    Ok((svg_content.into_bytes(), warnings))
+    Ok((finish_svg(svg_content, opts.line_breaks), warnings))
 }
 
 struct SvgLayers<'a> {
@@ -243,6 +275,7 @@ struct SvgLayers<'a> {
     area: [f32; 4],
     ranges: Option<crate::blend_range_mask::RangeMasks<'a>>,
     page_area: Option<(f32, f32, f32, f32)>,
+    vector_tolerance: f64,
 }
 
 impl SvgLayers<'_> {
@@ -275,9 +308,19 @@ impl SvgLayers<'_> {
             && write_k08_open(content, self.doc, group, &[crate::artboard_ring(group)], self.opts);
         let masked = write_pixel_mask(content, self.doc, group, self.opts)?;
         let opacity = group.opacity.clamp(0.0, 1.0);
+        let blur = dtool_core::layer_style::raster::group_effect_target(group)
+            .then(|| group.effects.iter().find_map(dtool_core::layer_style::raster::group_blur_params))
+            .flatten();
+        let shadow = native_outer_shadow(group).filter(|_| {
+            dtool_core::layer_style::raster::group_effect_target(group)
+                && !self.has_blended_child(group.id)
+                && !self.doc.subtree_ids(group.id).iter().any(|id| {
+                    *id != group.id && self.doc.get_object(*id).is_some_and(|child| child.effects.iter().any(|effect| effect.enabled))
+                })
+        });
         let passthrough = group.blend_mode == BlendMode::PassThrough
             && !group.blend_ranges.as_ref().is_some_and(|ranges| ranges.is_valid());
-        if passthrough && (masked || opacity < 1.0) && self.has_blended_child(group.id) {
+        if passthrough && (masked || opacity < 1.0 || blur.is_some()) && self.has_blended_child(group.id) {
             warnings.push(format!("export.svg.pass_through_isolated:{}", group.id.0));
         }
         let id = group.id.0;
@@ -292,9 +335,28 @@ impl SvgLayers<'_> {
         }
         content.push_str(">\n");
         let transparent = self.open_transparency(group, content, warnings);
-        let range = self.open_blend_range(group, content)?;
-        let scale = crate::raster::document_unit_points(self.doc) * self.opts.raster_dpi.max(1) as f32 / 72.0;
-        let group_effects = crate::effect_image::group_effect_images(self.doc, group, self.effect_scene.as_ref(), scale);
+        let range = self.open_blend_range(group, content, warnings)?;
+        let filter_close = (blur.is_some() || shadow.is_some()).then(|| {
+            let scene = self.effect_scene.as_ref()?;
+            let members = self.doc.subtree_ids(group.id);
+            let prims = scene.prims.iter().filter(|prim| {
+                dtool_core::layer_style::raster::prim_object(prim).is_some_and(|id| id != group.id && members.contains(&id))
+            });
+            let bounds = effect_bounds(self.doc, &[], group.id, prims)?;
+            Some(if let Some(blur) = blur {
+                open_gaussian_blur(content, id, blur, bounds, self.opts)
+            } else {
+                open_drop_shadow(content, id, shadow?, bounds, self.opts)
+            })
+        }).flatten();
+        let rasterize = self.opts.rasterize != RasterizeMode::Nothing;
+        let shadow_written = shadow.is_some() && filter_close.is_some();
+        let group_effects = if rasterize && !shadow_written {
+            let scale = crate::raster::document_unit_points(self.doc) * self.opts.raster_dpi.max(1) as f32 / 72.0;
+            crate::effect_image::group_effect_images(self.doc, group, self.effect_scene.as_ref(), scale)
+        } else {
+            Default::default()
+        };
         for (blend, raster) in group_effects.behind {
             write_effect_image(content, raster, blend, self.opts)?;
         }
@@ -303,15 +365,23 @@ impl SvgLayers<'_> {
             let (behind, above) = export_effect_layers(self.doc, group.id, &prims.iter().collect::<Vec<_>>());
             (bounds, behind, above)
         });
-        if let Some(bounds) = bounds {
+        if !rasterize && (!behind.is_empty() || !above.is_empty()
+            || (!shadow_written && group.effects.iter().any(dtool_core::layer_style::raster::group_effect_enabled)))
+        {
+            warnings.push(format!("export.svg.effects_not_rasterized:{id}"));
+        }
+        if rasterize && let Some(bounds) = bounds {
             write_effect_images(content, self.doc, bounds, &behind, self.opts)?;
         }
         self.write_children(Some(group.id), content, warnings)?;
         for (blend, raster) in group_effects.above {
             write_effect_image(content, raster, blend, self.opts)?;
         }
-        if let Some(bounds) = bounds {
+        if rasterize && let Some(bounds) = bounds {
             write_effect_images(content, self.doc, bounds, &above, self.opts)?;
+        }
+        if let Some(close) = filter_close {
+            content.push_str(close);
         }
         if range {
             content.push_str("</g>\n");
@@ -329,6 +399,7 @@ impl SvgLayers<'_> {
     fn write_leaf(&self, object: &Object, content: &mut String, warnings: &mut Vec<String>) -> Result<(), CommandError> {
         let doc = self.doc;
         let opts = self.opts;
+        let rasterize = opts.rasterize != RasterizeMode::Nothing;
         let id = &self.object_ids[&object.id];
         let sources = self.effect_sources.get(&object.id);
         let bounds = sources.and_then(|prims| effect_bounds(doc, &[], object.id, prims));
@@ -340,7 +411,7 @@ impl SvgLayers<'_> {
         }) {
             return Ok(());
         }
-        let k08 = dtool_core::clip_mask::clip_region(doc, object.id);
+        let k08 = dtool_core::clip_mask::layer_clip_region(doc, object.id);
         if k08.as_ref().is_some_and(|rings| !rings.iter().any(|ring| ring.len() >= 3)) {
             return Ok(());
         }
@@ -351,8 +422,37 @@ impl SvgLayers<'_> {
         let (behind, above) = sources.map_or_else(Default::default, |prims| {
             export_effect_layers(doc, object.id, &prims.iter().collect::<Vec<_>>())
         });
+        let native_blur = crate::effect_image::solid_leaf_blur(object, sources.map(Vec::as_slice)).zip(bounds);
         let crop = crate::vector_crop_bounds(object);
-        if let Some([x, y, w, h]) = crop {
+        let filter_close = if let Some(((_, blur), bounds)) = native_blur {
+            Some(open_gaussian_blur(content, object.id.0, blur, bounds, opts))
+        } else if let Some(shadow) = native_outer_shadow(object)
+            && let Some(bounds) = bounds
+            && matches!(sources.map(Vec::as_slice), Some([Prim::Fill { paint: dtool_core::paint::Paint::Solid { .. }, .. }]))
+            && object.path_brush.is_none()
+            && crop.is_none() && k08.is_none()
+            && dtool_core::scene::oriented_vector_crop(object).is_none()
+            && matches!(object.transparency, dtool_core::paint::Transparency::None)
+            && object.blend_ranges.is_none() && object.tone_blend.is_none()
+            && dtool_core::raster_source::compositing_mask(doc, object).is_none()
+        {
+            Some(open_drop_shadow(content, object.id.0, shadow, bounds, opts))
+        } else {
+            None
+        };
+        if filter_close.is_none() && rasterize && let Some(bounds) = bounds {
+            // Effects use the cropped source geometry and may extend beyond it.
+            write_effect_images(content, doc, bounds, &behind, opts)?;
+        } else if filter_close.is_none() && !rasterize && (!behind.is_empty() || !above.is_empty()) {
+            warnings.push(format!("export.svg.effects_not_rasterized:{}", object.id.0));
+        }
+        if let Some(quad) = dtool_core::scene::oriented_vector_crop(object) {
+            let points = quad.into_iter().map(|[x, y]| {
+                format!("{},{}", format_float(x, opts.precision), format_float(y, opts.precision))
+            }).collect::<Vec<_>>().join(" ");
+            let id = object.id.0;
+            let _ = writeln!(content, "<clipPath id=\"crop-{id}\"><polygon points=\"{points}\"/></clipPath>\n<g clip-path=\"url(#crop-{id})\">");
+        } else if let Some([x, y, w, h]) = crop {
             content.push_str(&format!(
                 "<clipPath id=\"crop-{}\"><rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\"/></clipPath>\n<g clip-path=\"url(#crop-{})\">\n",
                 object.id.0,
@@ -363,9 +463,6 @@ impl SvgLayers<'_> {
                 object.id.0
             ));
         }
-        if let Some(bounds) = bounds {
-            write_effect_images(content, doc, bounds, &behind, opts)?;
-        }
         let clipped = k08.as_ref().is_some_and(|rings| write_k08_open(content, doc, object, rings, opts));
         let pixel_mask = write_pixel_mask(content, doc, object, opts)?;
         if pixel_mask {
@@ -373,9 +470,9 @@ impl SvgLayers<'_> {
         }
         let transparent = self.open_transparency(object, content, warnings);
         let clear_text = self.ranges.as_ref().and_then(|ranges| ranges.clear_text_background(object));
-        let range = clear_text.is_none() && self.open_blend_range(object, content)?;
+        let range = clear_text.is_none() && self.open_blend_range(object, content, warnings)?;
         let object = clear_text.as_ref().unwrap_or(object);
-        if let Some(ink) = dtool_core::path_brush::Ink::new(doc, object) {
+        if rasterize && let Some(ink) = dtool_core::path_brush::Ink::new(doc, object) {
             let mut base = object.clone();
             base.stroke.paint = dtool_core::paint::Paint::None;
             let under = matches!(object.paint_order, dtool_core::paint::PaintOrder::StrokeUnder);
@@ -388,14 +485,17 @@ impl SvgLayers<'_> {
             if under {
                 content.push_str(&image);
             }
-            write_object(content, doc, &base, id, opts, self.page_area.is_some(), warnings);
+            write_object(content, doc, &base, id, opts, warnings, self.vector_tolerance);
             if !under {
                 content.push_str(&image);
             }
         } else if let Some((bounds, layers)) = bitmap_blur {
             write_effect_images(content, doc, *bounds, layers, opts)?;
         } else if !write_raster_layer(content, doc, object, opts)? {
-            write_object(content, doc, object, id, opts, self.page_area.is_some(), warnings);
+            if !rasterize && object.path_brush.is_some() {
+                warnings.push(format!("export.svg.path_brush_not_rasterized:{}", object.id.0));
+            }
+            write_object(content, doc, object, id, opts, warnings, self.vector_tolerance);
         }
         if range {
             content.push_str("</g>\n");
@@ -409,11 +509,13 @@ impl SvgLayers<'_> {
         if clipped {
             content.push_str("</g>\n");
         }
-        if let Some(bounds) = bounds {
-            write_effect_images(content, doc, bounds, &above, opts)?;
-        }
         if crop.is_some() {
             content.push_str("</g>\n");
+        }
+        if let Some(close) = filter_close {
+            content.push_str(close);
+        } else if rasterize && let Some(bounds) = bounds {
+            write_effect_images(content, doc, bounds, &above, opts)?;
         }
         if !blend.is_empty() {
             content.push_str("</g>\n");
@@ -421,7 +523,13 @@ impl SvgLayers<'_> {
         Ok(())
     }
 
-    fn open_blend_range(&self, object: &Object, content: &mut String) -> Result<bool, CommandError> {
+    fn open_blend_range(&self, object: &Object, content: &mut String, warnings: &mut Vec<String>) -> Result<bool, CommandError> {
+        if self.opts.rasterize == RasterizeMode::Nothing {
+            if object.blend_ranges.as_ref().is_some_and(|ranges| ranges.is_valid()) {
+                warnings.push(format!("export.svg.blend_range_not_rasterized:{}", object.id.0));
+            }
+            return Ok(false);
+        }
         let scale = self.opts.raster_dpi.max(300) as f32 * crate::raster::document_unit_points(self.doc) / 72.0;
         let Some(mask) = self.ranges.as_ref().and_then(|ranges| ranges.sample(object, self.area, scale)) else {
             return Ok(false);
@@ -437,16 +545,30 @@ impl SvgLayers<'_> {
 
     fn open_transparency(&self, object: &Object, content: &mut String, warnings: &mut Vec<String>) -> bool {
         use dtool_core::paint::{GradientKind, Paint, Transparency};
-        let Transparency::Gradient { kind, stops, geom } = &object.transparency else { return false };
+        if matches!(object.transparency, Transparency::None) { return false; }
         let id = object.id.0;
         let [x, y, w, h] = self.area;
         let f = |v| format_float(v, self.opts.precision.max(6));
-        let (mut defs, ink) = if *kind == GradientKind::Conical {
+        let (mut defs, ink) = if let Transparency::InverseBitmap(bitmap) = &object.transparency {
+            let Some(([width, height], pixels)) = crate::effect_image::bitmap_mask_tile(self.doc, bitmap) else { return false };
+            let Ok(data) = png_data(&pixels, width, height, image::ExtendedColorType::Rgba8) else { return false };
+            let world = kurbo::Affine::new(dtool_core::geometry::object_matrix(object).map(f64::from))
+                * kurbo::Affine::translate((f64::from(object.pos[0]), f64::from(object.pos[1])));
+            let transform = world * kurbo::Affine::new(bitmap.matrix);
+            let fill_id = format!("dtool-transparency-tile-{id}");
+            let defs = bitmap_pattern_data(&fill_id, width as usize, height as usize, transform, &data);
+            let ink = format!("<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" fill=\"url(#{fill_id})\"/>", f(x), f(y), f(w), f(h));
+            (defs, ink)
+        } else if matches!(&object.transparency, Transparency::Gradient { kind: GradientKind::Conical, .. }) {
+            if self.opts.rasterize == RasterizeMode::Nothing {
+                warnings.push(format!("export.svg.transparency_unsupported:{id}"));
+                return false;
+            }
             let scale = self.opts.raster_dpi as f32 * crate::raster::document_unit_points(self.doc) / 72.0;
             let Some(([width, height], pixels)) = crate::effect_image::transparency_pixels(object, self.area, scale) else { return false };
             let Ok(data) = png_data(&pixels, width, height, image::ExtendedColorType::Rgba8) else { return false };
             (String::new(), format!("<image x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" preserveAspectRatio=\"none\" href=\"data:image/png;base64,{data}\"/>", f(x), f(y), f(w), f(h)))
-        } else {
+        } else if let Transparency::Gradient { kind, stops, geom } = &object.transparency {
             let fill_id = format!("dtool-transparency-gradient-{id}");
             let gradient = Paint::Gradient { kind: *kind, stops: stops.clone(), geom: *geom };
             let Some(definition) = gradient_def(&gradient, &fill_id, self.opts) else {
@@ -462,6 +584,8 @@ impl SvgLayers<'_> {
             let transform = matrix.map(f).join(" ");
             (definition, format!("<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" transform=\"matrix({transform})\" fill=\"url(#{fill_id})\"/>",
                 f(lx), f(ly), f(lw), f(lh)))
+        } else {
+            return false;
         };
         let _ = writeln!(defs,
             "<mask id=\"dtool-transparency-{id}\" maskUnits=\"userSpaceOnUse\" style=\"mask-type:alpha\" x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\">{ink}</mask>\n<g mask=\"url(#dtool-transparency-{id})\">",
@@ -514,6 +638,88 @@ fn write_pixel_mask(content: &mut String, doc: &Document, group: &Object, opts: 
     let _ = writeln!(content,
         "<defs><mask id=\"dtool-pixel-mask-{id}\" maskUnits=\"userSpaceOnUse\" maskContentUnits=\"userSpaceOnUse\" x=\"{left}\" y=\"{top}\" width=\"{width}\" height=\"{height}\"><image x=\"{x}\" y=\"{y}\" width=\"{w}\" height=\"{h}\" preserveAspectRatio=\"none\" image-rendering=\"optimizeSpeed\" transform=\"matrix({a} {b} {c} {d} {e} {g})\" xlink:href=\"data:image/png;base64,{data}\"/></mask></defs>");
     Ok(true)
+}
+
+fn native_outer_shadow(object: &Object) -> Option<&LayerEffect> {
+    let mut enabled = object.effects.iter().filter(|effect| effect.enabled);
+    let effect = enabled.next()?;
+    (enabled.next().is_none() && effect.kind == EffectKind::OuterShadow && effect.blend.is_normal()
+        && effect.opacity > 0.0 && effect.band_pass.is_none() && effect.is_valid()
+        && matches!(effect.params, EffectParams::Shadow { intensity: 0.0, knock_out: false, .. }))
+        .then_some(effect)
+}
+
+fn open_drop_shadow(
+    content: &mut String, id: u64, effect: &LayerEffect, bounds: [f32; 4], opts: &SvgOptions,
+) -> &'static str {
+    let EffectParams::Shadow { radius, radius_y, blur_angle, offset, angle, ref colour, .. } = effect.params
+        else { unreachable!("native_outer_shadow checked the effect") };
+    let [mut radius_x, mut radius_y] = [radius, radius_y.unwrap_or(radius)];
+    let tilt = if radius_x == radius_y { 0.0 } else { blur_angle.unwrap_or_default().rem_euclid(180.0) };
+    let tilt = if tilt == 90.0 {
+        std::mem::swap(&mut radius_x, &mut radius_y);
+        0.0
+    } else {
+        tilt
+    };
+    let (sin, cos) = angle.to_radians().sin_cos();
+    let shift = kurbo::Vec2::new(f64::from(-cos * offset), f64::from(sin * offset));
+    let local = (kurbo::Affine::rotate(-f64::from(tilt).to_radians()) * shift.to_point()).to_vec2();
+    let precision = opts.precision.max(6);
+    let [dx, dy, opacity] = [local.x as f32, local.y as f32, effect.opacity * f32::from(colour.a) / 255.0]
+        .map(|value| format_float(value, precision));
+    let sigma = filter_deviation([radius_x, radius_y], precision);
+    let (r, g, b) = (colour.r, colour.g, colour.b);
+    let filter_id = format!("dtool-shadow-{id}");
+    open_filter_definition(content, &filter_id, bounds, tilt, precision);
+    let _ = write!(content, "<feDropShadow dx=\"{dx}\" dy=\"{dy}\" stdDeviation=\"{sigma}\" flood-color=\"#{r:02x}{g:02x}{b:02x}\" flood-opacity=\"{opacity}\"/>");
+    open_filter_group(content, &filter_id, tilt, precision)
+}
+
+fn filter_deviation(radii: [f32; 2], precision: u8) -> String {
+    let [x, y] = radii.map(|radius| format_float(radius * 0.5, precision));
+    if x == y { x } else { format!("{x} {y}") }
+}
+
+fn open_filter_definition(content: &mut String, id: &str, [x, y, width, height]: [f32; 4], angle: f32, precision: u8) {
+    let [x, y, width, height] = if angle == 0.0 {
+        [x, y, width, height]
+    } else {
+        let bounds = kurbo::Rect::from_origin_size((f64::from(x), f64::from(y)), (f64::from(width), f64::from(height)));
+        let local = kurbo::Affine::rotate(-f64::from(angle).to_radians()).transform_rect_bbox(bounds);
+        [local.x0 as f32, local.y0 as f32, local.width() as f32, local.height() as f32]
+    };
+    let [x, y, width, height] = [x, y, width, height].map(|v| format_float(v, precision));
+    let _ = write!(content,
+        "<defs><filter id=\"{id}\" filterUnits=\"userSpaceOnUse\" x=\"{x}\" y=\"{y}\" width=\"{width}\" height=\"{height}\" color-interpolation-filters=\"sRGB\">");
+}
+
+fn open_filter_group(content: &mut String, id: &str, angle: f32, precision: u8) -> &'static str {
+    content.push_str("</filter></defs>\n");
+    if angle == 0.0 {
+        let _ = writeln!(content, "<g filter=\"url(#{id})\">");
+        "</g>\n"
+    } else {
+        let angle = format_float(angle, precision);
+        // Rotate the filter's coordinate space, then compensate for its source.
+        let _ = writeln!(content, "<g transform=\"rotate({angle})\"><g filter=\"url(#{id})\"><g transform=\"rotate(-{angle})\">");
+        "</g>\n</g>\n</g>\n"
+    }
+}
+
+fn open_gaussian_blur(
+    content: &mut String, id: u64, blur: dtool_core::layer_style::raster::GaussianBlur,
+    bounds: [f32; 4], opts: &SvgOptions,
+) -> &'static str {
+    let precision = opts.precision.max(6);
+    let sigma = filter_deviation(blur.radii, precision);
+    let filter_id = format!("dtool-blur-{id}");
+    open_filter_definition(content, &filter_id, bounds, blur.angle, precision);
+    let _ = write!(content, "<feGaussianBlur stdDeviation=\"{sigma}\"/>");
+    if blur.preserve_alpha {
+        content.push_str("<feComponentTransfer><feFuncA type=\"linear\" slope=\"0\" intercept=\"1\"/></feComponentTransfer><feComposite in2=\"SourceAlpha\" operator=\"in\"/>");
+    }
+    open_filter_group(content, &filter_id, blur.angle, precision)
 }
 
 fn png_data(pixels: &[u8], width: u32, height: u32, colour: image::ExtendedColorType) -> Result<String, CommandError> {
@@ -584,7 +790,7 @@ fn write_raster_layer(content: &mut String, doc: &Document, object: &Object, opt
     let outline = frame.map(|geometry| geometry.outline().into_iter().map(|point| apply_matrix(&matrix, point)).collect())
         .unwrap_or_else(|| object_world_quad(object).to_vec());
     let outline_path = contour_path(&[outline], opts.precision.max(6));
-    let paint_path = object.path_data().unwrap_or_else(|| outline_path.clone());
+    let paint_path = shape_path_data(object, opts.precision).unwrap_or_else(|| outline_path.clone());
     let opacity = format_float(object.opacity.clamp(0.0, 1.0), 6);
     let stroke_under = matches!(object.paint_order, dtool_core::paint::PaintOrder::StrokeUnder);
     let write_outline = |out: &mut String| {
@@ -664,7 +870,14 @@ fn write_k08_open(content: &mut String, doc: &Document, object: &dtool_core::Obj
     true
 }
 
-fn write_svg_header(content: &mut String, width: f32, height: f32, unit_points: f32, page_scoped: bool, opts: &SvgOptions) {
+fn write_svg_header(content: &mut String, width: f32, height: f32, unit_points: f32, output_size: Option<(u32, u32)>, page_scoped: bool, opts: &SvgOptions) {
+    let size = |value: f32| {
+        if f64::from(value) * 10.0_f64.powi(i32::from(opts.precision)) < 0.5 {
+            value.to_string()
+        } else {
+            format_float(value, opts.precision)
+        }
+    };
     content.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
     content.push_str("<svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\" ");
     if page_scoped {
@@ -674,20 +887,37 @@ fn write_svg_header(content: &mut String, width: f32, height: f32, unit_points: 
     if opts.set_viewbox {
         content.push_str(&format!(
             "viewBox=\"0 0 {} {}\" ",
-            format_float(width, opts.precision),
-            format_float(height, opts.precision)
+            size(width),
+            size(height)
         ));
+        if output_size.is_some() {
+            content.push_str("preserveAspectRatio=\"none\" ");
+        }
     }
-    
+    if let Some((width, height)) = output_size {
+        let _ = writeln!(content, "width=\"{width}\" height=\"{height}\">");
+        return;
+    }
     content.push_str(&format!(
         "width=\"{}pt\" height=\"{}pt\">\n",
-        format_float(width * unit_points, opts.precision),
-        format_float(height * unit_points, opts.precision)
+        size(width * unit_points),
+        size(height * unit_points)
     ));
 }
 
-fn write_svg_footer(content: &mut String) {
+fn finish_svg(mut content: String, line_breaks: bool) -> Vec<u8> {
     content.push_str("</svg>\n");
+    if !line_breaks {
+        // User text escapes line breaks as character references. Only strip
+        // formatting newlines emitted after tags by the SVG writer.
+        let mut after_tag = false;
+        content.retain(|ch| {
+            let keep = ch != '\n' || !after_tag;
+            after_tag = ch == '>';
+            keep
+        });
+    }
+    content.into_bytes()
 }
 
 fn write_layout_text(
@@ -696,13 +926,13 @@ fn write_layout_text(
     object: &dtool_core::Object,
     id: &str,
     opts: &SvgOptions,
-    use_shaped_text: bool,
+    tolerance: f64,
 ) -> bool {
     use std::fmt::Write;
     if dtool_core::scene::has_live_text_warp(doc, object.id) {
         dtool_text::canvas_text::install();
         let lines = dtool_core::text_lines::text_lines(doc, object.id);
-        if let Some(ink) = dtool_core::scene::warped_text_ink(doc, object, &lines, object.opacity) {
+        if let Some(ink) = dtool_core::scene::warped_text_ink_with_tolerance(doc, object, &lines, object.opacity, tolerance) {
             let _ = writeln!(content, "<g id=\"{id}\" opacity=\"{}\">", format_float(object.opacity, 3));
             for (index, prim) in ink.into_iter().enumerate() {
                 let dtool_core::scene::Prim::Fill { contours, paint, .. } = prim else { continue };
@@ -721,10 +951,7 @@ fn write_layout_text(
         }
     }
     let library = dtool_text::FontLibrary::shared();
-    // Match the font and baseline used to rasterize the effect's silhouette.
-    let tabbed_only = !use_shaped_text && !object.effects.iter().any(|effect| effect.enabled)
-        && object.text_scale == dtool_core::object::IDENTITY_TEXT_SCALE;
-    let Some(layout) = dtool_text::canvas_text::text_export_layout(&library, doc, object, opts.text_as_curves, tabbed_only) else {
+    let Some(layout) = dtool_text::canvas_text::text_export_layout(&library, doc, object, opts.text_as_curves) else {
         return false;
     };
     let fill_id = format!("dtool-tab-text-{}", object.id.0);
@@ -850,6 +1077,7 @@ fn css_appearance_blend(mode: dtool_core::blend::BlendMode) -> Option<&'static s
 
 fn write_appearance_path(
     content: &mut String,
+    doc: &Document,
     object: dtool_core::ObjectId,
     index: usize,
     path: &dtool_core::commands::appearance::AppearancePath,
@@ -860,14 +1088,16 @@ fn write_appearance_path(
 ) {
     use dtool_core::commands::appearance::RowBlend;
     let gradient_id = format!("dtool-appearance-{}-{index}", object.0);
-    let gradient = gradient_def(&path.paint, &gradient_id, opts);
+    let gradient = gradient_def(&path.paint, &gradient_id, opts)
+        .or_else(|| bitmap_pattern_def(doc, &path.paint, kurbo::Affine::IDENTITY, &gradient_id))
+        .or_else(|| conical_pattern_def(doc, path, &gradient_id, opts));
     if let Some(defs) = gradient.as_deref() {
         content.push_str(defs);
     } else if paint_is_flattened(&path.paint) {
         warnings.push(format!("export.{}.paint_flattened:{}", SVG_WARN_SCOPE, object.0));
     }
     let rule = if path.even_odd { "evenodd" } else { "nonzero" };
-    let _ = write!(content, "<path d=\"{}\" fill-rule=\"{rule}\" opacity=\"{}\" ", path.path.to_svg(), format_float(opacity, 4));
+    let _ = write!(content, "<path d=\"{}\" fill-rule=\"{rule}\" opacity=\"{}\" ", bezier_path_data(&path.path, opts.precision), format_float(opacity, 4));
     if let RowBlend::Standard(mode) = path.blend
         && let Some(mode) = css_appearance_blend(mode)
     {
@@ -880,9 +1110,21 @@ fn write_appearance_path(
     content.push_str("/>\n");
 }
 
-fn write_object(content: &mut String, doc: &Document, object: &dtool_core::Object, id: &str, opts: &SvgOptions, page_scoped: bool, warnings: &mut Vec<String>) {
-    if dtool_core::commands::appearance::has_layers(object)
-        && let Some(paths) = dtool_core::commands::appearance::vector_paths(doc, object, &object.fill, false)
+fn write_object(content: &mut String, doc: &Document, object: &dtool_core::Object, id: &str, opts: &SvgOptions, warnings: &mut Vec<String>, tolerance: f64) {
+    use dtool_core::paint::{GradientKind, Paint, PaintOrder, StrokeAlign};
+    let conical = opts.rasterize != RasterizeMode::Nothing && opts.embed_images
+        && [&object.fill, &object.stroke.paint].into_iter()
+            .any(|paint| matches!(paint, Paint::Gradient { kind: GradientKind::Conical, .. }));
+    let styled_stroke = object.stroke.width > 0.0 && object.stroke.paint != Paint::None
+        && (!object.stroke.pressure.is_empty() || object.stroke.align != StrokeAlign::Centre
+            || object.paint_order == PaintOrder::StrokeUnder);
+    if (dtool_core::commands::appearance::has_layers(object) || object.stroke.cap == dtool_core::paint::Cap::RoundInset
+        || styled_stroke
+        || conical
+        || matches!(object.stroke.paint, dtool_core::paint::Paint::Bitmap(_)
+            | dtool_core::paint::Paint::Gradient { kind: dtool_core::paint::GradientKind::Linear
+                | dtool_core::paint::GradientKind::Radial | dtool_core::paint::GradientKind::Elliptical, .. }))
+        && let Some(paths) = dtool_core::commands::appearance::vector_paths_with_tolerance(doc, object, &object.fill, false, tolerance)
     {
         let isolated = object.opacity < 1.0 || paths.iter().any(|path| !path.blend.is_normal());
         let opacity = if isolated { 1.0 } else { object.opacity };
@@ -901,7 +1143,7 @@ fn write_object(content: &mut String, doc: &Document, object: &dtool_core::Objec
             for (index, path) in paths.iter().enumerate().rev().filter(|(_, path)| path.blend.erases()) {
                 let mask_id = format!("dtool-erase-{}-{index}", object.id.0);
                 let _ = writeln!(content, "<defs><mask id=\"{mask_id}\" maskUnits=\"userSpaceOnUse\" {rect} style=\"mask-type:luminance\"><rect {rect} fill=\"white\"/>");
-                write_appearance_path(content, object.id, index, path, opts, warnings, 1.0, Some(&blacken));
+                write_appearance_path(content, doc, object.id, index, path, opts, warnings, 1.0, Some(&blacken));
                 let _ = writeln!(content, "</mask></defs><g mask=\"url(#{mask_id})\">");
                 masks.push(index);
             }
@@ -911,15 +1153,22 @@ fn write_object(content: &mut String, doc: &Document, object: &dtool_core::Objec
                 masks.pop();
                 content.push_str("</g>\n");
             } else {
-                write_appearance_path(content, object.id, index, path, opts, warnings, opacity, None);
+                write_appearance_path(content, doc, object.id, index, path, opts, warnings, opacity, None);
             }
         }
         content.push_str("</g>\n");
         return;
     }
     let gradient_id = format!("dtool-paint-{}", object.id.0);
-    let gradient = gradient_def(&object.fill, &gradient_id, opts)
-        .or_else(|| bitmap_fill_def(doc, object, &gradient_id));
+    let [x, y] = object.pos.map(f64::from);
+    let transform = kurbo::Affine::new(dtool_core::geometry::object_matrix(object).map(f64::from))
+        * kurbo::Affine::translate((x, y));
+    let gradient = if let dtool_core::paint::Paint::Gradient { kind, stops, geom } = &object.fill {
+        let paint = dtool_core::paint::Paint::Gradient { kind: *kind, stops: stops.clone(), geom: geom.transform(transform.as_coeffs()) };
+        gradient_def(&paint, &gradient_id, opts)
+    } else {
+        bitmap_pattern_def(doc, &object.fill, transform, &gradient_id)
+    };
     let fill_ref = gradient.as_ref().map(|_| gradient_id.as_str());
     if gradient.is_none() && paint_is_flattened(&object.fill) {
         warnings.push(format!("export.{}.paint_flattened:{}", SVG_WARN_SCOPE, object.id.0));
@@ -928,21 +1177,24 @@ fn write_object(content: &mut String, doc: &Document, object: &dtool_core::Objec
         warnings.push(format!("export.{}.stroke_paint_flattened:{}", SVG_WARN_SCOPE, object.id.0));
     }
     
-    let warped = object.parent_id.and_then(|_| {
-        let path = crate::vector_world_path(object)?;
-        dtool_core::commands::warp::live_warp_outline(doc, object.id, &path)
-    });
     let open_spiral = object.shape.as_ref().is_some_and(|shape| shape.kind == dtool_core::shape::ShapeKind::Spiral);
+    let uses_path = matches!(object.kind, dtool_core::ObjectKind::Curve(_) | dtool_core::ObjectKind::Compound(_)) || open_spiral;
+    let path = (uses_path || object.parent_id.is_some())
+        .then(|| dtool_core::outline::object_outline_world_with_tolerance(object, tolerance)).flatten();
+    let warped = path.as_ref().and_then(|path| {
+        dtool_core::commands::warp::live_warp_outline_with_tolerance(doc, object.id, path, tolerance)
+    });
     match &object.kind {
         dtool_core::ObjectKind::Table(_) => write_table(content, doc, object, opts),
         dtool_core::ObjectKind::Shape if warped.is_none() && !open_spiral => {
             content.push_str(&format!("<g id=\"{}\">\n", id));
             
-            if let Some(path_data) = object.path_data() {
+            if let Some(path_data) = shape_path_data(object, opts.precision) {
                 if let Some(defs) = gradient.as_deref() {
                     content.push_str(defs);
                 }
-                content.push_str(&format!("<path d=\"{}\" ", path_data));
+                let rule = if object.fill_rule.is_even_odd() { "evenodd" } else { "nonzero" };
+                content.push_str(&format!("<path d=\"{path_data}\" fill-rule=\"{rule}\" "));
                 
                 match &object.fill {
                     dtool_core::paint::Paint::None => content.push_str("fill=\"none\" "),
@@ -962,20 +1214,21 @@ fn write_object(content: &mut String, doc: &Document, object: &dtool_core::Objec
             
             content.push_str("</g>\n");
         }
-        kind if matches!(kind, dtool_core::ObjectKind::Curve(_) | dtool_core::ObjectKind::Compound(_)) || warped.is_some() || open_spiral => {
-            let Some(path) = warped.or_else(|| crate::vector_world_path(object)) else { return; };
+        _ if uses_path || warped.is_some() => {
+            let Some(path) = warped.or(path) else { return; };
             let (path, fill_path) = crate::vector_curve_paths(path);
             let _ = writeln!(content, "<g id=\"{id}\" opacity=\"{}\">", format_float(object.opacity, 4));
             if !fill_path.elements().is_empty() {
                 if let Some(defs) = gradient.as_deref() {
                     content.push_str(defs);
                 }
-                let _ = write!(content, "<path d=\"{}\" fill-rule=\"evenodd\" ", fill_path.to_svg());
+                let rule = if object.fill_rule.is_even_odd() { "evenodd" } else { "nonzero" };
+                let _ = write!(content, "<path d=\"{}\" fill-rule=\"{rule}\" ", bezier_path_data(&fill_path, opts.precision));
                 write_fill(content, &object.fill, opts, fill_ref);
                 content.push_str("/>\n");
             }
             if crate::stroke_colour(&object.stroke).is_some() {
-                let _ = write!(content, "<path d=\"{}\" fill=\"none\" ", path.to_svg());
+                let _ = write!(content, "<path d=\"{}\" fill=\"none\" ", bezier_path_data(&path, opts.precision));
                 write_stroke(content, &object.stroke, opts);
                 content.push_str("/>\n");
                 let mut arrow_stroke = object.stroke.clone();
@@ -988,10 +1241,10 @@ fn write_object(content: &mut String, doc: &Document, object: &dtool_core::Objec
                     }
                     if head.filled {
                         path.close_path();
-                        let _ = write!(content, "<path d=\"{}\" ", path.to_svg());
+                        let _ = write!(content, "<path d=\"{}\" ", bezier_path_data(&path, opts.precision));
                         write_fill(content, &object.stroke.paint, opts, None);
                     } else {
-                        let _ = write!(content, "<path d=\"{}\" fill=\"none\" ", path.to_svg());
+                        let _ = write!(content, "<path d=\"{}\" fill=\"none\" ", bezier_path_data(&path, opts.precision));
                         arrow_stroke.width = head.line_width;
                         write_stroke(content, &arrow_stroke, opts);
                     }
@@ -1004,7 +1257,7 @@ fn write_object(content: &mut String, doc: &Document, object: &dtool_core::Objec
         | dtool_core::ObjectKind::ArtText { .. }
         | dtool_core::ObjectKind::FrameText { .. }
         | dtool_core::ObjectKind::PathText(_) => {
-            let container = crate::text_container(object).and_then(|container| container.path_data());
+            let container = crate::text_container(object).and_then(|container| shape_path_data(&container, opts.precision));
             let has_fill = container.is_some() && !matches!(object.fill, dtool_core::paint::Paint::None);
             let stroke_under = matches!(object.paint_order, dtool_core::paint::PaintOrder::StrokeUnder);
             let write_container_stroke = |content: &mut String| {
@@ -1027,10 +1280,7 @@ fn write_object(content: &mut String, doc: &Document, object: &dtool_core::Objec
                 write_fill(content, &object.fill, opts, fill_ref);
                 content.push_str("/>\n");
             }
-            let use_shaped_text = page_scoped || container.is_some()
-                || matches!(object.kind, dtool_core::ObjectKind::ArtText { .. })
-                || dtool_core::tone_blend::for_layer(doc, object.id).is_some();
-            if write_layout_text(content, doc, object, id, opts, use_shaped_text) {
+            if write_layout_text(content, doc, object, id, opts, tolerance) {
                 if !stroke_under {
                     write_container_stroke(content);
                 }
@@ -1048,7 +1298,7 @@ fn write_object(content: &mut String, doc: &Document, object: &dtool_core::Objec
                 let x = format_float(object.x(), opts.precision);
                 let y = format_float(baseline, opts.precision);
                 
-                content.push_str(&format!("<text id=\"{}\" x=\"{}\" y=\"{}\"", id, x, y));
+                content.push_str(&format!("<text id=\"{}\" x=\"{}\" y=\"{}\" xml:space=\"preserve\"", id, x, y));
                 
                 if let Some(font_size) = font_size {
                     content.push_str(&format!(" font-size=\"{}\"", format_float(font_size, opts.precision)));
@@ -1066,16 +1316,11 @@ fn write_object(content: &mut String, doc: &Document, object: &dtool_core::Objec
                 }
                 
                 content.push_str(">");
-                if opts.line_breaks && text_content.contains('\n') {
+                if text_content.contains('\n') {
                     let line_height = font_size.unwrap_or(12.0) * 1.2;
                     for (index, line) in text_content.lines().enumerate() {
-                        let dy = if index == 0 { 0.0 } else { line_height };
-                        content.push_str(&format!(
-                            "<tspan x=\"{}\" dy=\"{}\">{}</tspan>",
-                            x,
-                            format_float(dy, opts.precision),
-                            escape_xml(line)
-                        ));
+                        let line_y = format_float(baseline + line_height * index as f32, opts.precision);
+                        let _ = write!(content, "<tspan x=\"{x}\" y=\"{line_y}\">{}</tspan>", escape_xml(line));
                     }
                 } else {
                     content.push_str(&escape_xml(&text_content));
@@ -1091,7 +1336,7 @@ fn write_object(content: &mut String, doc: &Document, object: &dtool_core::Objec
                 let colour = crate::stroke_colour(&object.stroke)
                     .or_else(|| crate::paint_colour(&object.fill))
                     .unwrap_or(dtool_core::paint::Colour::new(0, 0, 0, 255));
-                let hex = colour_to_hex(&colour);
+                let colour = svg_colour(&colour, opts.hex_colours);
                 let width = if object.stroke.width.is_finite() && object.stroke.width > 0.0 { object.stroke.width } else { 1.0 };
                 let p = opts.precision;
                 let mut segments = vec![geometry.line];
@@ -1105,13 +1350,13 @@ fn write_object(content: &mut String, doc: &Document, object: &dtool_core::Objec
                     "<g id=\"{}\">\n<path d=\"{}\" fill=\"none\" stroke=\"{}\" stroke-width=\"{}\"/>\n",
                     id,
                     data.join(" "),
-                    hex,
+                    colour,
                     format_float(width, p)
                 ));
                 let x = format_float(geometry.label_at[0] as f32, p);
                 let y = format_float(geometry.label_at[1] as f32, p);
                 content.push_str(&format!(
-                    "<text x=\"{x}\" y=\"{y}\" font-size=\"{}\" text-anchor=\"middle\" dominant-baseline=\"middle\" fill=\"{hex}\" transform=\"rotate({} {x} {y})\">{}</text>\n</g>\n",
+                    "<text x=\"{x}\" y=\"{y}\" font-size=\"{}\" text-anchor=\"middle\" dominant-baseline=\"middle\" fill=\"{colour}\" transform=\"rotate({} {x} {y})\">{}</text>\n</g>\n",
                     format_float(dtool_core::outline::DIMENSION_LABEL_SIZE as f32, p),
                     format_float(geometry.label_angle_deg as f32, p),
                     escape_xml(&geometry.label)
@@ -1135,13 +1380,18 @@ fn gradient_def(fill: &dtool_core::paint::Paint, gradient_id: &str, opts: &SvgOp
         return None;
     }
     let p = opts.precision;
-    let f = |value: f64| format_float(value as f32, p);
+    let f = |value: f64| format_float(value, p);
+    let spread = if geom.spread.is_pad() {
+        String::new()
+    } else {
+        format!(" spreadMethod=\"{}\"", geom.spread.as_str())
+    };
     let dx = geom.end[0] - geom.start[0];
     let dy = geom.end[1] - geom.start[1];
     let (open, close) = match kind {
         GradientKind::Linear => (
             format!(
-                "<linearGradient id=\"{}\" gradientUnits=\"userSpaceOnUse\" x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\">",
+                "<linearGradient id=\"{}\" gradientUnits=\"userSpaceOnUse\" x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\"{spread}>",
                 gradient_id,
                 f(geom.start[0]),
                 f(geom.start[1]),
@@ -1175,6 +1425,14 @@ fn gradient_def(fill: &dtool_core::paint::Paint, gradient_id: &str, opts: &SvgOp
                     f(-geom.start[1])
                 ));
             }
+            if let Some([fx, fy]) = geom.focus {
+                let [x, y] = geom.start;
+                let _ = write!(open, " fx=\"{}\" fy=\"{}\"", f(x + fx * dx - fy * dy), f(y + fx * dy + fy * dx));
+            }
+            if geom.focus_radius > 0.0 {
+                let _ = write!(open, " fr=\"{}\"", f(geom.focus_radius * dx.hypot(dy)));
+            }
+            open.push_str(&spread);
             open.push('>');
             (open, "</radialGradient>")
         }
@@ -1185,7 +1443,7 @@ fn gradient_def(fill: &dtool_core::paint::Paint, gradient_id: &str, opts: &SvgOp
         out.push_str(&format!(
             "<stop offset=\"{}\" stop-color=\"{}\"",
             format_float(stop.offset.clamp(0.0, 1.0), 4),
-            colour_to_hex(&stop.colour)
+            svg_colour(&stop.colour, opts.hex_colours)
         ));
         if stop.colour.a < 255 {
             out.push_str(&format!(" stop-opacity=\"{}\"", format_float(f32::from(stop.colour.a) / 255.0, 2)));
@@ -1197,17 +1455,55 @@ fn gradient_def(fill: &dtool_core::paint::Paint, gradient_id: &str, opts: &SvgOp
     Some(out)
 }
 
-fn bitmap_fill_def(doc: &Document, object: &Object, id: &str) -> Option<String> {
-    let dtool_core::paint::Paint::Bitmap(bitmap) = &object.fill else { return None };
+fn bitmap_pattern_def(doc: &Document, paint: &dtool_core::paint::Paint, transform: kurbo::Affine, id: &str) -> Option<String> {
+    let dtool_core::paint::Paint::Bitmap(bitmap) = paint else { return None };
     let ([width, height], pixels) = dtool_core::scene::bitmap_source(doc, &bitmap.resource_id)?;
     let data = png_data(&pixels, width as u32, height as u32, image::ExtendedColorType::Rgba8).ok()?;
-    let [x, y] = object.pos.map(f64::from);
-    let transform = kurbo::Affine::new(dtool_core::geometry::object_matrix(object).map(f64::from))
-        * kurbo::Affine::translate((x, y)) * kurbo::Affine::new(bitmap.matrix);
+    let transform = transform * kurbo::Affine::new(bitmap.matrix);
+    Some(bitmap_pattern_data(id, width, height, transform, &data))
+}
+
+fn conical_pattern_def(
+    doc: &Document,
+    appearance: &dtool_core::commands::appearance::AppearancePath,
+    id: &str,
+    opts: &SvgOptions,
+) -> Option<String> {
+    use dtool_core::paint::{GradientKind, Paint, gradient_parameter, interpolate_stops};
+    use kurbo::Shape;
+
+    let Paint::Gradient { kind: GradientKind::Conical, stops, geom } = &appearance.paint else { return None };
+    if opts.rasterize == RasterizeMode::Nothing || !opts.embed_images || stops.is_empty() {
+        return None;
+    }
+    let bounds = appearance.path.bounding_box();
+    let (w, h) = (bounds.width(), bounds.height());
+    if !bounds.is_finite() || w <= 0.0 || h <= 0.0 {
+        return None;
+    }
+    let scale = crate::raster::document_unit_points(doc) * opts.raster_dpi.max(1) as f32 / 72.0;
+    let [width, height] = dtool_core::path_brush::pixel_size([w as f32, h as f32], scale);
+    let (step_x, step_y) = (w / width as f64, h / height as f64);
+    let mut pixels = Vec::with_capacity(width * height * 4);
+    for row in 0..height {
+        let y = bounds.y0 + (row as f64 + 0.5) * step_y;
+        for column in 0..width {
+            let x = bounds.x0 + (column as f64 + 0.5) * step_x;
+            let position = gradient_parameter(GradientKind::Conical, x, y, geom);
+            let colour = interpolate_stops(stops, position);
+            pixels.extend_from_slice(&[colour.r, colour.g, colour.b, colour.a]);
+        }
+    }
+    let data = png_data(&pixels, width as u32, height as u32, image::ExtendedColorType::Rgba8).ok()?;
+    let transform = kurbo::Affine::translate((bounds.x0, bounds.y0)) * kurbo::Affine::scale_non_uniform(step_x, step_y);
+    Some(bitmap_pattern_data(id, width, height, transform, &data))
+}
+
+fn bitmap_pattern_data(id: &str, width: usize, height: usize, transform: kurbo::Affine, data: &str) -> String {
     let [a, b, c, d, e, f] = transform.as_coeffs();
-    Some(format!(
+    format!(
         "<defs><pattern id=\"{id}\" patternUnits=\"userSpaceOnUse\" width=\"{width}\" height=\"{height}\" patternTransform=\"matrix({a} {b} {c} {d} {e} {f})\"><image width=\"{width}\" height=\"{height}\" xlink:href=\"data:image/png;base64,{data}\"/></pattern></defs>\n"
-    ))
+    )
 }
 
 fn write_fill(content: &mut String, fill: &dtool_core::paint::Paint, opts: &SvgOptions, gradient_id: Option<&str>) {
@@ -1216,14 +1512,7 @@ fn write_fill(content: &mut String, fill: &dtool_core::paint::Paint, opts: &SvgO
         return;
     }
     if let Some(colour) = crate::paint_colour(fill) {
-        if opts.hex_colours {
-            content.push_str(&format!("fill=\"{}\" ", colour_to_hex(&colour)));
-        } else {
-            content.push_str(&format!("fill=\"rgb({},{},{})\" ", 
-                colour.r, 
-                colour.g, 
-                colour.b));
-        }
+        let _ = write!(content, "fill=\"{}\" ", svg_colour(&colour, opts.hex_colours));
         if colour.a < 255 {
             content.push_str(&format!("fill-opacity=\"{}\" ", format_float(f32::from(colour.a) / 255.0, 2)));
         }
@@ -1234,14 +1523,7 @@ fn write_fill(content: &mut String, fill: &dtool_core::paint::Paint, opts: &SvgO
 
 fn write_stroke(content: &mut String, stroke: &dtool_core::paint::StrokeStyle, opts: &SvgOptions) {
     if let Some(colour) = crate::paint_colour(&stroke.paint) {
-        if opts.hex_colours {
-            content.push_str(&format!("stroke=\"{}\" ", colour_to_hex(&colour)));
-        } else {
-            content.push_str(&format!("stroke=\"rgb({},{},{})\" ", 
-                colour.r, 
-                colour.g, 
-                colour.b));
-        }
+        let _ = write!(content, "stroke=\"{}\" ", svg_colour(&colour, opts.hex_colours));
         if colour.a < 255 {
             content.push_str(&format!("stroke-opacity=\"{}\" ", format_float(f32::from(colour.a) / 255.0, 2)));
         }
@@ -1254,7 +1536,7 @@ fn write_stroke(content: &mut String, stroke: &dtool_core::paint::StrokeStyle, o
     use dtool_core::paint::{Cap, Join};
     match stroke.cap {
         Cap::Butt => {}
-        Cap::Round => content.push_str("stroke-linecap=\"round\" "),
+        Cap::Round | Cap::RoundInset => content.push_str("stroke-linecap=\"round\" "),
         Cap::Square => content.push_str("stroke-linecap=\"square\" "),
     }
     match stroke.join {
@@ -1268,22 +1550,65 @@ fn write_stroke(content: &mut String, stroke: &dtool_core::paint::StrokeStyle, o
     if !stroke.dash.is_empty() {
         let dash: Vec<String> = stroke.dash.iter().map(|value| format_float(*value, opts.precision)).collect();
         content.push_str(&format!("stroke-dasharray=\"{}\" ", dash.join(" ")));
+        if stroke.dash_offset != 0.0 {
+            content.push_str(&format!("stroke-dashoffset=\"{}\" ", format_float(stroke.dash_offset, opts.precision)));
+        }
     }
 }
 
-fn colour_to_hex(colour: &dtool_core::paint::Colour) -> String {
-    format!("#{:02x}{:02x}{:02x}", colour.r, colour.g, colour.b)
+fn svg_colour(colour: &dtool_core::paint::Colour, hex: bool) -> String {
+    if hex {
+        format!("#{:02x}{:02x}{:02x}", colour.r, colour.g, colour.b)
+    } else {
+        format!("rgb({},{},{})", colour.r, colour.g, colour.b)
+    }
 }
 
-fn format_float(value: f32, precision: u8) -> String {
-    match precision {
-        0 => format!("{}", value as i32),
-        1 => format!("{:.1}", value),
-        2 => format!("{:.2}", value),
-        3 => format!("{:.3}", value),
-        4 => format!("{:.4}", value),
-        _ => format!("{:.6}", value),
+fn shape_path_data(object: &Object, precision: u8) -> Option<String> {
+    if !matches!(object.kind, dtool_core::ObjectKind::Shape) {
+        return None;
     }
+    if object.shape.is_some() && let Some(path) = crate::vector_world_path(object) {
+        return Some(bezier_path_data(&path, precision));
+    }
+    let points = object.outline_points();
+    let (first, rest) = points.split_first()?;
+    if rest.is_empty() { return None; }
+    let mut path = kurbo::BezPath::new();
+    path.move_to((f64::from(first.0), f64::from(first.1)));
+    for &(x, y) in rest { path.line_to((f64::from(x), f64::from(y))); }
+    path.close_path();
+    Some(bezier_path_data(&path, precision))
+}
+
+fn bezier_path_data(path: &kurbo::BezPath, precision: u8) -> String {
+    use kurbo::PathEl;
+    let coordinate = |value: f64| {
+        let mut text = format_float(value, precision);
+        if let Some(dot) = text.find('.') {
+            let length = text.trim_end_matches('0').len();
+            text.truncate(if length == dot + 1 { dot } else { length });
+        }
+        if text == "-0" { text.remove(0); }
+        text
+    };
+    let point = |p: kurbo::Point| format!("{},{}", coordinate(p.x), coordinate(p.y));
+    let mut data = String::new();
+    for element in path.elements() {
+        match *element {
+            PathEl::MoveTo(p) => { let _ = write!(data, "M{}", point(p)); }
+            PathEl::LineTo(p) => { let _ = write!(data, " L{}", point(p)); }
+            PathEl::QuadTo(a, p) => { let _ = write!(data, " Q{} {}", point(a), point(p)); }
+            PathEl::CurveTo(a, b, p) => { let _ = write!(data, " C{} {} {}", point(a), point(b), point(p)); }
+            PathEl::ClosePath => data.push_str(" Z"),
+        }
+    }
+    data
+}
+
+fn format_float(value: impl Into<f64>, precision: u8) -> String {
+    let places = usize::from(precision.min(MAX_COORDINATE_PRECISION));
+    format!("{:.*}", places, value.into())
 }
 
 fn sanitize_id(name: &str) -> String {
@@ -1298,4 +1623,6 @@ fn escape_xml(text: &str) -> String {
         .replace('>', "&gt;")
         .replace('"', "&quot;")
         .replace('\'', "&apos;")
+        .replace('\r', "&#13;")
+        .replace('\n', "&#10;")
 }

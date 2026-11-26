@@ -533,7 +533,7 @@ impl PagesPanel {
             text("panel.pages.spread_settings"), ClosePolicy::CancelOnly, true, |ui| {
                 let number = dtool_core::longdoc::sections::section_page_label(doc, start);
                 ui.label(dtool_strings::format("panel.pages.number", &[("number", &number)]));
-                ui.checkbox(&mut draft.custom, text("panel.pages.spread_custom"));
+                dtool_design::toggle(ui, &mut draft.custom, text("panel.pages.spread_custom"));
                 ui.horizontal(|ui| {
                     ui.label(text("dialog.new_document.pages"));
                     let count = egui::DragValue::new(&mut draft.count).range(1..=doc.pages.len() - start);
@@ -765,8 +765,8 @@ impl PagesPanel {
                 } else if has_conflict && !draft.replace {
                     ui.weak(text("panel.master.range_conflict"));
                 }
-                ui.checkbox(&mut draft.replace, text("panel.master.replace"));
-                ui.add_enabled(draft.replace, egui::Checkbox::new(&mut draft.keep_previous, text("panel.master.replace_keep")));
+                dtool_design::toggle(ui, &mut draft.replace, text("panel.master.replace"));
+                dtool_design::toggle_with(ui, &mut draft.keep_previous, text("panel.master.replace_keep"), &dtool_design::ControlState::enabled(draft.replace));
                 ui.horizontal(|ui| {
                     let apply = ui.add_enabled(enabled, egui::Button::new(text("panel.master.apply"))).clicked();
                     let cancel = ui.button(text("button.cancel")).clicked();
@@ -796,7 +796,7 @@ impl PagesPanel {
 
 fn fold_settings(ui: &mut egui::Ui, draft: &mut PageSettingsDraft, unit: &str, units: dtool_core::document::Units, dpi: f32) {
     let mut enabled = draft.fold.is_some();
-    if ui.checkbox(&mut enabled, text("panel.pages.fold")).changed() {
+    if dtool_design::toggle(ui, &mut enabled, text("panel.pages.fold")).changed() {
         draft.fold = enabled.then(|| PageFold::equal(FoldAxis::Vertical));
     }
     let Some(fold) = &mut draft.fold else { return };

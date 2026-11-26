@@ -59,10 +59,18 @@ pub fn can_execute(session: &Session, command: &Command) -> Option<bool> {
         return Some(allowed);
     }
     if command.name == EDIT_DUPLICATE_DRAG {
-        Some(!session.selection.ids.is_empty())
+        Some(command.params.get("artboard").map_or(!session.selection.ids.is_empty(),
+            |id| id.as_u64().is_some_and(|id| draggable_artboard(session, ObjectId(id)))))
     } else {
         None
     }
+}
+
+fn draggable_artboard(session: &Session, id: ObjectId) -> bool {
+    session.document.get_object(id).is_some_and(|board|
+        board.kind == crate::ObjectKind::Artboard && board.pickable && !board.locked
+            && !(session.document.layout_artboard_origins.is_some()
+                && session.document.pages.iter().any(|page| page.artboard_id == Some(id))))
 }
 
 pub fn run(session: &mut Session, command: &Command) -> Option<Result<serde_json::Value, CommandError>> {
@@ -85,10 +93,13 @@ pub fn duplicate_drag(session: &mut Session, command: &Command) -> Result<serde_
     if args.offset[0] == 0.0 && args.offset[1] == 0.0 {
         return Err(invalid_params_error());
     }
-    if session.selection.ids.is_empty() {
-        return Err(invalid_params_error());
-    }
-    let mut reply = crate::clipboard::duplicate_selection(session, EDIT_DUPLICATE_DRAG, args.offset)?;
+    let mut reply = if let Some(board) = command.params.get("artboard") {
+        let id = board.as_u64().map(ObjectId).filter(|id| draggable_artboard(session, *id))
+            .ok_or_else(invalid_params_error)?;
+        crate::clipboard::duplicate_roots(session, EDIT_DUPLICATE_DRAG, &[id], args.offset)?
+    } else {
+        crate::clipboard::duplicate_selection(session, EDIT_DUPLICATE_DRAG, args.offset)?
+    };
     if let Some(map) = reply.as_object_mut() {
         map.insert("offset".to_string(), serde_json::json!(args.offset));
     }

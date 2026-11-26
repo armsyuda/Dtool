@@ -84,8 +84,15 @@ pub(super) struct KnifeCut {
 
 impl KnifeCut {
     pub(super) fn new(points: &[[f64; 2]]) -> Self {
-        let edges = points
-            .windows(2)
+        Self::from_segments(points.windows(2))
+    }
+
+    pub(super) fn from_paths(paths: &[Vec<[f64; 2]>]) -> Self {
+        Self::from_segments(paths.iter().flat_map(|points| points.windows(2)))
+    }
+
+    fn from_segments<'a>(pairs: impl Iterator<Item = &'a [[f64; 2]]>) -> Self {
+        let edges = pairs
             .filter(|pair| pair[0] != pair[1])
             .map(|pair| {
                 let start = Point::new(pair[0][0], pair[0][1]);

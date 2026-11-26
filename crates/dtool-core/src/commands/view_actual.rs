@@ -41,7 +41,7 @@ pub fn run(
         }
         let mut args = parse(&command.params)?;
         args.zoom = session.actual_zoom();
-        let mut result = session.view_zoom_set(args);
+        let mut result = session.apply_view_zoom(args);
         result["changes"] = serde_json::json!([{ "name": VIEW_ZOOM_ACTUAL }]);
         Ok(result)
     })())

@@ -213,7 +213,7 @@ pub fn render_glyph_browser(ui: &mut egui::Ui, state: &mut GlyphBrowserState, li
     if let Some(id) = pick {
         state.set_face(lib, id);
     }
-    ui.checkbox(&mut state.lock_font_and_style, text("glyphs.lock"));
+    dtool_design::toggle(ui, &mut state.lock_font_and_style, text("glyphs.lock"));
 
     let mut subset_pick: Option<Subset> = None;
     ui.horizontal(|ui| {

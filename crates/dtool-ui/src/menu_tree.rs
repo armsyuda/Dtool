@@ -124,11 +124,12 @@ const PIXEL_MENU_ROWS: &[MenuRow] = &[
     (1, "edit.sep3", "", None, SEP),
     (1, "edit.cut", "menu.edit.cut", Some("edit.cut"), ITEM),
     (1, "edit.copy", "menu.edit.copy", Some("edit.copy"), ITEM),
-    (1, "edit.copy_flattened", "menu.edit.copy_flattened", None, ITEM),
+    (1, "edit.copy_flattened", "menu.edit.copy_flattened", Some("edit.copy_flattened"), ITEM),
     (1, "edit.duplicate", "menu.edit.duplicate", None, ITEM),
     (2, "edit.duplicate.layer", "menu.edit.duplicate.layer", None, ITEM),
     (2, "edit.duplicate.linked", "menu.edit.duplicate.linked", None, ITEM),
     (2, "edit.duplicate.selection", "menu.edit.duplicate.selection", Some("edit.duplicate"), ITEM),
+    (1, "edit.move_duplicate", "move_duplicate.title", Some("edit.move_duplicate"), ITEM),
     (1, "edit.delete", "menu.edit.delete", None, ITEM),
     (1, "edit.paste", "menu.edit.paste", None, ITEM),
     (2, "edit.paste.paste", "menu.edit.paste.paste", Some("edit.paste"), ITEM),
@@ -462,7 +463,7 @@ const PIXEL_MENU_ROWS: &[MenuRow] = &[
     (0, "vector", "menu.vector", None, ITEM),
     (1, "vector.new_container_layer", "menu.vector.new_container_layer", None, ITEM),
     (1, "vector.create_symbol", "menu.vector.create_symbol", Some("symbol.create"), ITEM),
-    (1, "vector.promote_group_to_layer", "menu.vector.promote_group_to_layer", None, ITEM),
+    (1, "vector.promote_group_to_layer", "menu.vector.promote_group_to_layer", Some("node.folder.promote"), ITEM),
     (1, "vector.convert_to_curves", "menu.vector.convert_to_curves", None, ITEM),
     (1, "vector.sep1", "", None, SEP),
     (1, "vector.convert_object_to_artboard", "menu.vector.convert_object_to_artboard", Some("vector.convert_object_to_artboard"), ITEM),
@@ -479,6 +480,10 @@ const PIXEL_MENU_ROWS: &[MenuRow] = &[
     (3, "vector.geometry.destructive.destructive_subtract", "menu.vector.geometry.destructive.destructive_subtract", Some("boolean.subtract"), ITEM),
     (3, "vector.geometry.destructive.destructive_intersect", "menu.vector.geometry.destructive.destructive_intersect", Some("boolean.intersect"), ITEM),
     (3, "vector.geometry.destructive.destructive_xor", "menu.vector.geometry.destructive.destructive_xor", Some("boolean.xor"), ITEM),
+    (2, "vector.geometry.curve_cleanup", "", None, SEP),
+    (2, "vector.geometry.fill_holes", "menu.vector.fill_holes", Some("path.curves.fill_holes"), ITEM),
+    (2, "vector.geometry.remove_inner_curves", "menu.vector.remove_inner_curves", Some("path.curves.remove_inner"), ITEM),
+    (2, "vector.geometry.cut_curves_with_key_object", "menu.vector.cut_curves_with_key_object", Some("path.curves.cut_with_key"), ITEM),
     (1, "vector.new_warp_group", "menu.vector.new_warp_group", None, ITEM),
     (2, "vector.new_warp_group.mesh", "menu.vector.new_warp_group.mesh", None, ITEM),
     (2, "vector.new_warp_group.quad", "menu.vector.new_warp_group.quad", None, ITEM),
@@ -507,13 +512,13 @@ const PIXEL_MENU_ROWS: &[MenuRow] = &[
     (1, "vector.image_trace", "menu.vector.image_trace", Some("image.trace"), ITEM),
     (1, "vector.sep6", "", None, SEP),
     (1, "vector.expand_stroke", "menu.vector.expand_stroke", Some("stroke.expand"), ITEM),
-    (1, "vector.fill_holes", "menu.vector.fill_holes", None, ITEM),
-    (1, "vector.remove_inner_curves", "menu.vector.remove_inner_curves", None, ITEM),
+    (1, "vector.fill_holes", "menu.vector.fill_holes", Some("path.curves.fill_holes"), ITEM),
+    (1, "vector.remove_inner_curves", "menu.vector.remove_inner_curves", Some("path.curves.remove_inner"), ITEM),
     (1, "vector.fill_mode", "menu.vector.fill_mode", None, ITEM),
-    (2, "vector.fill_mode.alternate_even_odd", "menu.vector.fill_mode.alternate_even_odd", None, TOG),
-    (2, "vector.fill_mode.winding_non_zero", "menu.vector.fill_mode.winding_non_zero", None, TOG),
+    (2, "vector.fill_mode.alternate_even_odd", "menu.vector.fill_mode.alternate_even_odd", Some("path.fill_rule.set"), MenuRowKind::Radio),
+    (2, "vector.fill_mode.winding_non_zero", "menu.vector.fill_mode.winding_non_zero", Some("path.fill_rule.set"), MenuRowKind::Radio),
     (1, "vector.sep7", "", None, SEP),
-    (1, "vector.cut_curves_with_key_object", "menu.vector.cut_curves_with_key_object", None, ITEM),
+    (1, "vector.cut_curves_with_key_object", "menu.vector.cut_curves_with_key_object", Some("path.curves.cut_with_key"), ITEM),
     (0, "pixel", "menu.pixel", None, ITEM),
     (1, "pixel.filters", "menu.pixel.filters", None, ITEM),
     (2, "pixel.filters.fade", "menu.pixel.filters.fade", None, ITEM),
@@ -1368,7 +1373,7 @@ pub(crate) fn host_document_dialog(id: &str) -> bool {
         || matches!(id, crate::shell::DOCUMENT_SETUP_MENU_ID | crate::shell::FONT_MANAGER_MENU_ID
             | crate::shell::RESOURCE_MANAGER_MENU_ID | crate::guides_dialog::SHOW_GUIDES_MANAGER
             | crate::guides_dialog::MARGINS_AND_GUIDES | BLEND_OPTIONS_MENU_ID | LAYER_EFFECTS_MENU_ID
-            | crate::shell::CUSTOMISE_TOOLS_MENU_ID)
+            | crate::shell::CUSTOMISE_TOOLS_MENU_ID | crate::resize_canvas_dialog::MENU_ID)
 }
 
 impl MenuTree {
@@ -1518,6 +1523,7 @@ pub enum MenuBinding {
     HighlightMissingFonts,
     HighlightMissingChars,
     SelectSameLayer(&'static str),
+    FillRule(dtool_core::boolean::FillRule),
 }
 
 pub const ROTATE_STEP_DEG: f32 = 15.0;
@@ -1563,6 +1569,8 @@ pub fn menu_binding(id: &str) -> Option<MenuBinding> {
         "text.highlights.highlight_missing_characters" => MenuBinding::HighlightMissingChars,
         "layer.select.same.name" => MenuBinding::SelectSameLayer("Name"),
         "layer.select.same.tag_colour" => MenuBinding::SelectSameLayer("TagColour"),
+        "vector.fill_mode.alternate_even_odd" => MenuBinding::FillRule(dtool_core::boolean::FillRule::EvenOdd),
+        "vector.fill_mode.winding_non_zero" => MenuBinding::FillRule(dtool_core::boolean::FillRule::NonZero),
         _ => return None,
     })
 }
@@ -1581,6 +1589,7 @@ impl MenuBinding {
             MenuBinding::RulerShow | MenuBinding::TextRulerShow => "ruler.show",
             MenuBinding::SaveHistory => "history.save_with_doc.set",
             MenuBinding::SelectSameLayer(_) => dtool_core::commands::selection_edit::EDIT_SELECT_SAME,
+            MenuBinding::FillRule(_) => dtool_core::commands::path_nodes::PATH_FILL_RULE,
             MenuBinding::QuickMask => dtool_core::commands::quickmask::TOGGLE,
             MenuBinding::Xray => dtool_core::commands::view_flags::VIEW_XRAY,
             MenuBinding::ViewMode(_) | MenuBinding::ClipToCanvas | MenuBinding::PreviewMode | MenuBinding::ShowBleed | MenuBinding::ShowMargins | MenuBinding::ShowPreviewPageEdges | MenuBinding::ShowPixelSelection | MenuBinding::HighlightMissingFonts | MenuBinding::HighlightMissingChars => "view.flags.set",
@@ -1595,6 +1604,7 @@ impl MenuBinding {
             MenuBinding::TextRulerShow => Some(session.document.rulers.show_text_ruler),
             MenuBinding::SaveHistory => Some(session.history.save_with_document),
             MenuBinding::ViewMode(mode) => Some(session.view.canvas_flags.view_mode == mode),
+            MenuBinding::FillRule(rule) => Some(dtool_core::commands::path_nodes::fill_rule_checked(session, rule)),
             MenuBinding::Xray => Some(session.view.xray),
             MenuBinding::ClipToCanvas => Some(session.view.canvas_flags.clip_to_canvas),
             MenuBinding::PreviewMode => Some(session.view.canvas_flags.preview_mode),
@@ -1618,7 +1628,7 @@ impl MenuBinding {
     pub fn command(self, session: &dtool_core::Session, view_size: [f32; 2]) -> dtool_core::Command {
         let centre = [view_size[0] * 0.5, view_size[1] * 0.5];
         let params = match self {
-            MenuBinding::ZoomBy(factor) => json!({"zoom": dtool_core::clamp_zoom(session.view.zoom * factor), "around": centre, "view_size": view_size}),
+            MenuBinding::ZoomBy(factor) => json!({"zoom": session.zoom_limits().clamp(session.view.zoom * factor), "around": centre, "view_size": view_size}),
             MenuBinding::ZoomTo(zoom) => json!({"zoom": zoom * session.actual_zoom(), "around": centre, "view_size": view_size}),
             MenuBinding::ZoomFit | MenuBinding::ZoomFitWidth | MenuBinding::ZoomFitSelection | MenuBinding::ZoomFitDocument => json!({"view_size": view_size}),
             MenuBinding::ZoomActual => json!({"around": centre, "view_size": view_size}),
@@ -1628,6 +1638,7 @@ impl MenuBinding {
             MenuBinding::TextRulerShow => json!({"show_text_ruler": !session.document.rulers.show_text_ruler}),
             MenuBinding::SaveHistory => json!({"enabled": !session.history.save_with_document}),
             MenuBinding::ViewMode(mode) => json!({"view_mode": mode}),
+            MenuBinding::FillRule(rule) => json!({"rule": rule}),
             MenuBinding::Xray => json!({}),
             MenuBinding::ClipToCanvas => json!({"clip_to_canvas": !session.view.canvas_flags.clip_to_canvas}),
             MenuBinding::PreviewMode => json!({"preview_mode": !session.view.canvas_flags.preview_mode}),
@@ -1655,9 +1666,10 @@ pub fn apply_bindings(items: &mut Value, session: &dtool_core::Session) {
     apply_binding_rows(items, session);
 }
 
-pub const BRIDGE_MENU_ACTIONS: [(&str, &str); 20] = [
+pub const BRIDGE_MENU_ACTIONS: [(&str, &str); 21] = [
     ("layer.group", "group"),
     ("layer.new_folder", "new_layer_folder"),
+    ("vector.new_container_layer", "new_layer_folder"),
     ("pixel.new_layer", "new_pixel_layer"),
     ("pixel.new_fill_layer", "new_fill_layer"),
     ("layer.ungroup", "ungroup"),
@@ -1911,7 +1923,7 @@ pub(crate) fn show_queried_menu_bar_with_toolbars(ui:&mut egui::Ui,mut session:O
         show_menu_brand(ui);
         if let Some(menus)=tree.as_array(){for menu in menus{
             let label=menu.get("label").and_then(Value::as_str).unwrap_or("");
-            let button = egui::Button::new(egui::RichText::new(label).size(MENU_FONT_SIZE))
+            let button = egui::Button::new(egui::RichText::new(label).size(dtool_design::size("menu.font_size")))
                 .frame(true).frame_when_inactive(false);
             egui::containers::menu::MenuButton::from_button(button).ui(ui,|ui| {
                 if menu["id"] == "file" && let Some(rows) = menu["children"].as_array() {
@@ -1920,9 +1932,9 @@ pub(crate) fn show_queried_menu_bar_with_toolbars(ui:&mut egui::Ui,mut session:O
                 }
                 let height = (ui.ctx().content_rect().height() - menu_bar_height - 16.0).max(1.0);
                 scroll_command_menu(ui, height, |ui| {
-                    let native_image = menu["id"] == "edit" && crate::os_clipboard::native_image_available();
+                    let native_graphic = menu["id"] == "edit" && crate::os_clipboard::native_graphic_available();
                     if let Some(rows) = menu["children"].as_array()
-                        && let Some(result) = draw_menu_rows(ui, rows, has_document, toolbars, clipboard_document, native_image, last_preset_available)
+                        && let Some(result) = draw_menu_rows(ui, rows, has_document, toolbars, clipboard_document, native_graphic, last_preset_available)
                     { action = Some(result); }
                     if menu.get("id").and_then(Value::as_str)==Some("view"){
                         let label = text("ruler.origin.title");
@@ -1935,7 +1947,7 @@ pub(crate) fn show_queried_menu_bar_with_toolbars(ui:&mut egui::Ui,mut session:O
                         ui.separator();
                         for (index,(label,active)) in documents.iter().enumerate(){
                             let mut checked=*active;
-                            let response = ui.checkbox(&mut checked, label.as_str());
+                            let response = dtool_design::menu_toggle(ui, &mut checked, label.as_str());
                             if command_menu_tooltip(ui, response, label, true, None).clicked(){action=Some(MenuAction{id:format!("{}{}",WINDOW_DOCUMENT_PREFIX,index),command:None});ui.close();}
                         }
                     }
@@ -2027,9 +2039,6 @@ pub fn row_is_local(id:&str,has_document:bool)->bool{
     (local_action(id)&&(has_document||id=="file.open"||app_action(id)||crate::batch_host::runs_without_document(id)))||crate::panels::window_panel(id).is_some()||panels_action(id).is_some()||preset_action(id)
 }
 
-const MENU_FONT_SIZE: f32 = 14.0;
-const MENU_WIDTH: f32 = 360.0;
-
 fn show_menu_brand(ui: &mut egui::Ui) {
     let size = egui::Vec2::splat(20.0);
     let key = egui::Id::new("dtool.menu_brand");
@@ -2056,7 +2065,7 @@ fn draw_file_menu(ui: &mut egui::Ui, rows: &[Value], has_document: bool,
     configure_command_menu(ui);
     ui.set_width(680.0_f32.min((ui.ctx().content_rect().width() - 24.0).max(1.0)));
     let split = rows.iter().position(|row| row["id"] == "file.sep6").unwrap_or(rows.len());
-    let native_image = crate::os_clipboard::native_image_available();
+    let native_graphic = crate::os_clipboard::native_graphic_available();
     let mut action = None;
     ui.columns(2, |columns| {
         let (left, right) = columns.split_at_mut(1);
@@ -2065,7 +2074,7 @@ fn draw_file_menu(ui: &mut egui::Ui, rows: &[Value], has_document: bool,
             (&mut right[0], &rows[(split + 1).min(rows.len())..]),
         ] {
             if let Some(result) = draw_menu_rows(column, values, has_document,
-                toolbars, clipboard_document, native_image, last_preset_available)
+                toolbars, clipboard_document, native_graphic, last_preset_available)
             {
                 action = Some(result);
             }
@@ -2089,11 +2098,20 @@ fn command_menu_hover(style: &mut egui::Style) {
 
 pub(crate) fn configure_command_menu(ui: &mut egui::Ui) {
     let available = ui.ctx().content_rect().width() - 16.0;
-    ui.set_width(MENU_WIDTH.min(available.max(1.0)));
+    ui.set_width(dtool_design::size("menu.width").min(available.max(1.0)));
     let style = ui.style_mut();
-    style.override_font_id = Some(egui::FontId::proportional(MENU_FONT_SIZE));
+    style.override_font_id = Some(egui::FontId::proportional(dtool_design::size("menu.font_size")));
     style.wrap_mode = Some(egui::TextWrapMode::Truncate);
     command_menu_hover(style);
+}
+
+pub(crate) fn menu_choice(ui: &mut egui::Ui, label: &str, selected: bool) -> egui::Response {
+    dtool_design::with_icon_selection(ui, |ui| {
+        ui.add(egui::Button::new((label, egui::Atom::grow()))
+            .selected(selected)
+            .frame_when_inactive(selected)
+            .min_size(egui::vec2(ui.available_width(), dtool_design::size("menu.row.height"))))
+    })
 }
 
 pub(crate) fn command_menu_tooltip(
@@ -2104,10 +2122,10 @@ pub(crate) fn command_menu_tooltip(
     path: Option<&str>,
 ) -> egui::Response {
     let spacing = ui.spacing();
-    let icon_space = if has_icon { spacing.icon_width + spacing.icon_spacing } else { 0.0 };
+    let icon_space = if has_icon { spacing.icon_width.max(25.0) + spacing.icon_spacing.max(6.0) } else { 0.0 };
     let text_width = response.rect.width() - 2.0 * spacing.button_padding.x - icon_space;
     let truncated = ui.fonts_mut(|fonts| {
-        fonts.layout_no_wrap(label.to_owned(), egui::FontId::proportional(MENU_FONT_SIZE), egui::Color32::WHITE).size().x > text_width
+        fonts.layout_no_wrap(label.to_owned(), egui::FontId::proportional(dtool_design::size("menu.font_size")), egui::Color32::WHITE).size().x > text_width
     });
     let tooltip = match (truncated, path) {
         (true, Some(path)) => format!("{label}\n{path}"),
@@ -2164,7 +2182,7 @@ pub(crate) fn command_menu_item(ui: &mut egui::Ui, label: &str, enabled: bool) -
     command_menu_tooltip(ui, response, label, false, None)
 }
 
-fn draw_menu_rows(ui:&mut egui::Ui,rows:&[Value],has_document:bool,toolbars:crate::settings::ToolbarVisibility,clipboard_document:bool,native_image:bool,last_preset_available:bool)->Option<MenuAction>{
+fn draw_menu_rows(ui:&mut egui::Ui,rows:&[Value],has_document:bool,toolbars:crate::settings::ToolbarVisibility,clipboard_document:bool,native_graphic:bool,last_preset_available:bool)->Option<MenuAction>{
     let mut action=None;
     for item in rows {
         if item.get("separator").and_then(Value::as_bool).unwrap_or(false){ui.separator();continue;}
@@ -2176,7 +2194,7 @@ fn draw_menu_rows(ui:&mut egui::Ui,rows:&[Value],has_document:bool,toolbars:crat
                 .frame(true).frame_when_inactive(false)
                 .min_size(egui::vec2(ui.available_width(), dtool_design::size("menu.row.height")));
             let (response, _) = egui::containers::menu::SubMenuButton::from_button(button).ui(ui, |ui| context_command_menu(ui, |ui| {
-                if let Some(result) = draw_menu_rows(ui,children,has_document,toolbars,clipboard_document,native_image,last_preset_available) {
+                if let Some(result) = draw_menu_rows(ui,children,has_document,toolbars,clipboard_document,native_graphic,last_preset_available) {
                     action = Some(result);
                 }
             }));
@@ -2184,8 +2202,8 @@ fn draw_menu_rows(ui:&mut egui::Ui,rows:&[Value],has_document:bool,toolbars:crat
         }else{
             let local=row_is_local(id,has_document);
             let clipboard_enabled = match id {
-                "file.new_from_clipboard" => clipboard_document || native_image,
-                "edit.paste.paste" => has_document && native_image,
+                "file.new_from_clipboard" => clipboard_document || native_graphic,
+                "edit.paste.paste" => has_document && native_graphic,
                 _ => false,
             };
             let locally_enabled = local && !matches!(id, FIND_LAYER_MENU_ID | RENAME_LAYER_MENU_ID | LAYER_EFFECTS_MENU_ID)
@@ -2201,10 +2219,11 @@ fn draw_menu_rows(ui:&mut egui::Ui,rows:&[Value],has_document:bool,toolbars:crat
                 .or_else(|| crate::panels::window_panel(id).map(|_| crate::panels::window_panel_checked(id)))
                 .or_else(|| item.get("checked").and_then(Value::as_bool));
             let path = item.get("path").and_then(Value::as_str);
+            let exclusive = item["radio"].as_bool().unwrap_or(false);
             let response = if let Some(mut checked) = checked {
                 ui.add_enabled_ui(enabled, |ui| {
-                    if item.get("radio").and_then(Value::as_bool).unwrap_or(false) { ui.radio(checked, label.as_str()) }
-                    else { ui.checkbox(&mut checked, label.as_str()) }
+                    if exclusive { menu_choice(ui, &label, checked) }
+                    else { dtool_design::menu_toggle(ui, &mut checked, label.as_str()) }
                 }).inner
             } else {
                 let mut shown = egui::RichText::new(label.as_str());
@@ -2213,7 +2232,7 @@ fn draw_menu_rows(ui:&mut egui::Ui,rows:&[Value],has_document:bool,toolbars:crat
                     .frame(true).frame_when_inactive(false)
                     .min_size(egui::vec2(ui.available_width(), dtool_design::size("menu.row.height"))))
             };
-            if command_menu_tooltip(ui, response, &label, checked.is_some(), path).clicked() {
+            if command_menu_tooltip(ui, response, &label, checked.is_some() && !exclusive, path).clicked() {
                 action=Some(MenuAction{id:id.into(),command:item.get("command").and_then(Value::as_str).map(str::to_string)});ui.close();
             }
         }

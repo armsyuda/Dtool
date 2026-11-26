@@ -74,6 +74,8 @@ pub struct Object {
     pub path_brush: Option<crate::path_brush::Texture>,
     #[serde(default = "default_paint_order")]
     pub paint_order: crate::paint::PaintOrder,
+    #[serde(default, skip_serializing_if = "crate::boolean::FillRule::is_even_odd")]
+    pub fill_rule: crate::boolean::FillRule,
     pub opacity: f32,
     pub kind: ObjectKind,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -190,6 +192,7 @@ impl Default for Object {
             appearance_blends: Default::default(),
             path_brush: None,
             paint_order: default_paint_order(),
+            fill_rule: crate::boolean::FillRule::EvenOdd,
             opacity: 1.0,
             kind: ObjectKind::default(),
             layer_folder: false,

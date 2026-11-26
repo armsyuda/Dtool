@@ -77,10 +77,11 @@ fn row_rect(found: &Frame, name: &str) -> Rect {
 }
 
 fn thumbnail_rect(found: &Frame, row: Rect) -> Rect {
+    let side = dtool_design::size("layers.row.height");
     found.tiles.iter().copied()
         .filter(|rect| (0.0..=6.0).contains(&(row.left() - rect.right()))
             && row.y_range().contains(rect.center().y)
-            && (20.0..=28.0).contains(&rect.width()) && (20.0..=24.0).contains(&rect.height()))
+            && (rect.width() - side).abs() < 0.5 && (rect.height() - side).abs() < 0.5)
         .max_by(|a, b| a.right().total_cmp(&b.right()))
         .unwrap_or_else(|| panic!("missing thumbnail tile next to {row:?}"))
 }

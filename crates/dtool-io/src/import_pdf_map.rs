@@ -1,18 +1,27 @@
-use std::rc::Rc;
+use std::{cell::OnceCell, rc::Rc};
 
 use dtool_core::colour::Colour as ManagedColour;
+use dtool_core::blend::BlendMode;
 use dtool_core::curve::{Contour, Curve, PathPoint, PointId};
 use dtool_core::document::{Document, Story, StoryId};
-use dtool_core::object::{Object, ObjectId, ObjectKind, VectorCrop};
+use dtool_core::boolean::FillRule;
+use dtool_core::object::{ClipRole, Object, ObjectId, ObjectKind, VectorCrop};
 use dtool_core::paint::{Cap, Colour, Join, Paint, StrokeStyle, paint_to_json_value};
 use dtool_core::resources::{ImageFormat, ImageResource};
+use kurbo::{Affine, Shape};
 use lopdf::content::{Content, Operation};
 use lopdf::{Dictionary, Document as PdfDocument, Object as PdfObject, ObjectId as PdfId, Stream};
 use serde_json::json;
+use skrifa::{MetadataProvider, outline::OutlinePen};
 
 use crate::import_pdf::{ImportAs, ImportOptions};
 use crate::import_report::{ImportReport, LossKind};
 use crate::{IoError, IoErrorKind};
+
+mod icc;
+mod image;
+mod shading;
+mod text_outline;
 
 type Matrix = [f64; 6];
 const IDENTITY: Matrix = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
@@ -55,6 +64,28 @@ fn num(object: &PdfObject) -> Option<f64> {
         PdfObject::Real(v) if v.is_finite() => Some(*v as f64),
         _ => None,
     }
+}
+
+fn pdf_blend_mode(object: &PdfObject) -> Option<BlendMode> {
+    Some(match object.as_name().ok()? {
+        b"Normal" | b"Compatible" => BlendMode::Normal,
+        b"Multiply" => BlendMode::Multiply,
+        b"Screen" => BlendMode::Screen,
+        b"Overlay" => BlendMode::Overlay,
+        b"Darken" => BlendMode::Darken,
+        b"Lighten" => BlendMode::Lighten,
+        b"ColorDodge" => BlendMode::ColorDodge,
+        b"ColorBurn" => BlendMode::ColorBurn,
+        b"HardLight" => BlendMode::HardLight,
+        b"SoftLight" => BlendMode::SoftLight,
+        b"Difference" => BlendMode::Difference,
+        b"Exclusion" => BlendMode::Exclusion,
+        b"Hue" => BlendMode::Hue,
+        b"Saturation" => BlendMode::Saturation,
+        b"Color" => BlendMode::Color,
+        b"Luminosity" => BlendMode::Luminosity,
+        _ => return None,
+    })
 }
 
 fn nums(objects: &[PdfObject]) -> Vec<f64> {
@@ -244,20 +275,100 @@ enum Space {
     Grey,
     Rgb,
     Cmyk,
+    Icc { index: usize, channels: usize },
     Pattern,
     Other,
 }
 
-#[derive(Clone)]
+impl Space {
+    fn channels(self) -> Option<usize> {
+        match self {
+            Self::Grey => Some(1),
+            Self::Rgb => Some(3),
+            Self::Cmyk => Some(4),
+            Self::Icc { channels, .. } => Some(channels),
+            Self::Pattern | Self::Other => None,
+        }
+    }
+}
+
 struct FontInfo {
     family: String,
     style: String,
     decode: Dictionary,
     two_byte: bool,
     first_char: i64,
-    widths: Vec<f64>,
+    widths: Vec<Option<f64>>,
+    cid_widths: Vec<CidWidthRange>,
     default_width: f64,
     vertical: bool,
+    reference_only: bool,
+    embedded_cid: Option<Dictionary>,
+    embedded: OnceCell<Option<text_outline::EmbeddedFont>>,
+}
+
+struct CidWidthRange {
+    start: u16,
+    end: u16,
+    widths: Vec<f64>,
+}
+
+impl FontInfo {
+    fn width(&self, code: &[u8]) -> f64 {
+        let width = if self.two_byte {
+            let Ok(bytes) = <[u8; 2]>::try_from(code) else { return self.default_width };
+            let cid = u16::from_be_bytes(bytes);
+            let next = self.cid_widths.partition_point(|range| range.start <= cid);
+            next.checked_sub(1).and_then(|index| {
+                let range = &self.cid_widths[index];
+                (cid <= range.end).then(|| {
+                    let offset = usize::from(cid - range.start);
+                    range.widths[offset.min(range.widths.len() - 1)]
+                })
+            })
+        } else {
+            i64::from(code[0]).checked_sub(self.first_char)
+                .and_then(|index| usize::try_from(index).ok())
+                .and_then(|index| self.widths.get(index).copied().flatten())
+        };
+        width.unwrap_or(self.default_width)
+    }
+}
+
+fn cid_widths(pdf: &PdfDocument, font: &Dictionary) -> Option<(f64, Vec<CidWidthRange>)> {
+    let cid = text_outline::descendant(pdf, font)?;
+    let default_width = match cid.get(b"DW") {
+        Ok(value) => num(deref(pdf, value)).filter(|width| *width >= 0.0)?,
+        Err(_) => 1000.0,
+    };
+    let mut ranges = Vec::new();
+    if let Ok(value) = cid.get(b"W") {
+        let mut entries = deref(pdf, value).as_array().ok()?.iter().map(|item| deref(pdf, item));
+        let mut covered = 0usize;
+        while let Some(start) = entries.next() {
+            let start = u16::try_from(start.as_i64().ok()?).ok()?;
+            let spec = entries.next()?;
+            let (end, widths) = if let Ok(list) = spec.as_array() {
+                let last_offset = u16::try_from(list.len().checked_sub(1)?).ok()?;
+                let end = start.checked_add(last_offset)?;
+                covered += list.len();
+                if covered > 65_536 { return None; }
+                let widths = list.iter().map(|item| num(deref(pdf, item)).filter(|width| *width >= 0.0))
+                    .collect::<Option<Vec<_>>>()?;
+                (end, widths)
+            } else {
+                let end = u16::try_from(spec.as_i64().ok()?).ok()?;
+                covered += usize::from(end.checked_sub(start)?) + 1;
+                if covered > 65_536 { return None; }
+                let width = num(entries.next()?).filter(|width| *width >= 0.0)?;
+                (end, vec![width])
+            };
+            ranges.push(CidWidthRange { start, end, widths });
+        }
+        ranges.sort_unstable_by_key(|range| range.start);
+        if ranges.windows(2).any(|pair| pair[0].end >= pair[1].start) { return None; }
+    }
+    Some((default_width, ranges))
 }
 
 #[derive(Clone)]
@@ -269,10 +380,12 @@ struct GState {
     stroke_space: Space,
     line_width: f64,
     dash: Vec<f64>,
+    dash_offset: f64,
     cap: Cap,
     join: Join,
     fill_alpha: f32,
     stroke_alpha: f32,
+    blend_mode: BlendMode,
     clip: Option<[f64; 4]>,
     parent: Option<ObjectId>,
     font: Option<Rc<FontInfo>>,
@@ -283,6 +396,7 @@ struct GState {
     leading: f64,
     rise: f64,
     render_mode: i64,
+    text_knockout: bool,
 }
 
 impl GState {
@@ -295,10 +409,12 @@ impl GState {
             stroke_space: Space::Grey,
             line_width: 1.0,
             dash: Vec::new(),
+            dash_offset: 0.0,
             cap: Cap::Butt,
             join: Join::Miter { limit: 10.0 },
             fill_alpha: 1.0,
             stroke_alpha: 1.0,
+            blend_mode: BlendMode::Normal,
             clip: None,
             parent: Some(parent),
             font: None,
@@ -309,10 +425,12 @@ impl GState {
             leading: 0.0,
             rise: 0.0,
             render_mode: 0,
+            text_knockout: true,
         }
     }
 }
 
+#[derive(Clone)]
 struct SubPath {
     points: Vec<PathPoint>,
     closed: bool,
@@ -329,7 +447,43 @@ struct Run {
     style: String,
     fill: Paint,
     opacity: f32,
+    blend_mode: BlendMode,
     parent: Option<ObjectId>,
+}
+
+struct OutlinedRun {
+    path: Vec<SubPath>,
+    glyph_ends: Vec<usize>,
+    gs: GState,
+    fills: bool,
+    strokes: bool,
+    translucent: bool,
+    name: Option<String>,
+}
+
+#[derive(Default)]
+struct TextBlock {
+    runs: Vec<Run>,
+    outlines: Vec<OutlinedRun>,
+    outline_points: usize,
+    outline_budget_exceeded: bool,
+    clip: Vec<SubPath>,
+    clip_points: usize,
+    clip_failed: bool,
+}
+
+impl TextBlock {
+    fn add_clip(&mut self, path: &[SubPath]) {
+        if self.clip_failed { return; }
+        let point_count = path.iter().map(|sub| sub.points.len()).sum::<usize>();
+        self.clip_points += point_count;
+        if self.clip_points > 65_536 {
+            self.clip.clear();
+            self.clip_failed = true;
+        } else {
+            self.clip.extend_from_slice(path);
+        }
+    }
 }
 
 pub(super) struct PdfMapper<'a> {
@@ -343,6 +497,8 @@ pub(super) struct PdfMapper<'a> {
     paths: u32,
     operations: usize,
     image_bytes: usize,
+    profiles: icc::Profiles,
+    cmyk_output_space: Option<Space>,
 }
 
 impl<'a> PdfMapper<'a> {
@@ -352,18 +508,14 @@ impl<'a> PdfMapper<'a> {
         report: &'a mut ImportReport,
         opts: &'a ImportOptions,
     ) -> Self {
-        if pdf
-            .trailer
-            .get(b"Root")
-            .ok()
-            .and_then(|o| dict_of(pdf, o))
-            .is_some_and(|d| d.has(b"OutputIntents"))
-        {
+        let mut profiles = icc::Profiles::default();
+        let (cmyk_output_space, has_output_intent) = icc::output_intent(pdf, &mut profiles);
+        if has_output_intent && cmyk_output_space.is_none() {
             report.add_loss(
                 LossKind::Icc,
                 1,
                 false,
-                "PDF output intent profile not applied; source device colours retained",
+                "No usable embedded PDF/X CMYK output profile; source device colours retained",
             );
         }
         Self {
@@ -381,6 +533,8 @@ impl<'a> PdfMapper<'a> {
             paths: 0,
             operations: 0,
             image_bytes: 0,
+            profiles,
+            cmyk_output_space,
         }
     }
 
@@ -495,7 +649,7 @@ impl<'a> PdfMapper<'a> {
         let mut in_text = false;
         let mut tm = IDENTITY;
         let mut tlm = IDENTITY;
-        let mut runs = Vec::new();
+        let mut text = TextBlock::default();
         for op in ops {
             self.operations += 1;
             if self.operations > 1_000_000 {
@@ -534,16 +688,7 @@ impl<'a> PdfMapper<'a> {
                         limit: v.first().copied().unwrap_or(10.0) as f32,
                     }
                 }
-                "d" => {
-                    gs.dash = operands
-                        .first()
-                        .and_then(|o| o.as_array().ok())
-                        .map(|items| nums(items))
-                        .unwrap_or_default();
-                    if v.last().copied().unwrap_or(0.0) != 0.0 {
-                        self.loss(LossKind::Other, "stroke dash phase ignored");
-                    }
-                }
+                "d" => self.set_dash_pattern(operands, &mut gs),
                 "ri" | "i" => self.loss(LossKind::Icc, "rendering intent or flatness hint ignored"),
                 "gs" => self.ext_gstate(operands, resources, &mut gs),
                 "g" | "rg" | "k" | "G" | "RG" | "K" => {
@@ -552,6 +697,7 @@ impl<'a> PdfMapper<'a> {
                         "rg" | "RG" => Space::Rgb,
                         _ => Space::Cmyk,
                     };
+                    let space = self.device_space(space, resources);
                     let paint = self.colour_from(space, &v);
                     if op.operator.chars().next().unwrap_or('g').is_lowercase() {
                         gs.fill_space = space;
@@ -666,10 +812,11 @@ impl<'a> PdfMapper<'a> {
                     if matches!(operator, "s" | "b" | "b*") {
                         Self::close_last(&mut path);
                     }
+                    self.flush_text_block(&mut text);
                     let fill = matches!(operator, "f" | "F" | "f*" | "B" | "B*" | "b" | "b*");
                     let stroke = matches!(operator, "S" | "s" | "B" | "B*" | "b" | "b*");
                     if (fill || stroke) && !path.is_empty() {
-                        self.emit_path(&path, &gs, fill, stroke, operator.ends_with('*'));
+                        self.emit_path(&path, &gs, fill, stroke, operator.ends_with('*'), None);
                     }
                     if let Some(even_odd) = pending_clip.take() {
                         self.apply_clip(&path, even_odd, &mut gs);
@@ -677,15 +824,15 @@ impl<'a> PdfMapper<'a> {
                     path.clear();
                 }
                 "sh" => {
-                    self.loss(LossKind::Gradient, "shading approximated as a solid fill");
+                    self.flush_text_block(&mut text);
                     if let Some(PdfObject::Name(name)) = operands.first() {
-                        self.shade_fallback(name, resources, &gs);
+                        self.shade(name, resources, &gs);
                     }
                 }
                 "BI" | "ID" | "EI" => self.loss(LossKind::Image, "inline image skipped"),
                 "Do" => {
                     if in_text {
-                        self.flush_text(std::mem::take(&mut runs));
+                        self.flush_text_block(&mut text);
                     }
                     if let Some(PdfObject::Name(name)) = operands.first() {
                         self.draw_xobject(name, resources, &gs, depth);
@@ -694,13 +841,20 @@ impl<'a> PdfMapper<'a> {
                     }
                 }
                 "BT" => {
-                    self.flush_text(std::mem::take(&mut runs));
+                    self.flush_text_block(&mut text);
+                    text = TextBlock::default();
                     in_text = true;
                     tm = IDENTITY;
                     tlm = IDENTITY;
                 }
                 "ET" => {
-                    self.flush_text(std::mem::take(&mut runs));
+                    self.flush_text_block(&mut text);
+                    if text.clip_failed {
+                        self.loss(LossKind::Mask, "text clipping could not be reproduced with the embedded font");
+                    } else if !text.clip.is_empty() {
+                        self.apply_clip(&text.clip, false, &mut gs);
+                    }
+                    text = TextBlock::default();
                     in_text = false;
                 }
                 "Tc" => gs.char_spacing = v.first().copied().unwrap_or(0.0),
@@ -756,8 +910,9 @@ impl<'a> PdfMapper<'a> {
                         Some(object @ PdfObject::String(..)) => vec![object.clone()],
                         _ => Vec::new(),
                     };
-                    if let Some(run) = self.show_text(&parts, &gs, &mut tm) {
-                        runs.push(run);
+                    if let Some(run) = self.show_text(&parts, &gs, &mut tm, &mut text) {
+                        self.flush_outlines(&mut text);
+                        text.runs.push(run);
                     }
                 }
                 "BMC" | "BDC" | "EMC" | "MP" | "DP" => self.loss(
@@ -771,7 +926,7 @@ impl<'a> PdfMapper<'a> {
                 ),
             }
         }
-        self.flush_text(runs);
+        self.flush_text_block(&mut text);
         if in_text || !stack.is_empty() {
             self.loss(LossKind::Other, "unterminated text or graphics state");
         }
@@ -779,14 +934,16 @@ impl<'a> PdfMapper<'a> {
 
     fn close_last(path: &mut [SubPath]) {
         if let Some(sub) = path.last_mut() {
-            if sub.points.len() > 1
-                && sub.points.first().map(|p| p.pos) == sub.points.last().map(|p| p.pos)
-            {
-                if let Some(last) = sub.points.pop() {
-                    sub.points[0].handle_in = last.handle_in;
-                }
-            }
+            Self::join_closed_endpoints(&mut sub.points);
             sub.closed = true;
+        }
+    }
+
+    fn join_closed_endpoints(points: &mut Vec<PathPoint>) {
+        if points.len() > 1 && points.first().map(|p| p.pos) == points.last().map(|p| p.pos) {
+            if let Some(last) = points.pop() {
+                points[0].handle_in = last.handle_in;
+            }
         }
     }
 
@@ -802,6 +959,10 @@ impl<'a> PdfMapper<'a> {
                 v(3) * 100.0,
                 1.0,
             )),
+            Space::Icc { .. } => {
+                let conversion = self.profiles.conversion(space).expect("resolved ICC colour space");
+                Paint::Solid { colour: icc::colour(conversion.rgb(values)) }
+            }
             Space::Pattern => {
                 self.loss(LossKind::Pattern, "pattern colour dropped");
                 Paint::None
@@ -816,37 +977,67 @@ impl<'a> PdfMapper<'a> {
         }
     }
 
+    fn device_space(&mut self, space: Space, resources: &[Dictionary]) -> Space {
+        let key: &[u8] = match space {
+            Space::Grey => b"DefaultGray",
+            Space::Rgb => b"DefaultRGB",
+            Space::Cmyk => b"DefaultCMYK",
+            _ => return space,
+        };
+        if let Some(default) = self.lookup(resources, b"ColorSpace", key) {
+            let resolved = self.read_space(&default, resources, false, 1);
+            if resolved.channels() == space.channels() { return resolved; }
+            self.loss(LossKind::Icc, "invalid default colour space; device colour used");
+        }
+        if space == Space::Cmyk { self.cmyk_output_space.unwrap_or(space) } else { space }
+    }
+
     fn space_of(&mut self, object: &PdfObject, resources: &[Dictionary]) -> Space {
+        self.read_space(object, resources, true, 0)
+    }
+
+    fn read_space(&mut self, object: &PdfObject, resources: &[Dictionary], use_default: bool, depth: usize) -> Space {
+        if depth >= 8 { return Space::Other; }
         let object = deref(self.pdf, object);
         match object {
-            PdfObject::Name(name) => match name.as_slice() {
+            PdfObject::Name(name) => {
+                let space = match name.as_slice() {
                 b"DeviceGray" | b"G" => Space::Grey,
                 b"DeviceRGB" | b"RGB" => Space::Rgb,
                 b"DeviceCMYK" | b"CMYK" => Space::Cmyk,
                 b"Pattern" => Space::Pattern,
                 _ => match self.lookup(resources, b"ColorSpace", name) {
-                    Some(object) => self.space_of(&object, &[]),
-                    None => Space::Other,
+                    Some(object) => return self.read_space(&object, resources, use_default, depth + 1),
+                    None => return Space::Other,
                 },
-            },
+                };
+                if use_default { self.device_space(space, resources) } else { space }
+            }
             PdfObject::Array(items) => {
                 match items.first().and_then(|o| o.as_name().ok()).unwrap_or(b"") {
                     b"ICCBased" => {
-                        self.loss(
-                            LossKind::Icc,
-                            "embedded ICC profile not applied; alternate device colour used",
-                        );
-                        match items
-                            .get(1)
-                            .and_then(|o| dict_of(self.pdf, o))
+                        let Some(profile) = items.get(1) else { return Space::Other; };
+                        let dict = dict_of(self.pdf, profile);
+                        let alternate = match dict
                             .and_then(|d| d.get(b"N").ok())
-                            .and_then(num)
+                            .and_then(|value| num(deref(self.pdf, value)))
                         {
                             Some(1.0) => Space::Grey,
                             Some(3.0) => Space::Rgb,
                             Some(4.0) => Space::Cmyk,
                             _ => Space::Other,
+                        };
+                        if let Some(space) = alternate.channels()
+                            .and_then(|channels| self.profiles.load(self.pdf, profile, channels))
+                        {
+                            return space;
                         }
+                        self.loss(LossKind::Icc, "invalid or unsupported embedded ICC profile; alternate colour used");
+                        if let Some(explicit) = dict.and_then(|d| d.get(b"Alternate").ok()) {
+                            let resolved = self.read_space(explicit, resources, use_default, depth + 1);
+                            if resolved.channels() == alternate.channels() { return resolved; }
+                        }
+                        if use_default { self.device_space(alternate, resources) } else { alternate }
                     }
                     b"CalGray" => {
                         self.loss(LossKind::Icc, "calibrated grey approximated as device grey");
@@ -868,6 +1059,23 @@ impl<'a> PdfMapper<'a> {
             }
             _ => Space::Other,
         }
+    }
+
+    fn set_dash_pattern(&mut self, operands: &[PdfObject], gs: &mut GState) {
+        if let [array, phase] = operands {
+            let phase = num(deref(self.pdf, phase));
+            let dash = deref(self.pdf, array).as_array().ok().and_then(|items| {
+                items.iter().map(|entry| num(deref(self.pdf, entry)).filter(|length| *length >= 0.0)).collect::<Option<Vec<_>>>()
+            });
+            if let (Some(dash), Some(phase)) = (dash, phase) {
+                if dash.is_empty() || dash.iter().any(|length| *length > 0.0) {
+                    gs.dash_offset = if dash.is_empty() { 0.0 } else { phase };
+                    gs.dash = dash;
+                    return;
+                }
+            }
+        }
+        self.loss(LossKind::Other, "invalid stroke dash pattern ignored");
     }
 
     fn ext_gstate(&mut self, operands: &[PdfObject], resources: &[Dictionary], gs: &mut GState) {
@@ -894,9 +1102,33 @@ impl<'a> PdfMapper<'a> {
                     gs.stroke_alpha =
                         num(deref(self.pdf, value)).unwrap_or(1.0).clamp(0.0, 1.0) as f32
                 }
+                b"TK" => {
+                    if let PdfObject::Boolean(value) = deref(self.pdf, value) {
+                        gs.text_knockout = *value;
+                    } else {
+                        self.loss(LossKind::Blend, "invalid text knockout flag ignored");
+                    }
+                }
                 b"LW" => gs.line_width = num(deref(self.pdf, value)).unwrap_or(1.0),
-                b"BM" if matches!(deref(self.pdf, value), PdfObject::Name(n) if n == b"Normal" || n == b"Compatible") =>
-                    {}
+                b"D" => {
+                    if let Ok(operands) = deref(self.pdf, value).as_array() {
+                        self.set_dash_pattern(operands, gs);
+                    } else {
+                        self.loss(LossKind::Other, "invalid stroke dash pattern ignored");
+                    }
+                }
+                b"BM" => {
+                    let value = deref(self.pdf, value);
+                    let mode = match value {
+                        PdfObject::Array(modes) => modes.iter()
+                            .find_map(|entry| pdf_blend_mode(deref(self.pdf, entry))),
+                        _ => pdf_blend_mode(value),
+                    };
+                    gs.blend_mode = mode.unwrap_or(BlendMode::Normal);
+                    if mode.is_none() && !matches!(value, PdfObject::Array(_)) {
+                        self.loss(LossKind::Blend, "unsupported PDF blend mode replaced by Normal");
+                    }
+                }
                 b"SMask" if matches!(deref(self.pdf, value), PdfObject::Name(n) if n == b"None") => {
                 }
                 b"SMask" => self.loss(LossKind::Mask, "graphics state soft mask dropped"),
@@ -941,12 +1173,16 @@ impl<'a> PdfMapper<'a> {
     }
 
     fn apply_clip(&mut self, path: &[SubPath], even_odd: bool, gs: &mut GState) {
+        self.apply_group_clip(path, even_odd, gs, "clip".into(), 1.0, BlendMode::PassThrough);
+    }
+
+    fn apply_group_clip(
+        &mut self, path: &[SubPath], even_odd: bool, gs: &mut GState,
+        name: String, opacity: f32, blend_mode: BlendMode,
+    ) {
         if path.is_empty() {
             self.loss(LossKind::Mask, "empty clipping path ignored");
             return;
-        }
-        if path.len() != 1 || !path[0].rect || (even_odd && path.len() > 1) {
-            self.loss(LossKind::Mask, "non-rectangular clip kept as its bounds");
         }
         let b = Self::path_bounds(path);
         if b.iter().any(|v| !v.is_finite()) {
@@ -967,62 +1203,48 @@ impl<'a> PdfMapper<'a> {
             (rect[3] - rect[1]).max(0.0) as f32,
         ];
         let id = self.doc.create_object(Object {
-            name: "clip".into(),
+            name,
             pos: [rect[0] as f32, rect[1] as f32],
             size,
             kind: ObjectKind::Group,
+            opacity,
+            blend_mode,
             parent_id: gs.parent,
-            vector_crop: Some(VectorCrop {
-                rect: [rect[0] as f32, rect[1] as f32, size[0], size[1]],
-            }),
+            ..Object::default()
+        });
+        // The mask clips every descendant, including groups inside a rectangular clip.
+        // Keeping all subpaths together preserves their shared winding rule.
+        self.doc.create_object(Object {
+            name: "clip path".into(),
+            kind: ObjectKind::Curve(Self::curve_from_path(path, [b[0], b[1]], true)),
+            pos: [b[0] as f32, b[1] as f32],
+            size: [(b[2] - b[0]) as f32, (b[3] - b[1]) as f32],
+            parent_id: Some(id),
+            clip_role: ClipRole::Mask,
+            fill: Paint::Solid { colour: Colour::new(255, 255, 255, 255) },
+            fill_rule: if even_odd { FillRule::EvenOdd } else { FillRule::NonZero },
             ..Object::default()
         });
         gs.clip = Some(rect);
         gs.parent = Some(id);
     }
 
-    fn shade_fallback(&mut self, name: &[u8], resources: &[Dictionary], gs: &GState) {
-        let dict = match self.lookup(resources, b"Shading", name) {
-            Some(PdfObject::Dictionary(dict)) => dict,
-            Some(PdfObject::Stream(stream)) => stream.dict,
-            _ => return,
-        };
-        let space = match dict.get(b"ColorSpace") {
-            Ok(object) => {
-                let object = object.clone();
-                self.space_of(&object, resources)
+    fn curve_from_path(path: &[SubPath], origin: [f64; 2], close: bool) -> Curve {
+        let local = |p: [f64; 2]| [p[0] - origin[0], p[1] - origin[1]];
+        let mut contours = path.iter().map(|sub| {
+            let mut points = sub.points.iter().map(|p| PathPoint {
+                pos: local(p.pos),
+                handle_in: p.handle_in.map(local),
+                handle_out: p.handle_out.map(local),
+                ..p.clone()
+            }).collect();
+            let closed = sub.closed || close;
+            if close && !sub.closed {
+                Self::join_closed_endpoints(&mut points);
             }
-            Err(_) => return,
-        };
-        let pdf = self.pdf;
-        let values = dict
-            .get(b"Function")
-            .ok()
-            .and_then(|function| dict_of(pdf, function))
-            .and_then(|function| function.get(b"C0").ok())
-            .map(|c0| match deref(pdf, c0) {
-                PdfObject::Array(items) => nums(items),
-                _ => Vec::new(),
-            })
-            .filter(|values| !values.is_empty())
-            .unwrap_or_else(|| vec![0.5; 4]);
-        let fill = self.colour_from(space, &values);
-        let rect = gs.clip.unwrap_or_else(|| {
-            let size = self.geometry.size();
-            let origin = [self.origin[0] as f64, self.origin[1] as f64];
-            [origin[0], origin[1], origin[0] + size[0] as f64, origin[1] + size[1] as f64]
+            Contour { points, closed }
         });
-        if rect[2] <= rect[0] || rect[3] <= rect[1] {
-            return;
-        }
-        let mut points = Vec::new();
-        for corner in [[rect[0], rect[1]], [rect[2], rect[1]], [rect[2], rect[3]], [rect[0], rect[3]]] {
-            let id = self.next_point();
-            points.push(PathPoint::sharp(id, corner));
-        }
-        let mut shade = gs.clone();
-        shade.fill = fill;
-        self.emit_path(&[SubPath { points, closed: true, rect: true }], &shade, true, false, false);
+        Curve::from_contour_and_holes(contours.next().unwrap_or_default(), contours.collect())
     }
 
     fn emit_path(
@@ -1032,6 +1254,7 @@ impl<'a> PdfMapper<'a> {
         fill: bool,
         stroke: bool,
         even_odd: bool,
+        name_override: Option<String>,
     ) {
         if (!fill || matches!(gs.fill, Paint::None))
             && (!stroke || matches!(gs.stroke, Paint::None))
@@ -1064,6 +1287,11 @@ impl<'a> PdfMapper<'a> {
             }
         }
         let opacity = if fill && stroke {
+            if !gs.blend_mode.is_normal() && gs.fill_alpha > 0.0
+                && gs.stroke_alpha > 0.0 && gs.stroke_alpha < 1.0
+            {
+                self.loss(LossKind::Blend, "blended fill and translucent stroke overlap approximated");
+            }
             1.0
         } else if fill {
             gs.fill_alpha
@@ -1093,6 +1321,7 @@ impl<'a> PdfMapper<'a> {
                 0.0
             },
             dash: gs.dash.iter().map(|v| (v * scale) as f32).collect(),
+            dash_offset: (gs.dash_offset * scale) as f32,
             cap: gs.cap.clone(),
             join: gs.join.clone(),
             ..StrokeStyle::default()
@@ -1107,53 +1336,27 @@ impl<'a> PdfMapper<'a> {
                 ),
             )
         } else {
-            if fill && (path.len() > 1 || even_odd) {
-                self.loss(
-                    LossKind::Other,
-                    "compound or even-odd fill rule is not stored by core; contour geometry retained",
-                );
-            }
             if fill && stroke && path.iter().any(|sub| !sub.closed) {
                 self.loss(
                     LossKind::Other,
                     "open filled-and-stroked path closed for core; closing stroke may differ",
                 );
             }
-            let contours = path
-                .iter()
-                .map(|sub| Contour {
-                    points: sub
-                        .points
-                        .iter()
-                        .map(|p| PathPoint {
-                            id: p.id,
-                            pos: [p.pos[0] - b[0], p.pos[1] - b[1]],
-                            handle_in: p.handle_in.map(|h| [h[0] - b[0], h[1] - b[1]]),
-                            handle_out: p.handle_out.map(|h| [h[0] - b[0], h[1] - b[1]]),
-                            kind: p.kind,
-                            corner: p.corner,
-                        })
-                        .collect(),
-                    closed: sub.closed || fill,
-                })
-                .collect::<Vec<_>>();
-            let mut iter = contours.into_iter();
             self.paths += 1;
             (
-                ObjectKind::Curve(Curve::from_contour_and_holes(
-                    iter.next().unwrap_or_default(),
-                    iter.collect(),
-                )),
+                ObjectKind::Curve(Self::curve_from_path(path, [b[0], b[1]], fill)),
                 format!("path_{}", self.paths),
             )
         };
         self.doc.create_object(Object {
-            name,
+            name: name_override.unwrap_or(name),
             pos: [b[0] as f32, b[1] as f32],
             size: [(b[2] - b[0]) as f32, (b[3] - b[1]) as f32],
             fill: fill_paint,
+            fill_rule: if fill && !even_odd { FillRule::NonZero } else { FillRule::EvenOdd },
             stroke: stroke_style,
             opacity,
+            blend_mode: gs.blend_mode,
             kind,
             parent_id: gs.parent,
             ..Object::default()
@@ -1201,6 +1404,13 @@ impl<'a> PdfMapper<'a> {
                         }
                     }
                 }
+                let form_resources = stream.dict.get(b"Resources").ok()
+                    .and_then(|o| dict_of(self.pdf, o)).cloned()
+                    .map(|dict| vec![dict])
+                    .unwrap_or_else(|| resources.to_vec());
+                let transparency = stream.dict.get(b"Group").ok().and_then(|group| {
+                    self.form_transparency(group, &form_resources)
+                });
                 if let Some(bbox) = stream
                     .dict
                     .get(b"BBox")
@@ -1222,26 +1432,62 @@ impl<'a> PdfMapper<'a> {
                         closed: true,
                         rect: axis_aligned(&inner.ctm),
                     };
-                    self.apply_clip(&[clip], false, &mut inner);
+                    if transparency.is_some() {
+                        self.apply_group_clip(
+                            &[clip], false, &mut inner,
+                            String::from_utf8_lossy(name).into_owned(), gs.fill_alpha,
+                            gs.blend_mode,
+                        );
+                        // A transparency group uses the calling alpha only when compositing its result.
+                        inner.fill_alpha = 1.0;
+                        inner.stroke_alpha = 1.0;
+                        inner.blend_mode = BlendMode::Normal;
+                    } else {
+                        self.apply_clip(&[clip], false, &mut inner);
+                    }
                 } else {
                     self.loss(LossKind::Mask, "form bounding box missing or invalid");
                 }
-                let form_resources = stream
-                    .dict
-                    .get(b"Resources")
-                    .ok()
-                    .and_then(|o| dict_of(self.pdf, o))
-                    .cloned();
-                let form_resources = form_resources
-                    .map(|d| vec![d])
-                    .unwrap_or_else(|| resources.to_vec());
-                if stream.dict.has(b"Group") {
-                    self.loss(LossKind::Blend, "form transparency group flattened");
-                }
+                let group_id = inner.parent;
+                let start = self.doc.objects.len();
                 self.run(&content.operations, &form_resources, inner, depth + 1);
+                if transparency == Some(false) && group_id != gs.parent
+                    && self.doc.objects[start..].iter().any(|object| !object.blend_mode.is_normal())
+                {
+                    if gs.blend_mode.is_normal() {
+                        if let Some(group) = group_id.and_then(|id| self.doc.find_object_mut(id.0)) {
+                            group.blend_mode = BlendMode::PassThrough;
+                        }
+                    } else {
+                        self.loss(LossKind::Blend, "non-isolated form with both internal and external blend modes approximated");
+                    }
+                }
             }
             _ => self.loss(LossKind::Other, "unsupported XObject subtype skipped"),
         }
+    }
+
+    fn form_transparency(&mut self, object: &PdfObject, resources: &[Dictionary]) -> Option<bool> {
+        let group = dict_of(self.pdf, object);
+        let Some(group) = group.filter(|dict| {
+            name_of(self.pdf, dict, b"S").as_deref() == Some("Transparency")
+        }) else {
+            self.loss(LossKind::Blend, "unknown form group attributes ignored");
+            return None;
+        };
+        if let Ok(knockout) = group.get(b"K") {
+            if !matches!(deref(self.pdf, knockout), PdfObject::Boolean(false)) {
+                self.loss(LossKind::Blend, "form group knockout approximated as normal compositing");
+            }
+        }
+        if let Ok(space) = group.get(b"CS") {
+            if !matches!(self.space_of(space, resources), Space::Rgb) {
+                self.loss(LossKind::Icc, "form group blending colour space approximated as RGB");
+            }
+        }
+        Some(group.get(b"I").is_ok_and(|value| {
+            matches!(deref(self.pdf, value), PdfObject::Boolean(true))
+        }))
     }
 
     fn image_pixels(
@@ -1250,14 +1496,7 @@ impl<'a> PdfMapper<'a> {
         resources: &[Dictionary],
     ) -> Option<(u32, u32, Vec<u8>)> {
         let dict = &stream.dict;
-        let dimension = |key| {
-            dict.get(key)
-                .ok()
-                .and_then(|o| num(deref(self.pdf, o)))
-                .filter(|v| *v > 0.0 && *v <= i32::MAX as f64 && v.fract() == 0.0)
-                .map(|v| v as u32)
-        };
-        let (Some(width), Some(height)) = (dimension(b"Width"), dimension(b"Height")) else {
+        let Some([width, height]) = image::dimensions(self.pdf, dict) else {
             self.loss(LossKind::Image, "invalid image dimensions; image skipped");
             return None;
         };
@@ -1303,19 +1542,11 @@ impl<'a> PdfMapper<'a> {
             .ok()
             .map(|o| self.space_of(o, resources))
             .unwrap_or(Space::Other);
-        let channels = match space {
-            Space::Grey => 1,
-            Space::Rgb => 3,
-            Space::Cmyk => 4,
-            _ => {
-                self.loss(
-                    LossKind::Image,
-                    "image colour space unsupported; image skipped",
-                );
-                return None;
-            }
+        let Some(channels) = space.channels() else {
+            self.loss(LossKind::Image, "image colour space unsupported; image skipped");
+            return None;
         };
-        let Some(bytes) = stream_bytes(stream) else {
+        let Some(bytes) = image::samples(self.pdf, stream, [width, height], channels) else {
             let filter = dict
                 .get(b"Filter")
                 .map(|o| format!("{:?}", o))
@@ -1337,6 +1568,16 @@ impl<'a> PdfMapper<'a> {
             );
             return None;
         }
+        let mask = image::mask(self.pdf, dict, [width, height], &bytes, channels);
+        if mask.is_none() && [b"SMask".as_slice(), b"Mask"].iter().any(|key| {
+            dict.get(key).ok().is_some_and(|object| {
+                let value = deref(self.pdf, object);
+                !matches!(value, PdfObject::Null) && !matches!(value, PdfObject::Name(name) if name == b"None")
+            })
+        }) {
+            self.loss(LossKind::Mask, "invalid or unsupported image mask dropped");
+        }
+        let conversion = self.profiles.conversion(space);
         let decode = match dict.get(b"Decode") {
             Ok(object) => match deref(self.pdf, object).as_array().ok().map(|a| nums(a)) {
                 Some(values) if values.len() == channels * 2 => values,
@@ -1345,25 +1586,39 @@ impl<'a> PdfMapper<'a> {
                     return None;
                 }
             },
-            Err(_) => (0..channels).flat_map(|_| [0.0, 1.0]).collect(),
+            Err(_) => conversion.map_or_else(
+                || (0..channels).flat_map(|_| [0.0, 1.0]).collect(),
+                |conversion| conversion.input_range(channels),
+            ),
+        };
+        let sample = |pixel: usize, channel: usize| {
+            let t = f64::from(bytes[pixel * channels + channel]) / 255.0;
+            let value = decode[channel * 2] + (decode[channel * 2 + 1] - decode[channel * 2]) * t;
+            if let Some((mask, matte)) = mask.as_ref().and_then(|mask| Some((mask, mask.matte.as_ref()?))) {
+                let alpha = f64::from(mask.alpha[pixel]);
+                if alpha > 0.0 { matte[channel] + (value - matte[channel]) / alpha } else { 0.0 }
+            } else {
+                value
+            }
         };
         let mut rgba = Vec::with_capacity(count * 4);
-        for pixel in bytes.chunks_exact(channels) {
-            let sample = |i: usize| {
-                (decode[2 * i] + pixel[i] as f64 / 255.0 * (decode[2 * i + 1] - decode[2 * i]))
-                    .clamp(0.0, 1.0)
-            };
-            let ch = |v: f64| (v * 255.0).round() as u8;
-            let rgb = match space {
-                Space::Grey => [ch(sample(0)); 3],
-                Space::Cmyk => [
-                    ch((1.0 - sample(0)) * (1.0 - sample(3))),
-                    ch((1.0 - sample(1)) * (1.0 - sample(3))),
-                    ch((1.0 - sample(2)) * (1.0 - sample(3))),
-                ],
-                _ => [ch(sample(0)), ch(sample(1)), ch(sample(2))],
-            };
-            rgba.extend([rgb[0], rgb[1], rgb[2], 255]);
+        if let Some(conversion) = conversion {
+            conversion.append_image(count, sample, &mut rgba);
+        } else {
+            for pixel in 0..count {
+                let sample = |i| sample(pixel, i).clamp(0.0, 1.0);
+                let ch = |v: f64| (v * 255.0).round() as u8;
+                let rgb = match space {
+                    Space::Grey => [ch(sample(0)); 3],
+                    Space::Cmyk => [
+                        ch((1.0 - sample(0)) * (1.0 - sample(3))),
+                        ch((1.0 - sample(1)) * (1.0 - sample(3))),
+                        ch((1.0 - sample(2)) * (1.0 - sample(3))),
+                    ],
+                    _ => [ch(sample(0)), ch(sample(1)), ch(sample(2))],
+                };
+                rgba.extend([rgb[0], rgb[1], rgb[2], 255]);
+            }
         }
         if space == Space::Cmyk {
             self.loss(
@@ -1371,8 +1626,10 @@ impl<'a> PdfMapper<'a> {
                 "CMYK image converted to RGB preview without an ICC transform",
             );
         }
-        if dict.has(b"SMask") || dict.has(b"Mask") {
-            self.loss(LossKind::Mask, "image soft or colour-key mask dropped");
+        if let Some(mask) = mask {
+            for (pixel, alpha) in rgba.chunks_exact_mut(4).zip(mask.alpha) {
+                pixel[3] = (alpha * 255.0).round() as u8;
+            }
         }
         if dict.has(b"SMaskInData") {
             self.loss(LossKind::Mask, "embedded image alpha unsupported");
@@ -1407,12 +1664,20 @@ impl<'a> PdfMapper<'a> {
             );
         }
         let name = format!("image_{}", String::from_utf8_lossy(name));
-        let mut resource = ImageResource::new_embedded(
-            ImageFormat::Bmp,
-            [width, height],
-            self.doc.dpi,
-            encode_bmp(width, height, &rgba),
-        );
+        let (format, data) = if rgba.chunks_exact(4).any(|pixel| pixel[3] != 255) {
+            use ::image::ImageEncoder;
+            let mut png = Vec::new();
+            if ::image::codecs::png::PngEncoder::new(&mut png)
+                .write_image(&rgba, width, height, ::image::ExtendedColorType::Rgba8).is_err()
+            {
+                self.loss(LossKind::Image, "could not encode image transparency; image skipped");
+                return;
+            }
+            (ImageFormat::Png, png)
+        } else {
+            (ImageFormat::Bmp, encode_bmp(width, height, &rgba))
+        };
+        let mut resource = ImageResource::new_embedded(format, [width, height], self.doc.dpi, data);
         resource.name = name.clone();
         resource.colour_space = "RGBA".into();
         let resource_id = self.doc.add_image_resource(resource);
@@ -1421,6 +1686,7 @@ impl<'a> PdfMapper<'a> {
             pos: [b[0] as f32, b[1] as f32],
             size: [(b[2] - b[0]) as f32, (b[3] - b[1]) as f32],
             opacity: gs.fill_alpha,
+            blend_mode: gs.blend_mode,
             parent_id: gs.parent,
             raster_size: Some((width, height)),
             raster_data: Some(rgba.clone()),
@@ -1483,15 +1749,7 @@ impl<'a> PdfMapper<'a> {
             "Symbol",
             "ZapfDingbats",
         ];
-        if !standard.contains(&family.as_str()) {
-            self.loss(
-                LossKind::Font,
-                format!(
-                    "font program not registered; family reference only: {}",
-                    family
-                ),
-            );
-        }
+        let reference_only = !standard.contains(&family.as_str());
         let mut decode = font.clone();
         if font.has(b"ToUnicode") {
             decode.remove(b"Encoding");
@@ -1522,13 +1780,19 @@ impl<'a> PdfMapper<'a> {
             .map(|items| {
                 items
                     .iter()
-                    .filter_map(|o| num(deref(self.pdf, o)))
-                    .collect()
+                    .map(|o| num(deref(self.pdf, o)).filter(|width| *width >= 0.0))
+                    .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        if two_byte || font.get(b"Widths").is_err() {
-            self.loss(LossKind::Font, "text advance uses fallback metrics; CID widths and standard font metrics not loaded");
+        let cid = (two_byte && encoding == "Identity-H").then(|| cid_widths(self.pdf, &font)).flatten();
+        if (two_byte && cid.is_none()) || (!two_byte && (widths.is_empty() || widths.iter().any(Option::is_none))) {
+            self.loss(LossKind::Font, "text advance uses fallback font metrics");
         }
+        let (default_width, cid_widths) = cid.unwrap_or_else(|| {
+            (if two_byte { 1000.0 } else { 500.0 }, Vec::new())
+        });
+        let embedded_cid = (two_byte && encoding == "Identity-H")
+            .then(|| text_outline::descendant(self.pdf, &font)).flatten().cloned();
         Some(FontInfo {
             family,
             style,
@@ -1536,8 +1800,12 @@ impl<'a> PdfMapper<'a> {
             two_byte,
             first_char,
             widths,
-            default_width: if two_byte { 1000.0 } else { 500.0 },
+            cid_widths,
+            default_width,
             vertical: encoding.ends_with("-V"),
+            reference_only,
+            embedded_cid,
+            embedded: OnceCell::new(),
         })
     }
 
@@ -1592,35 +1860,66 @@ impl<'a> PdfMapper<'a> {
             .collect()
     }
 
-    fn show_text(&mut self, parts: &[PdfObject], gs: &GState, tm: &mut Matrix) -> Option<Run> {
+    fn show_text(
+        &mut self, parts: &[PdfObject], gs: &GState, tm: &mut Matrix, block: &mut TextBlock,
+    ) -> Option<Run> {
         let font = gs.font.as_deref();
         let start = *tm;
+        let clips = matches!(gs.render_mode, 4..=7);
+        let mode = if clips { gs.render_mode - 4 } else { gs.render_mode };
+        let fills = matches!(mode, 0 | 2);
+        let strokes = matches!(mode, 1 | 2);
+        let translucent = (fills && gs.fill_alpha < 1.0) || (strokes && gs.stroke_alpha < 1.0);
+        let outlines_paint = self.opts.outline_embedded_text && (fills || strokes);
+        let program = font.filter(|_| outlines_paint || clips).and_then(|font| {
+            font.embedded.get_or_init(|| {
+                text_outline::EmbeddedFont::read(self.pdf, font.embedded_cid.as_ref()?)
+            }).as_ref()
+        });
+        let outlines = program.and_then(|program| skrifa::FontRef::new(&program.data).ok())
+            .map(|font| font.outline_glyphs());
+        let mut pen = outlines.as_ref().zip(program)
+            .filter(|_| gs.font_size.is_finite() && gs.font_size > 0.0 && gs.font_size <= f64::from(f32::MAX))
+            .map(|(outlines, program)| (text_outline::GlyphPen::new(gs.h_scale), outlines, program));
         let mut text = String::new();
         let mut advance = 0.0;
+        let mut glyph_ends = Vec::new();
+        let mut last_end = 0;
+        let mut has_codes = false;
         for part in parts {
             match part {
                 PdfObject::String(bytes, _) => {
-                    text.push_str(&self.decode_string(font, bytes));
+                    has_codes |= !bytes.is_empty();
+                    if !clips || mode != 3 {
+                        text.push_str(&self.decode_string(font, bytes));
+                    }
                     let step = if font.is_some_and(|f| f.two_byte) {
                         2
                     } else {
                         1
                     };
                     for code in bytes.chunks(step) {
-                        let width = font
-                            .and_then(|f| {
-                                if f.two_byte {
-                                    None
-                                } else {
-                                    let index = code[0] as i64 - f.first_char;
-                                    if index >= 0 {
-                                        f.widths.get(index as usize).copied()
-                                    } else {
-                                        None
-                                    }
+                        if let Some((glyph_pen, outlines, embedded)) = pen.as_mut() {
+                            glyph_pen.x = advance;
+                            let glyph = <[u8; 2]>::try_from(code).ok()
+                                .and_then(|bytes| embedded.glyph_id(u16::from_be_bytes(bytes)))
+                                .and_then(|id| outlines.get(id));
+                            let draw = skrifa::outline::DrawSettings::unhinted(
+                                skrifa::instance::Size::new(gs.font_size as f32), skrifa::instance::LocationRef::default(),
+                            );
+                            if glyph.is_none_or(|glyph| glyph.draw(draw, glyph_pen).is_err())
+                                || glyph_pen.exceeded_budget()
+                            {
+                                pen = None;
+                            } else {
+                                glyph_pen.close();
+                                if outlines_paint && glyph_pen.path.len() > last_end {
+                                    last_end = glyph_pen.path.len();
+                                    glyph_ends.push(last_end);
                                 }
-                            })
-                            .unwrap_or_else(|| font.map(|f| f.default_width).unwrap_or(500.0));
+                            }
+                        }
+                        let width = font.map_or(500.0, |font| font.width(code));
                         advance += (width / 1000.0 * gs.font_size
                             + gs.char_spacing
                             + if code == b" " { gs.word_spacing } else { 0.0 })
@@ -1635,15 +1934,73 @@ impl<'a> PdfMapper<'a> {
             }
         }
         *tm = mul(&[1.0, 0.0, 0.0, 1.0, advance, 0.0], tm);
-        if gs.render_mode >= 4 {
-            self.loss(LossKind::Mask, "text clipping mode dropped");
+        let line = mul(&start, &gs.ctm);
+        if clips && has_codes && pen.is_none() {
+            block.clip_failed = true;
         }
-        if gs.render_mode == 3 || gs.render_mode == 7 {
+        if let Some((mut pen, _, _)) = pen {
+            if !pen.path.is_empty() {
+                let map = |p: [f64; 2]| self.to_doc(apply(&line, [p[0], p[1] + gs.rise]));
+                for point in pen.path.iter_mut().flat_map(|sub| &mut sub.points) {
+                    point.pos = map(point.pos);
+                    point.handle_in = point.handle_in.map(map);
+                    point.handle_out = point.handle_out.map(map);
+                }
+                for point in pen.path.iter_mut().flat_map(|sub| &mut sub.points) {
+                    point.id = self.next_point();
+                }
+                let bounds = Self::path_bounds(&pen.path);
+                if clips {
+                    if bounds.iter().any(|v| !v.is_finite() || v.abs() > f32::MAX as f64) {
+                        block.clip_failed = true;
+                    } else {
+                        block.add_clip(&pen.path);
+                    }
+                }
+                if outlines_paint {
+                    self.flush_text(std::mem::take(&mut block.runs));
+                    let points = pen.path.iter().map(|sub| sub.points.len()).sum::<usize>();
+                    if block.outline_points + points > 65_536 || block.outlines.len() == 512 {
+                        self.flush_outlines(block);
+                        block.outline_budget_exceeded = true;
+                    }
+                    if block.outline_budget_exceeded && translucent && gs.text_knockout {
+                        self.loss(LossKind::Blend, "text object exceeded the outline compositing budget");
+                    }
+                    block.outline_points += points;
+                    block.outlines.push(OutlinedRun {
+                        path: pen.path,
+                        glyph_ends,
+                        gs: gs.clone(),
+                        fills,
+                        strokes,
+                        translucent,
+                        name: (!text.is_empty()).then_some(text),
+                    });
+                    return None;
+                }
+            }
+            if outlines_paint { return None; }
+        }
+        if clips && mode == 3 { return None; }
+        if mode == 3 {
             self.loss(LossKind::Other, "invisible text skipped");
             return None;
         }
         if text.is_empty() {
             return None;
+        }
+        if self.opts.outline_embedded_text {
+            self.loss(LossKind::Font, "embedded text could not be outlined; editable text retained");
+        }
+        if !gs.text_knockout && translucent {
+            self.loss(LossKind::Blend, "editable text does not preserve compositing of overlapping glyphs");
+        }
+        if let Some(font) = font.filter(|font| font.reference_only) {
+            self.loss(
+                LossKind::Font,
+                format!("font program not registered; family reference only: {}", font.family),
+            );
         }
         if font.is_some_and(|f| f.vertical) {
             self.loss(
@@ -1651,13 +2008,12 @@ impl<'a> PdfMapper<'a> {
                 "vertical text laid out horizontally",
             );
         }
-        if !matches!(gs.render_mode, 0 | 4) {
+        if mode != 0 {
             self.loss(
                 LossKind::Other,
                 "text stroke rendering approximated as fill",
             );
         }
-        let line = mul(&start, &gs.ctm);
         let origin = self.to_doc(apply(&line, [0.0, gs.rise]));
         let end = self.to_doc(apply(&line, [1.0, gs.rise]));
         let top = self.to_doc(apply(&line, [0.0, gs.rise + 1.0]));
@@ -1707,18 +2063,217 @@ impl<'a> PdfMapper<'a> {
             advance: advance * scale,
             family: font.map(|f| f.family.clone()).unwrap_or_default(),
             style: font.map(|f| f.style.clone()).unwrap_or_default(),
-            fill: if gs.render_mode == 1 {
+            fill: if mode == 1 {
                 gs.stroke.clone()
             } else {
                 gs.fill.clone()
             },
-            opacity: if gs.render_mode == 1 {
+            opacity: if mode == 1 {
                 gs.stroke_alpha
             } else {
                 gs.fill_alpha
             },
+            blend_mode: gs.blend_mode,
             parent: gs.parent,
         })
+    }
+
+    fn outline_ink(&mut self, run: &OutlinedRun, split: bool) -> Option<Vec<Vec<text_outline::TextInk>>> {
+        let gs = &run.gs;
+        let [x, y] = self.user_to_doc(gs, [0.0, 0.0]);
+        let axis_x = self.user_to_doc(gs, [1.0, 0.0]);
+        let axis_y = self.user_to_doc(gs, [0.0, 1.0]);
+        let user_to_doc = Affine::new([axis_x[0] - x, axis_x[1] - y, axis_y[0] - x, axis_y[1] - y, x, y]);
+        let width = if run.strokes && gs.line_width == 0.0 {
+            self.loss(LossKind::Other, "device hairline stroke approximated as 0.25 points");
+            0.25 / (scale_of(&gs.ctm) * self.geometry.unit)
+        } else {
+            gs.line_width
+        };
+        let style = StrokeStyle {
+            width: width as f32,
+            dash: gs.dash.iter().map(|dash| *dash as f32).collect(),
+            dash_offset: gs.dash_offset as f32,
+            cap: gs.cap.clone(),
+            join: gs.join.clone(),
+            ..StrokeStyle::default()
+        };
+        let mut glyphs = Vec::new();
+        let mut start = 0;
+        let ends = run.glyph_ends.iter().copied().filter(|_| split)
+            .chain((!split).then_some(run.path.len()));
+        for end in ends {
+            let outline = Self::curve_from_path(&run.path[start..end], [0.0, 0.0], true).to_kurbo();
+            let ink = if run.strokes {
+                text_outline::expand_ink(outline, &style, user_to_doc, run.fills)?
+            } else {
+                vec![text_outline::TextInk { path: outline, is_stroke: false }]
+            };
+            glyphs.push(ink);
+            start = end;
+        }
+        Some(glyphs)
+    }
+
+    fn emit_text_ink(
+        &mut self, ink: impl Iterator<Item = text_outline::TextInk>, gs: &GState, name: Option<&str>,
+    ) {
+        let ink: Vec<_> = ink.filter(|ink| {
+            !ink.path.elements().is_empty() && if ink.is_stroke {
+                gs.stroke != Paint::None && gs.stroke_alpha > 0.0
+            } else {
+                gs.fill != Paint::None && gs.fill_alpha > 0.0
+            }
+        }).collect();
+        let bounds: Vec<_> = ink.iter().map(|ink| ink.path.bounding_box()).collect();
+        let grouped = ink.len() > 1;
+        let parent = if grouped {
+            let bound = bounds.iter().copied().reduce(|left, right| left.union(right)).unwrap();
+            Some(self.doc.create_object(Object {
+                name: name.unwrap_or("PDF text").into(),
+                pos: [bound.x0 as f32, bound.y0 as f32],
+                size: [bound.width() as f32, bound.height() as f32],
+                kind: ObjectKind::Group,
+                parent_id: gs.parent,
+                blend_mode: if gs.blend_mode.is_normal() { BlendMode::Normal } else { BlendMode::PassThrough },
+                ..Object::default()
+            }))
+        } else {
+            gs.parent
+        };
+        for (ink, bound) in ink.into_iter().zip(bounds) {
+            let path = Affine::translate((-bound.x0, -bound.y0)) * ink.path;
+            let mut curve = Curve::from_kurbo(&path);
+            for point in std::iter::once(&mut curve.contour).chain(&mut curve.holes)
+                .flat_map(|contour| &mut contour.points)
+            {
+                point.id = self.next_point();
+            }
+            let (label, fill, opacity) = if ink.is_stroke {
+                ("stroke", gs.stroke.clone(), gs.stroke_alpha)
+            } else {
+                ("fill", gs.fill.clone(), gs.fill_alpha)
+            };
+            self.doc.create_object(Object {
+                name: if grouped { label } else { name.unwrap_or(label) }.into(),
+                pos: [bound.x0 as f32, bound.y0 as f32],
+                size: [bound.width() as f32, bound.height() as f32],
+                fill,
+                fill_rule: FillRule::NonZero,
+                opacity,
+                blend_mode: gs.blend_mode,
+                kind: ObjectKind::Curve(curve),
+                parent_id: parent,
+                ..Object::default()
+            });
+            self.report.objects += 1;
+        }
+    }
+
+    fn flush_text_block(&mut self, block: &mut TextBlock) {
+        self.flush_outlines(block);
+        self.flush_text(std::mem::take(&mut block.runs));
+    }
+
+    fn flush_outlines(&mut self, block: &mut TextBlock) {
+        let runs = std::mem::take(&mut block.outlines);
+        block.outline_points = 0;
+        if runs.iter().skip(1).any(|run| run.translucent && run.gs.text_knockout) {
+            match self.composite_text_object(&runs) {
+                Some(true) => return,
+                Some(false) => {}
+                None => self.loss(LossKind::Blend, "overlapping text could not be composited across showing operators"),
+            }
+        }
+        for run in runs {
+            let split = (run.fills && run.strokes) || (!run.gs.text_knockout && run.translucent);
+            if run.strokes && run.translucent {
+                let expanded = self.outline_ink(&run, split).and_then(|mut glyphs| {
+                    if run.gs.text_knockout {
+                        text_outline::knock_out(&mut glyphs)?;
+                    }
+                    text_outline::valid_ink(&glyphs).then_some(glyphs)
+                });
+                if let Some(glyphs) = expanded {
+                    self.emit_text_ink(glyphs.into_iter().flatten(), &run.gs, run.name.as_deref());
+                    continue;
+                }
+                self.loss(LossKind::Blend, "translucent glyph stroke expansion failed; fill and stroke compositing approximated");
+            }
+            if split && run.glyph_ends.len() >= 2 {
+                let bounds = Self::path_bounds(&run.path);
+                self.emit_glyph_group(&run.path, &run.glyph_ends, bounds, &run.gs, run.fills, run.strokes, run.name);
+            } else {
+                self.emit_path(&run.path, &run.gs, run.fills, run.strokes, false, run.name);
+            }
+        }
+    }
+
+    fn composite_text_object(&mut self, runs: &[OutlinedRun]) -> Option<bool> {
+        let parent = runs[0].gs.parent;
+        let mut glyphs = Vec::new();
+        let mut ends = Vec::with_capacity(runs.len());
+        let mut previous = Vec::with_capacity(runs.len());
+        let mut overlaps = false;
+        for run in runs {
+            if !run.gs.text_knockout || run.gs.parent != parent {
+                return None;
+            }
+            let ink = self.outline_ink(run, true)?;
+            if !text_outline::valid_ink(&ink) {
+                return None;
+            }
+            let bounds = ink.iter().flatten().map(|ink| ink.path.bounding_box())
+                .reduce(|left, right| left.union(right));
+            if let Some(bounds) = bounds {
+                overlaps |= run.translucent && previous.iter()
+                    .any(|prior| bounds.intersect(*prior).area() > 0.0);
+                previous.push(bounds);
+            }
+            glyphs.extend(ink);
+            ends.push(glyphs.len());
+        }
+        if !overlaps {
+            return Some(false);
+        }
+        text_outline::knock_out(&mut glyphs)?;
+        if !text_outline::valid_ink(&glyphs) {
+            return None;
+        }
+        let mut glyphs = glyphs.into_iter();
+        let mut start = 0;
+        for (run, end) in runs.iter().zip(ends) {
+            self.emit_text_ink(
+                glyphs.by_ref().take(end - start).flatten(), &run.gs, run.name.as_deref(),
+            );
+            start = end;
+        }
+        Some(true)
+    }
+
+    fn emit_glyph_group(
+        &mut self, path: &[SubPath], ends: &[usize], bounds: [f64; 4], gs: &GState,
+        fill: bool, stroke: bool, name: Option<String>,
+    ) {
+        if bounds.iter().any(|v| !v.is_finite() || v.abs() > f32::MAX as f64) {
+            self.loss(LossKind::Other, "text outline with invalid geometry skipped");
+            return;
+        }
+        let mut glyph_state = gs.clone();
+        glyph_state.parent = Some(self.doc.create_object(Object {
+            name: name.unwrap_or_else(|| "PDF text".into()),
+            pos: [bounds[0] as f32, bounds[1] as f32],
+            size: [(bounds[2] - bounds[0]) as f32, (bounds[3] - bounds[1]) as f32],
+            kind: ObjectKind::Group,
+            parent_id: gs.parent,
+            blend_mode: if gs.blend_mode.is_normal() { BlendMode::Normal } else { BlendMode::PassThrough },
+            ..Object::default()
+        }));
+        let mut start = 0;
+        for &end in ends {
+            self.emit_path(&path[start..end], &glyph_state, fill, stroke, false, None);
+            start = end;
+        }
     }
 
     fn flush_text(&mut self, runs: Vec<Run>) {
@@ -1730,6 +2285,11 @@ impl<'a> PdfMapper<'a> {
         }
         let mut lines: Vec<Vec<Run>> = Vec::new();
         for run in runs {
+            if !run.blend_mode.is_normal() {
+                self.emit_text_lines(std::mem::take(&mut lines));
+                self.emit_lines(vec![vec![run]]);
+                continue;
+            }
             let joins = lines.last().and_then(|l| l.last()).is_some_and(|prev| {
                 (prev.origin[1] - run.origin[1]).abs() < prev.size * 0.3
                     && prev.family == run.family
@@ -1743,6 +2303,10 @@ impl<'a> PdfMapper<'a> {
                 lines.push(vec![run]);
             }
         }
+        self.emit_text_lines(lines);
+    }
+
+    fn emit_text_lines(&mut self, lines: Vec<Vec<Run>>) {
         if self.opts.group_text_lines {
             self.emit_lines(lines);
         } else {
@@ -1811,15 +2375,15 @@ impl<'a> PdfMapper<'a> {
             ..Story::default()
         });
         let framed = self.opts.favour_editable_text && self.opts.group_text_lines;
-        self.doc.create_object(Object {
+        let id = self.doc.create_object(Object {
             name: text,
             pos: [bounds[0] as f32, bounds[1] as f32],
             size: [
                 (bounds[2] - bounds[0]).max(0.0) as f32,
                 (bounds[3] - bounds[1]).max(0.0) as f32,
             ],
-            fill: first.fill,
             opacity: first.opacity,
+            blend_mode: first.blend_mode,
             kind: if framed {
                 ObjectKind::FrameText { story: story_id }
             } else {
@@ -1828,6 +2392,17 @@ impl<'a> PdfMapper<'a> {
             parent_id: first.parent,
             ..Object::default()
         });
+        // PDF positions a line by its baseline. Align the editable text using
+        // the same font and line metrics used by the canvas.
+        if !framed && dtool_core::text_lines::text_lines_ready()
+            && let Some(line) = dtool_core::text_lines::text_lines(self.doc, id).first()
+            && let Some(object) = self.doc.find_object_mut(id.0)
+        {
+            let top = object.pos[1] + (first.origin[1] as f32 - line.origin[1]);
+            if top.is_finite() {
+                object.pos[1] = top;
+            }
+        }
         self.report.texts += 1;
     }
 

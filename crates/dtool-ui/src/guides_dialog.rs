@@ -396,7 +396,7 @@ impl GuidesDialog {
                     ui.separator();
                     ui.horizontal(|ui| {
                         ui.strong(text("dialog.guides.title"));
-                        let toggle = ui.checkbox(&mut next_percent_positions, text("dialog.guides.percent"));
+                        let toggle = dtool_design::toggle(ui, &mut next_percent_positions, text("dialog.guides.percent"));
                         dtool_design::tooltip(toggle, text("dialog.guides.percent_help"));
                     });
                     ui.add_space(space("sm"));

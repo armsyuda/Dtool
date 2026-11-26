@@ -61,7 +61,7 @@ fn rt2_solid_fill_with_transparency_gradient_skips_the_solid_fast_path() {
     let graded = create(&mut shell, "graded", 40.0, red);
     create(&mut shell, "plain", 260.0, blue);
     let stops = vec![GradientStop { offset: 0.0, colour: Colour::new(0, 0, 0, 0) }, GradientStop { offset: 1.0, colour: Colour::new(0, 0, 0, 255) }];
-    let geom = GradientGeom { start: [0.0, 0.0], end: [160.0, 0.0], ratio: 1.0 };
+    let geom = GradientGeom { start: [0.0, 0.0], end: [160.0, 0.0], ratio: 1.0, ..GradientGeom::default() };
     shell.workspace.session_mut().unwrap().document.find_object_mut(graded.0).unwrap().transparency = Transparency::Gradient { kind: GradientKind::Linear, stops, geom };
     for _ in 0..2 { frame(&mut shell, &ctx); }
     let shapes = frame(&mut shell, &ctx);

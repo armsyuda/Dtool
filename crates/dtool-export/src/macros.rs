@@ -102,6 +102,7 @@ struct PlayRollback {
     clipboard: std::sync::Arc<dtool_core::clipboard::ClipboardPayload>,
     last_duplicate_ids: Vec<dtool_core::ObjectId>,
     last_transform_delta: Option<[f32; 2]>,
+    duplicate_revision: Option<u64>,
     last_duplicate_steps: Vec<dtool_core::command::TransformSelectionBoxArgs>,
     text_edit: Option<dtool_core::command::TextEditState>,
     active_tool: String,
@@ -125,6 +126,7 @@ impl PlayRollback {
             clipboard: session.clipboard.get_payload(),
             last_duplicate_ids: session.last_duplicate_ids.clone(),
             last_transform_delta: session.last_transform_delta,
+            duplicate_revision: session.duplicate_revision,
             last_duplicate_steps: session.last_duplicate_steps.clone(),
             text_edit: session.text_edit.clone(),
             active_tool: session.active_tool.clone(),
@@ -147,6 +149,7 @@ impl PlayRollback {
         session.clipboard.restore_payload(self.clipboard);
         session.last_duplicate_ids = self.last_duplicate_ids;
         session.last_transform_delta = self.last_transform_delta;
+        session.duplicate_revision = self.duplicate_revision;
         session.last_duplicate_steps = self.last_duplicate_steps;
         session.text_edit = self.text_edit;
         session.active_tool = self.active_tool;

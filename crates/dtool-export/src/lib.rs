@@ -639,6 +639,11 @@ pub(crate) fn vector_world_path(object: &Object) -> Option<kurbo::BezPath> {
     Some(kurbo::Affine::new(matrix) * kurbo::Affine::translate((x, y)) * path)
 }
 
+// A geometric error of 0.02 points is about 7 micrometres on the output.
+pub(crate) fn vector_export_tolerance(points_per_unit: f64) -> f64 {
+    (0.02 / points_per_unit).min(dtool_core::boolean::DEFAULT_TOLERANCE)
+}
+
 pub(crate) fn text_container(object: &Object) -> Option<Object> {
     if !matches!(object.kind, ObjectKind::ArtText { .. } | ObjectKind::FrameText { .. })
         || matches!(object.fill, Paint::None)
@@ -678,12 +683,7 @@ pub(crate) fn arrowheads_for(doc: Option<&Document>, object: &Object) -> Vec<dto
         .collect()
 }
 
-pub(crate) fn vector_crop_bounds(object: &Object) -> Option<[f32; 4]> {
-    let [x, y, w, h] = object.vector_crop?.rect;
-    let local = [object.pos[0] + x, object.pos[1] + y, w, h];
-    let bounds = dtool_core::scene::clip_bounds(local, &dtool_core::geometry::object_matrix(object));
-    (bounds.iter().all(|v| v.is_finite()) && bounds[2] > 0.0 && bounds[3] > 0.0).then_some(bounds)
-}
+pub(crate) use dtool_core::scene::vector_crop_bounds;
 
 pub(crate) fn vector_object_bounds(doc: &Document, object: &Object) -> [f32; 4] {
     let [x, y, w, h] = dtool_core::geometry::object_world_bounds(object);
@@ -1124,7 +1124,12 @@ fn render_rgba_region(
     use dtool_core::layer_style::raster;
     let flags = dtool_core::CanvasFlags::default();
     let effect_scale = dtool_core::effect_raster::effect_scale(doc, width as f32 / w);
-    let mut scene = dtool_core::scene::build_scene(doc, &flags);
+    // Flatten curves finely enough for the output pixels, including documents
+    // whose coordinates are expressed in inches or other physical units.
+    let pixels_per_unit = (width as f64 / f64::from(w)).max(height as f64 / f64::from(h));
+    let tolerance = (0.25 / pixels_per_unit).clamp(1e-6, dtool_core::outline::OUTLINE_TOLERANCE);
+    let mut scene = dtool_render::scene::build_scene_with_tolerance(doc, &flags, tolerance);
+    dtool_core::clip_mask::apply(doc, &flags, &mut scene);
     if let Some(artboard) = artboard {
         let ids = doc.subtree_ids(artboard);
         // Filter after building the scene to retain transformed geometry and

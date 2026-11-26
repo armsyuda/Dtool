@@ -21,6 +21,7 @@ mod artboard;
 mod blend;
 mod curve_energy;
 mod gradient_edit;
+pub(crate) use gradient_edit::Gradient as GradientPreview;
 mod measure;
 mod pixel_brush;
 pub(crate) use pixel_brush::Draft as PixelBrushDraft;
@@ -283,51 +284,225 @@ pub fn tool_kind(active_tool: &str) -> ToolKind {
     }
 }
 
-pub(crate) fn paint_tool_cursor_badge(
-    ui: &Ui, response: &Response, active_tool: &str, icons: &mut crate::icon_cache::IconCache,
+const CURSOR_EDGE: egui::Color32 = egui::Color32::from_gray(92);
+const CURSOR_FACE: egui::Color32 = egui::Color32::WHITE;
+
+pub(crate) fn paint_canvas_cursor(
+    ui: &Ui, response: &Response, active_tool: Option<&str>, icons: &mut crate::icon_cache::IconCache,
 ) {
     use egui::{Color32, CursorIcon};
 
-    let Some(tool) = dtool_core::context_toolbar::canonical_tool(active_tool) else { return };
-    let specialized_brush = matches!(
-        dtool_core::commands::pixel_brush::operation(tool),
-        Some(dtool_core::brush::BrushOp::BackgroundErase | dtool_core::brush::BrushOp::ColourReplace
-            | dtool_core::brush::BrushOp::Mixer | dtool_core::brush::BrushOp::Dodge
-            | dtool_core::brush::BrushOp::Burn | dtool_core::brush::BrushOp::Sponge
-            | dtool_core::brush::BrushOp::Blur | dtool_core::brush::BrushOp::Sharpen
-            | dtool_core::brush::BrushOp::Median | dtool_core::brush::BrushOp::Smudge | dtool_core::brush::BrushOp::Tone)
-    );
-    if matches!(tool, "tool.move" | "tool.select.object" | "tool.stroke_width")
-        || (!specialized_brush && dtool_core::commands::pixel_brush::operation(tool).is_some())
-    {
-        return;
-    }
-    let Some(point) = response.hover_pos() else { return };
+    let area = response.interact_rect;
+    let Some(point) = response.hover_pos().or_else(|| {
+        response.dragged().then(|| response.interact_pointer_pos()).flatten()
+            .filter(|point| area.contains(*point))
+    }) else { return };
     if egui::Popup::is_any_open(ui.ctx()) {
         return;
     }
-    // Keep specialized native cursors and custom cursors supplied by the active gesture.
-    let offset = match ui.ctx().output(|output| output.cursor_icon) {
-        CursorIcon::Default => egui::vec2(13.0, 15.0),
-        CursorIcon::Crosshair => egui::vec2(9.0, 9.0),
-        CursorIcon::None if specialized_brush => egui::vec2(10.0, 10.0),
-        _ => return,
+    let cursor = ui.ctx().output(|output| output.cursor_icon);
+    let painter = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Foreground, response.id.with("tool_cursor")))
+        .with_clip_rect(area);
+    let ink = CURSOR_EDGE;
+    let white = CURSOR_FACE;
+    let tool = active_tool.and_then(dtool_core::context_toolbar::canonical_tool);
+    let kind = tool.map(tool_kind);
+    let p = |x, y| point + egui::vec2(x, y);
+    let mut lines = Vec::new();
+    let add_arrow = |lines: &mut Vec<_>, axis: egui::Vec2| {
+        let normal = axis.rot90();
+        lines.push([point - axis * 7.0, point + axis * 7.0]);
+        for sign in [-1.0, 1.0] {
+            let tip = point + axis * (7.0 * sign);
+            let base = point + axis * (4.0 * sign);
+            lines.push([tip, base + normal * 3.0]);
+            lines.push([tip, base - normal * 3.0]);
+        }
     };
-    let area = response.interact_rect;
-    let size = egui::Vec2::splat(16.0);
-    if area.width() < size.x || area.height() < size.y {
+    match cursor {
+        CursorIcon::Default | CursorIcon::Copy => {
+            let arrow = [point, p(11.0, 9.0), p(6.5, 9.0), p(9.4, 14.2),
+                p(6.3, 15.8), p(3.5, 10.7), p(0.0, 13.7)];
+            let mut fill = egui::Mesh::default();
+            for vertex in arrow {
+                fill.colored_vertex(vertex, white);
+            }
+            for [a, b, c] in [[0, 1, 2], [0, 2, 6], [2, 5, 6], [2, 3, 4], [2, 4, 5]] {
+                fill.add_triangle(a, b, c);
+            }
+            painter.add(egui::Shape::mesh(fill));
+            painter.add(egui::Shape::closed_line(arrow.to_vec(), Stroke::new(1.0, ink)));
+            if cursor == CursorIcon::Copy {
+                lines.extend([[p(10.0, 13.0), p(16.0, 13.0)], [p(13.0, 10.0), p(13.0, 16.0)]]);
+            }
+        }
+        CursorIcon::Crosshair => lines.extend([
+            [p(-6.5, 0.0), p(-3.0, 0.0)], [p(3.0, 0.0), p(6.5, 0.0)],
+            [p(0.0, -6.5), p(0.0, -3.0)], [p(0.0, 3.0), p(0.0, 6.5)],
+        ]),
+        CursorIcon::PointingHand => {
+            let palm = vec![p(-5.0, 6.0), p(-2.0, 4.0), p(4.0, 5.0), p(7.0, 8.0),
+                p(6.0, 13.0), p(3.0, 16.0), p(-1.0, 16.0), p(-5.0, 10.0)];
+            painter.add(egui::Shape::convex_polygon(palm, white, Stroke::new(1.1, ink)));
+            painter.line_segment([p(0.0, 1.0), p(0.0, 8.0)], Stroke::new(4.0, ink));
+            painter.line_segment([p(0.0, 1.0), p(0.0, 8.0)], Stroke::new(2.5, white));
+            ui.ctx().set_cursor_icon(CursorIcon::None);
+        }
+        CursorIcon::Text | CursorIcon::VerticalText => {
+            let offset = |x, y| if cursor == CursorIcon::Text { p(x, y) } else { p(y, x) };
+            lines.extend([
+                [offset(0.0, -7.0), offset(0.0, 7.0)],
+                [offset(-3.0, -7.0), offset(3.0, -7.0)],
+                [offset(-3.0, 7.0), offset(3.0, 7.0)],
+            ]);
+        }
+        CursorIcon::Move => {
+            add_arrow(&mut lines, egui::Vec2::X);
+            add_arrow(&mut lines, egui::Vec2::Y);
+        }
+        CursorIcon::ResizeHorizontal | CursorIcon::ResizeColumn => add_arrow(&mut lines, egui::Vec2::X),
+        CursorIcon::ResizeVertical | CursorIcon::ResizeRow => add_arrow(&mut lines, egui::Vec2::Y),
+        CursorIcon::ResizeNwSe => add_arrow(&mut lines, egui::vec2(1.0, 1.0).normalized()),
+        CursorIcon::ResizeNeSw => add_arrow(&mut lines, egui::vec2(1.0, -1.0).normalized()),
+        CursorIcon::ZoomIn | CursorIcon::ZoomOut => {
+            for stroke in [Stroke::new(3.5, ink), Stroke::new(2.3, white)] {
+                painter.circle_stroke(point, 5.0, stroke);
+                painter.line_segment([p(3.5, 3.5), p(8.0, 8.0)], stroke);
+            }
+            lines.push([p(-2.5, 0.0), p(2.5, 0.0)]);
+            if cursor == CursorIcon::ZoomIn {
+                lines.push([p(0.0, -2.5), p(0.0, 2.5)]);
+            }
+        }
+        CursorIcon::Alias => {
+            if active_tool.is_some_and(|tool| tool_kind(tool) == ToolKind::FrameText) {
+                for stroke in [Stroke::new(3.3, ink), Stroke::new(2.1, white)] {
+                    painter.circle_stroke(p(-3.0, 2.0), 3.5, stroke);
+                    painter.circle_stroke(p(3.0, -2.0), 3.5, stroke);
+                    painter.line_segment([p(-2.0, 1.5), p(2.0, -1.5)], stroke);
+                }
+            } else {
+                let arc = [p(-6.0, 4.0), p(-7.0, -1.0), p(-4.0, -6.0), p(1.0, -7.0), p(5.0, -5.0), p(7.0, -1.0)];
+                lines.extend(arc.windows(2).map(|ends| [ends[0], ends[1]]));
+                lines.extend([[p(7.0, -1.0), p(8.0, -5.0)], [p(7.0, -1.0), p(3.0, -2.0)]]);
+            }
+            ui.ctx().set_cursor_icon(CursorIcon::None);
+        }
+        CursorIcon::Grab | CursorIcon::Grabbing => {
+            let silhouette = if cursor == CursorIcon::Grab {
+                vec![p(-7.0, -2.0), p(-5.0, -4.0), p(-3.0, -2.0), p(-3.0, -7.0),
+                    p(5.0, -7.0), p(7.0, -3.0), p(6.0, 4.0), p(3.0, 8.0), p(-3.0, 8.0)]
+            } else {
+                vec![p(-6.0, -2.0), p(-4.0, -5.0), p(4.0, -5.0), p(7.0, -2.0),
+                    p(6.0, 4.0), p(3.0, 8.0), p(-3.0, 8.0), p(-6.0, 4.0)]
+            };
+            // The open hand has a thumb notch. Fill the palm and thumb separately.
+            let palm = if cursor == CursorIcon::Grab { silhouette[2..].to_vec() } else { silhouette.clone() };
+            painter.add(egui::Shape::convex_polygon(palm, white, Stroke::NONE));
+            if cursor == CursorIcon::Grab {
+                painter.add(egui::Shape::convex_polygon(
+                    vec![silhouette[0], silhouette[1], silhouette[2], silhouette[8]], white, Stroke::NONE,
+                ));
+                lines.extend([[-1.0, -7.0], [2.0, -7.0]].map(|[x, y]| [p(x, y), p(x, -2.0)]));
+            } else {
+                lines.push([p(-3.0, 0.0), p(3.0, 0.0)]);
+            }
+            painter.add(egui::Shape::closed_line(silhouette, Stroke::new(1.2, ink)));
+            for line in lines.drain(..) {
+                painter.line_segment(line, Stroke::new(1.0, ink));
+            }
+            ui.ctx().set_cursor_icon(CursorIcon::None);
+        }
+        _ => {}
+    }
+    for stroke in [Stroke::new(3.4, ink), Stroke::new(2.4, white)] {
+        for &line in &lines {
+            painter.line_segment(line, stroke);
+        }
+    }
+    if matches!(cursor, CursorIcon::Default | CursorIcon::Copy) || !lines.is_empty() {
+        ui.ctx().set_cursor_icon(CursorIcon::None);
+    }
+    let Some(tool) = tool else { return };
+    if matches!(tool, "tool.move" | "tool.select.object" | "tool.stroke_width") {
         return;
     }
-    let Some(icon) = icons.tool_texture(ui.ctx(), tool, Color32::WHITE, dtool_design::icon_texture_px(ui)) else { return };
+    // Keep the brush outline visible alongside the glyph that identifies the tool.
+    let brush = tool == "tool.selection_brush"
+        || dtool_core::commands::pixel_brush::operation(tool).is_some();
+    let offset = match cursor {
+        CursorIcon::Default => egui::vec2(11.0, 12.0),
+        CursorIcon::Crosshair => egui::vec2(6.0, 6.0),
+        CursorIcon::Text | CursorIcon::VerticalText
+            if matches!(tool_kind(tool), ToolKind::ArtText | ToolKind::FrameText) => egui::vec2(6.0, 6.0),
+        CursorIcon::None if brush => egui::vec2(10.0, 10.0),
+        _ => return,
+    };
+    let size = egui::Vec2::splat(14.0);
+    if area.width() < size.x + 2.0 || area.height() < size.y + 2.0 {
+        return;
+    }
     let mut origin = point + offset;
     if origin.x + size.x > area.right() { origin.x = point.x - size.x - 8.0; }
     if origin.y + size.y > area.bottom() { origin.y = point.y - size.y - 8.0; }
-    let origin = origin.clamp(area.min, area.max - size);
-    let badge = Rect::from_min_size(origin, size);
-    let painter = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Foreground, response.id.with("tool_cursor")))
-        .with_clip_rect(area);
-    painter.rect_filled(badge, 3.0, Color32::from_rgba_unmultiplied(27, 29, 32, 232));
-    painter.image(icon.id(), badge.shrink(2.0), Rect::from_min_max(Pos2::ZERO, egui::pos2(1.0, 1.0)), Color32::WHITE);
+    let margin = egui::Vec2::splat(1.0);
+    let origin = origin.clamp(area.min + margin, area.max - size - margin);
+    let glyph = Rect::from_min_size(origin, size);
+    let at = |x, y| origin + egui::vec2(x, y);
+    // Solid silhouettes leave room for a white face at cursor scale.
+    let silhouette: &[(f32, f32)] = match kind {
+        Some(ToolKind::Pen { .. }) => &[(1.5, 12.5), (3.0, 5.0), (8.5, 1.0), (13.0, 5.5), (9.0, 11.0)],
+        Some(ToolKind::Pencil) => &[(1.5, 12.5), (2.5, 8.5), (9.5, 1.5), (12.5, 4.5), (5.5, 11.5)],
+        Some(ToolKind::Eyedropper) => &[(1.5, 12.5), (2.0, 9.0), (9.5, 1.5), (12.5, 4.5), (5.0, 12.0)],
+        _ => &[],
+    };
+    if !silhouette.is_empty() {
+        painter.add(egui::Shape::convex_polygon(
+            silhouette.iter().map(|&(x, y)| at(x, y)).collect(), white, Stroke::new(1.0, ink),
+        ));
+        if matches!(kind, Some(ToolKind::Pen { .. })) {
+            painter.line_segment([at(1.5, 12.5), at(6.0, 8.0)], Stroke::new(0.9, ink));
+            painter.circle_filled(at(6.0, 8.0), 1.15, ink);
+        } else {
+            let seam = if kind == Some(ToolKind::Pencil) { [at(7.7, 3.3), at(10.7, 6.3)] }
+                else { [at(6.5, 3.7), at(10.3, 7.5)] };
+            painter.line_segment(seam, Stroke::new(1.0, ink));
+        }
+        return;
+    }
+    let symbols: &[&[(f32, f32)]] = match kind {
+        Some(ToolKind::Node) => &[
+            &[(1.5, 11.5), (7.0, 7.0), (12.5, 2.5)],
+        ],
+        Some(ToolKind::VectorCrop | ToolKind::Crop) => &[
+            &[(3.0, 1.0), (3.0, 8.0), (11.0, 8.0)],
+            &[(1.0, 3.0), (8.0, 3.0), (8.0, 11.0)],
+        ],
+        _ => &[],
+    };
+    if !symbols.is_empty() {
+        for stroke in [Stroke::new(3.2, ink), Stroke::new(2.2, white)] {
+            for points in symbols {
+                painter.add(egui::Shape::line(points.iter().map(|&(x, y)| at(x, y)).collect(), stroke));
+            }
+        }
+        if kind == Some(ToolKind::Node) {
+            painter.rect(
+                Rect::from_center_size(at(7.0, 7.0), egui::Vec2::splat(5.0)),
+                0.5, white, Stroke::new(1.0, ink), egui::StrokeKind::Outside,
+            );
+        }
+        return;
+    }
+    let texture_px = dtool_design::icon_texture_px(ui);
+    let Some(outline) = icons.tool_texture(ui.ctx(), tool, ink, texture_px) else { return };
+    let Some(icon) = icons.tool_texture(ui.ctx(), tool, white, texture_px) else { return };
+    let uv = Rect::from_min_max(Pos2::ZERO, egui::pos2(1.0, 1.0));
+    // Use the tool's own silhouette as a light glyph with a narrow dark outline.
+    for direction in [egui::Vec2::X, -egui::Vec2::X, egui::Vec2::Y, -egui::Vec2::Y] {
+        painter.image(outline.id(), glyph.translate(direction * 0.45), uv, Color32::WHITE);
+    }
+    painter.image(icon.id(), glyph, uv, Color32::WHITE);
 }
 
 pub fn normalize_rect_params(command: &mut Command) {
@@ -464,7 +639,7 @@ fn art_text_path_at(scene: &Scene, session: &Session, point: [f32; 2]) -> Option
 
 fn paint_art_text_path_cursor(ui: &Ui, rect: Rect, at: Pos2) {
     let painter = ui.painter_at(rect);
-    for (width, colour) in [(3.0, egui::Color32::WHITE), (1.0, egui::Color32::BLACK)] {
+    for (width, colour) in [(3.3, CURSOR_EDGE), (2.2, CURSOR_FACE)] {
         let stroke = Stroke::new(width, colour);
         for (a, b) in [((-3.0, -8.0), (3.0, -8.0)), ((0.0, -8.0), (0.0, 8.0)), ((-3.0, 8.0), (3.0, 8.0))] {
             painter.line_segment([at + egui::vec2(a.0, a.1), at + egui::vec2(b.0, b.1)], stroke);
@@ -538,7 +713,7 @@ impl CanvasInput {
 
     pub fn busy(&self) -> bool {
         self.origin_drag.is_some() || self.artboard_drag.is_some() || self.shape_press.is_some() || self.drag.is_some() || self.move_tool.dragging
-            || self.nodes.grab.is_some() || self.pencil.active()
+            || self.nodes.grab.is_some() || self.nodes.marquee.is_some() || self.pencil.active()
             || self.knife.is_some() || self.shape_builder.active() || self.point_transform.active()
             || self.style_drag.is_some() || self.measure.active() || self.area.active() || self.vector_crop.active()
             || self.blend.active() || self.gradient_edit.active() || self.warp_mesh.active() || self.stroke_width.active()
@@ -615,6 +790,10 @@ impl CanvasInput {
 
     pub fn show_gradient_controls(&mut self, ui: &mut Ui, session: &Session) -> Option<Command> {
         self.gradient_edit.toolbar(ui, session)
+    }
+
+    pub(crate) fn gradient_preview(&self, session: &Session) -> Option<&GradientPreview> {
+        self.gradient_edit.preview(session)
     }
 
     pub fn clear_style_picker(&mut self) {
@@ -1270,7 +1449,13 @@ impl CanvasInput {
                     return Some(Drag::MaskGradient { kind, start, current: start });
                 }
                 single.or_else(|| self.hit(scene, session, start))
-                    .filter(|id| session.document.get_object(*id).is_some_and(|object| !object.locked))
+                    .filter(|id| session.document.get_object(*id).is_some_and(|object| {
+                        !object.locked && !matches!(
+                            dtool_core::commands::context_toolbar::gradient::Target::for_object(session, &session.active_tool, object)
+                                .and_then(|target| target.paint(object)),
+                            Some(dtool_core::paint::Paint::Bitmap(_))
+                        )
+                    }))
                     .map(|target| Drag::Gradient { kind: gradient, transparency, target, start, current: start })
             }
             _ => None,
@@ -1393,8 +1578,8 @@ impl CanvasInput {
             self.cancel();
             return;
         }
-        if escape && tool_kind(&session.active_tool) == ToolKind::Node && !self.nodes.selected.is_empty() {
-            self.nodes.selected.clear();
+        if escape && tool_kind(&session.active_tool) == ToolKind::Node && self.nodes.selected_count() != 0 {
+            self.nodes.clear_selection();
             ui.ctx().request_repaint();
             return;
         }
@@ -1458,9 +1643,11 @@ impl CanvasInput {
             return;
         }
         if (kind == ToolKind::Move || session.active_tool == "tool.artboard")
-            && self.artboard_gesture(ui, response, session, pointer, primary, mods)
+            && self.artboard_gesture(ui, response, session, scene, pointer, primary, mods)
         {
-            self.paint_preview(ui, rect, session, scene);
+            if paint_overlay {
+                self.paint_preview(ui, rect, session, scene);
+            }
             return;
         }
         match kind {
@@ -1729,9 +1916,6 @@ impl CanvasInput {
                 changed = self.run(session, command);
             }
             ToolKind::Gradient(_) | ToolKind::Transparency => {
-                if response.hovered() {
-                    ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
-                }
                 let (down, up) = primary_button_positions(ui);
                 if let Some(start) = down.filter(|at| response.enabled()
                     && response.interact_rect.contains(*at)
@@ -1782,6 +1966,14 @@ impl CanvasInput {
                     } else if !primary {
                         self.drag = None;
                     }
+                }
+                if !session.quick_mask.active && self.gradient_edit.active() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                } else if let Some(at) = response.hover_pos() {
+                    let cursor = if session.quick_mask.active { None } else {
+                        gradient_edit::GradientEditor::handle_cursor(session, rect, at)
+                    }.unwrap_or(egui::CursorIcon::Crosshair);
+                    ui.ctx().set_cursor_icon(cursor);
                 }
             }
             ToolKind::Slice => {
@@ -1870,6 +2062,10 @@ impl CanvasInput {
                 let option = session.tool_options.value(&session.active_tool, "pen.mode");
                 self.pen.mode = crate::canvas_curves::PenMode::for_tool(&session.active_tool, option.as_ref().and_then(|v| v.as_str()));
                 self.pen.rubber_band = session.tool_options.flag(&session.active_tool, "pen.rubber_band").unwrap_or(false);
+                let construction = session.tool_options.flag(
+                    &session.active_tool, dtool_core::context_toolbar::PEN_CONSTRUCTION_SNAP,
+                ).unwrap_or(false);
+                let tolerance = session.snap_prefs.query().screen_tolerance as f32 / view.zoom.max(1e-4);
                 // Keep the button positions distinct even if the whole drag arrives in one frame.
                 let events = ui.input(|input| input.events.iter().filter(|event| matches!(event,
                     egui::Event::PointerButton { button: egui::PointerButton::Primary, .. }
@@ -1896,13 +2092,13 @@ impl CanvasInput {
                             }
                         }
                         egui::Event::PointerMoved(pos) if self.pen_press.is_some_and(|start| start.distance(pos) > 0.5) => {
-                            self.pen.drag(to_doc(pos));
+                            self.pen.drag_with_construction(to_doc(pos), construction, tolerance);
                         }
                         egui::Event::PointerButton { pos, pressed: false, modifiers, .. } => {
                             if self.pen_press.take().is_some_and(|start| start.distance(pos) > 0.5) {
                                 self.pen.alt = modifiers.alt;
                                 self.pen.shift = modifiers.shift;
-                                self.pen.drag(to_doc(pos));
+                                self.pen.drag_with_construction(to_doc(pos), construction, tolerance);
                             }
                             self.pen.release();
                         }
@@ -2076,12 +2272,13 @@ impl CanvasInput {
             ToolKind::Node => {
                 let (press_event, release_event) = primary_button_positions(ui);
                 let captures_press = response.contains_pointer() || response.is_pointer_button_down_on();
-                let pressed_node = press_event.filter(|pos| captures_press && response.interact_rect.contains(*pos)).map(to_doc);
+                let pressed_node = press_event.filter(|pos| captures_press && response.interact_rect.contains(*pos));
                 self.nodes.sync(session);
                 let focused = ui.ctx().memory(|m| m.focused().is_some());
                 let delete = !focused && ui.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace));
                 self.nodes.alt = mods.alt;
                 self.nodes.shift = mods.shift;
+                self.nodes.ctrl = mods.ctrl;
                 self.nodes.transform_mode = session.tool_options.flag("tool.node", "node.transform_mode").unwrap_or(false);
                 if delete && self.nodes.claims_delete() && self.nodes.grab.is_none() {
                     for command in self.nodes.delete_commands(session) {
@@ -2089,12 +2286,13 @@ impl CanvasInput {
                     }
                     self.nodes.sync(session);
                 }
-                if double && response.hovered() && !self.nodes.primitive {
+                if double && response.hovered() && !self.nodes.primitive && !self.nodes.dragging_transform_handle() {
                     if let Some(p) = release_event.map(to_doc).or(point) {
                         let command = self.nodes.double_click(session, p, near, 0.25 / f64::from(view.zoom.max(1e-4)));
                         changed |= self.run(session, command);
                     }
-                } else if let Some(p) = pressed_node {
+                } else if let Some(screen_point) = pressed_node {
+                    let p = to_doc(screen_point);
                     let result = if self.nodes.primitive { crate::canvas_curves::NodePress::Miss }
                         else { self.nodes.press(session, p, mods.shift, mods.alt, near) };
                     match result {
@@ -2107,27 +2305,89 @@ impl CanvasInput {
                                 let command = Some(Command::with_params("selection.set", json!({ "ids": [hit.0], "op": op })));
                                 changed = self.run(session, command);
                                 self.nodes.sync(session);
+                            } else if self.nodes.target.is_some() && !self.nodes.primitive {
+                                self.nodes.marquee = Some((screen_point, screen_point, mods.shift));
                             }
                         }
                     }
                 }
+                if let Some((start, end, add)) = self.nodes.marquee {
+                    let end = release_event.or(pointer).unwrap_or(end);
+                    if release_event.is_some() || released {
+                        self.nodes.marquee = None;
+                        if start.distance(end) >= 3.0 {
+                            self.nodes.select_rect(session, egui::Rect::from_two_pos(start, end), add, |point| {
+                                screen(rect, &view, point)
+                            });
+                        } else if !add {
+                            self.nodes.clear_selection();
+                        }
+                    } else if primary {
+                        self.nodes.marquee = Some((start, end, add));
+                        ui.ctx().request_repaint();
+                    } else {
+                        self.nodes.marquee = None;
+                    }
+                }
                 if self.nodes.grab.is_some() {
+                    use crate::canvas_curves::NodeAnchorSnap;
+                    self.snap_axes = [None; 2];
                     if let Some(p) = release_event.map(to_doc).or(point) {
-                        let exclude: Vec<ObjectId> = self.nodes.target.into_iter().collect();
-                        let (p, mark) = match self.nodes.moving_points(p) {
-                            Some(points) => match crate::canvas_tools::snap_offset(session, &points, &exclude) {
-                                Some((offset, mark)) => ([p[0] + offset[0], p[1] + offset[1]], Some(mark)),
-                                None => (p, None),
-                            },
-                            None => crate::canvas_tools::snap_point(session, p, &exclude),
-                        };
+                        let exclude: Vec<_> = self.nodes.drag_targets().collect();
+                        let tolerance = session.snap_prefs.query().screen_tolerance as f32 / view.zoom.max(1e-4);
+                        let (p, mark) = self.nodes.snap_transform_handle(session, p).or_else(|| {
+                            self.nodes.snap_handle(session, p, tolerance)
+                        }).unwrap_or_else(|| {
+                            let align = session.tool_options.flag("tool.node", "node.align_to_nodes").unwrap_or(false);
+                            let geometry = session.tool_options.flag("tool.node", "node.snap_to_geometry").unwrap_or(false);
+                            let alignment = if align || geometry {
+                                let all = session.tool_options.flag("tool.node", "node.snap_all_selected").unwrap_or(false);
+                                self.nodes.snap_anchors(session, p, tolerance, align, geometry, all)
+                            } else {
+                                None
+                            };
+                            if let Some(NodeAnchorSnap::Point { offset, target }) = alignment {
+                                return ([p[0] + offset[0], p[1] + offset[1]], Some(target));
+                            }
+                            let (global, mark) = match self.nodes.moving_points(p) {
+                                Some(points) => match crate::canvas_tools::snap_offset(session, &points, &exclude) {
+                                    Some((offset, mark)) => ([p[0] + offset[0], p[1] + offset[1]], Some(mark)),
+                                    None => (p, None),
+                                },
+                                None => crate::canvas_tools::snap_point(session, p, &exclude),
+                            };
+                            if let Some(NodeAnchorSnap::Axes(axes)) = alignment {
+                                self.snap_axes = axes.map(|axis| axis.map(|(_, target)| target));
+                                let point = std::array::from_fn(|i| axes[i].map_or(global[i], |(offset, _)| p[i] + offset));
+                                (point, None)
+                            } else {
+                                (global, mark)
+                            }
+                        });
                         self.snap_mark = mark;
                         self.nodes.drag(p);
                     }
                 }
                 if released && self.nodes.grab.is_some() {
                     let command = self.nodes.release();
+                    self.snap_axes = [None; 2];
                     changed = self.run(session, command);
+                }
+                if let Some(point) = point.filter(|_| response.hovered() || self.nodes.grab.is_some())
+                    && let Some(part) = self.nodes.pointer_part(session, point, near)
+                {
+                    use crate::canvas_curves::NodePart;
+                    let cursor = match part {
+                        NodePart::Scale => egui::CursorIcon::ResizeNwSe,
+                        NodePart::Rotate => egui::CursorIcon::Alias,
+                        NodePart::Shear(side) if side.axis() == 0 => egui::CursorIcon::ResizeColumn,
+                        NodePart::Shear(_) => egui::CursorIcon::ResizeRow,
+                        NodePart::Align(handle) if handle.axis == 0 => egui::CursorIcon::ResizeHorizontal,
+                        NodePart::Align(_) => egui::CursorIcon::ResizeVertical,
+                        _ if self.nodes.grab.is_some() => egui::CursorIcon::Grabbing,
+                        _ => egui::CursorIcon::Grab,
+                    };
+                    ui.ctx().set_cursor_icon(cursor);
                 }
                 if response.secondary_clicked() {
                     if let Some(p) = point {
@@ -2137,10 +2397,20 @@ impl CanvasInput {
                 let mut picked = None;
                 if crate::canvas_curves::node_context_menu(session) {
                     response.context_menu(|ui| crate::menu_tree::context_command_menu(ui, |ui| {
+                        for (kind, label) in crate::canvas_curves::NODE_CONVERSION_CHOICES {
+                            let command = self.nodes.convert_selected(session, kind);
+                            if crate::menu_tree::command_menu_item(ui, dtool_strings::text(label), command.is_some()).clicked() {
+                                picked = command;
+                                ui.close();
+                            }
+                        }
+                        ui.separator();
                         for (label, command) in [
+                            ("ctx.node.split_after", self.nodes.split_after_node_command(session)),
                             ("ctx.node.break", self.nodes.break_command(session)),
                             ("ctx.node.join", crate::canvas_curves::join_command(session)),
                             ("ctx.node.close", self.nodes.close_command(session)),
+                            ("ctx.node.smooth", self.nodes.smooth_command(session)),
                         ] {
                             if crate::menu_tree::command_menu_item(ui, dtool_strings::text(label), command.is_some()).clicked() {
                                 picked = command;
@@ -2424,9 +2694,44 @@ impl CanvasInput {
             }
         }
         if tool_kind(&session.active_tool) == ToolKind::Node {
-            if !self.nodes.primitive && let Some(contours) = self.nodes.contours(session) {
+            if let Some((start, end, _)) = self.nodes.marquee.filter(|(start, end, _)| start.distance(*end) >= 3.0) {
+                let area = egui::Rect::from_two_pos(start, end);
+                painter.rect_filled(area, 0.0, accent.gamma_multiply(0.15));
+                painter.rect_stroke(area, 0.0, stroke, egui::StrokeKind::Inside);
+            }
+            for (id, contours) in self.nodes.other_curves(session) {
+                let contours = self.nodes.live_other_contours(id).unwrap_or(contours);
                 for (c, contour) in contours.iter().enumerate() {
                     curve(contour);
+                    for node in &contour.points {
+                        let selected = self.nodes.other_node_selected(id, c, node.id);
+                        if selected {
+                            handles(node);
+                        }
+                        node_box(node.pos, selected);
+                    }
+                }
+            }
+            if !self.nodes.primitive && let Some(contours) = self.nodes.contours(session) {
+                let orientation = session.tool_options.flag("tool.node", "node.show_orientation").unwrap_or(false);
+                for (c, contour) in contours.iter().enumerate() {
+                    curve(contour);
+                    if orientation && let [.., from, to] = contour.points.as_slice() {
+                        let project = |point| screen(rect, view, crate::canvas_curves::p32(point));
+                        let red = Stroke::new(1.5, egui::Color32::from_rgb(232, 71, 71));
+                        let a = project(from.pos);
+                        let b = project(to.pos);
+                        if from.handle_out.is_some() || to.handle_in.is_some() {
+                            painter.add(egui::epaint::CubicBezierShape::from_points_stroke(
+                                [a, project(from.handle_out.unwrap_or(from.pos)), project(to.handle_in.unwrap_or(to.pos)), b],
+                                false, egui::Color32::TRANSPARENT, red,
+                            ));
+                        } else {
+                            painter.line_segment([a, b], red);
+                        }
+                        painter.rect_stroke(egui::Rect::from_center_size(b, egui::Vec2::splat(HANDLE_PX + 4.0)),
+                            0.0, red, egui::StrokeKind::Middle);
+                    }
                     for (i, node) in contour.points.iter().enumerate() {
                         let selected = self.nodes.selected.contains(&(c, i));
                         if selected {
@@ -2435,15 +2740,85 @@ impl CanvasInput {
                         node_box(node.pos, selected);
                     }
                 }
-                if self.nodes.transform_mode {
-                    if let Some(b) = crate::canvas_curves::selection_box(&contours, &self.nodes.selected).filter(|_| self.nodes.selected.len() >= 2) {
-                        let r = egui::Rect::from_two_pos(screen(rect, view, [b[0], b[1]]), screen(rect, view, [b[2], b[3]]));
-                        painter.rect_stroke(r, 0.0, Stroke::new(1.0, accent), egui::StrokeKind::Middle);
-                        painter.rect_filled(egui::Rect::from_center_size(r.max, egui::vec2(HANDLE_PX, HANDLE_PX)), 0.0, egui::Color32::WHITE);
-                        painter.rect_stroke(egui::Rect::from_center_size(r.max, egui::vec2(HANDLE_PX, HANDLE_PX)), 0.0, stroke, egui::StrokeKind::Middle);
+                let transform_box = self.nodes.transform_box(session, &contours);
+                let hide_box = self.nodes.hide_transform_box(session);
+                if let Some(b) = transform_box {
+                    use crate::canvas_curves::{NodeEdit, NodePart};
+                    let pointer = ui.input(|input| input.pointer.hover_pos()).filter(|pos| rect.contains(*pos));
+                    let radius = HANDLE_PX / view.zoom.max(1e-4);
+                    for (alignment, grip) in NodeEdit::alignment_handles(session, b, radius) {
+                        let grip = screen(rect, view, self.nodes.transform_display_point(session, grip));
+                        let active = match self.nodes.grab {
+                            Some((part, _)) => part == NodePart::Align(alignment),
+                            None => pointer.is_some_and(|pos| pos.distance(grip) <= HANDLE_PX),
+                        };
+                        let horizontal_motion = alignment.axis == 0;
+                        if active {
+                            let (sin, cos) = view.rotation_deg.to_radians().sin_cos();
+                            let tangent = if horizontal_motion { egui::vec2(-sin, cos) } else { egui::vec2(cos, sin) };
+                            let span = tangent * rect.size().length();
+                            painter.line_segment([grip - span, grip + span], Stroke::new(1.0, accent.gamma_multiply(0.75)));
+                        }
+                        if !hide_box {
+                            let size = if horizontal_motion { egui::vec2(9.0, 5.0) } else { egui::vec2(5.0, 9.0) };
+                            let handle = Rect::from_center_size(grip, size);
+                            painter.rect_filled(handle, 2.0, if active { accent } else { egui::Color32::WHITE });
+                            painter.rect_stroke(handle, 2.0, stroke, egui::StrokeKind::Middle);
+                        }
+                    }
+                }
+                if let Some(b @ [left, top, right, bottom]) = transform_box.filter(|_| !hide_box) {
+                    let project = |point| screen(rect, view, self.nodes.transform_display_point(session, point));
+                    let corners = [[left, top], [right, top], [right, bottom], [left, bottom]].map(project);
+                    let outline = Stroke::new(1.0, accent);
+                    painter.add(egui::Shape::closed_line(corners.to_vec(), outline));
+                    let handle = egui::Rect::from_center_size(corners[2], egui::Vec2::splat(HANDLE_PX));
+                    painter.rect_filled(handle, 0.0, egui::Color32::WHITE);
+                    painter.rect_stroke(handle, 0.0, stroke, egui::StrokeKind::Middle);
+                    let rotate = project(crate::canvas_curves::node_rotate_handle(b, ROTATE_PX / view.zoom.max(1e-4)));
+                    painter.line_segment([corners[0].lerp(corners[1], 0.5), rotate], outline);
+                    painter.circle(rotate, HANDLE_PX * 0.5, egui::Color32::WHITE, stroke);
+                    for (_, grip) in crate::canvas_curves::node_shear_handles(b, HANDLE_PX / view.zoom.max(1e-4)) {
+                        let centre = project(grip);
+                        let radius = HANDLE_PX * 0.62;
+                        let diamond = [[-radius, 0.0], [0.0, -radius], [radius, 0.0], [0.0, radius]]
+                            .into_iter().map(|[x, y]| centre + egui::vec2(x, y)).collect();
+                        painter.add(egui::Shape::convex_polygon(diamond, egui::Color32::WHITE, stroke));
+                    }
+                    if let Some(origin) = self.nodes.transform_origin(session, b) {
+                        let origin = screen(rect, view, origin);
+                        painter.circle_filled(origin, 6.0, egui::Color32::from_black_alpha(220));
+                        crate::context_bar::paint_transform_origin(&painter, origin, accent, 4.0);
+                    }
+                    for origin in self.nodes.displayed_individual_origins(session, &contours) {
+                        let origin = screen(rect, view, origin);
+                        painter.circle_filled(origin, 6.0, egui::Color32::from_black_alpha(220));
+                        crate::context_bar::paint_transform_origin(&painter, origin, accent, 4.0);
                     }
                 }
             }
+        }
+        if let Some(snap) = self.nodes.construction_snap.or(self.pen.construction_snap) {
+            let project = |point| screen(rect, view, point);
+            let color = dtool_design::color("smart_guide");
+            let moving = snap.moving.map(project);
+            let stroke = Stroke::new(1.0, color);
+            if let Some(triangle) = snap.triangle {
+                let [anchor, corner, neighbor] = triangle.map(project);
+                painter.extend(egui::Shape::dashed_line(
+                    &[anchor, corner, neighbor, anchor], stroke, 4.0, 3.0,
+                ));
+                let a = anchor - corner;
+                let b = neighbor - corner;
+                let mark_size = (a.length().min(b.length()) * 0.25).min(7.0);
+                let a = a.normalized() * mark_size;
+                let b = b.normalized() * mark_size;
+                painter.add(egui::Shape::line(vec![corner + a, corner + a + b, corner + b], stroke));
+            } else {
+                painter.extend(egui::Shape::dashed_line(&snap.reference.map(project), stroke, 4.0, 3.0));
+            }
+            painter.line_segment(moving, stroke);
+            painter.circle_stroke(moving[1], HANDLE_PX * 0.75, stroke);
         }
         if let Some(mark) = self.snap_mark
             && !matches!(self.move_tool.gesture, Some(GestureKind::Move | GestureKind::Scale(_)))

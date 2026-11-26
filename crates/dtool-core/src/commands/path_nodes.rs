@@ -1,4 +1,5 @@
 use crate::commands::curve_edit::{offset_contour, preserve_transform, MIN_CURVE_EXTENT};
+use crate::boolean::FillRule;
 use crate::curve::{Contour, Curve, PathPoint, PointId};
 use crate::document::Document;
 use crate::object::{Object, ObjectId, ObjectKind};
@@ -12,6 +13,9 @@ pub const PATH_BREAK: &str = "path.break";
 pub const PATH_JOIN: &str = "path.join";
 pub const PATH_MERGE: &str = "path.curves.merge";
 pub const PATH_SEPARATE: &str = "path.curves.separate";
+pub const PATH_FILL_HOLES: &str = "path.curves.fill_holes";
+pub const PATH_REMOVE_INNER: &str = "path.curves.remove_inner";
+pub const PATH_FILL_RULE: &str = "path.fill_rule.set";
 pub const PATH_POINT_ADD: &str = "path.point.add";
 pub const PATH_CLOSE: &str = "path.close";
 pub const CLOSE_WELD_EPSILON: f64 = 1e-9;
@@ -21,7 +25,10 @@ pub fn can_execute(session: &Session, command: &Command) -> Option<bool> {
     match command.name.as_str() {
         PATH_BREAK => Some(session.has_document && target_ids(session, &command.params).first().is_some_and(|id| is_curve(&session.document, *id))),
         PATH_JOIN => Some(session.has_document && can_join(session, &command.params)),
-        PATH_MERGE | PATH_SEPARATE => Some(compound_targets(session, command).is_ok()),
+        PATH_MERGE | PATH_SEPARATE | PATH_FILL_HOLES | PATH_REMOVE_INNER => {
+            Some(compound_targets(session, command).is_ok())
+        }
+        PATH_FILL_RULE => Some(fill_rule_objects(session, &command.params).is_some()),
         PATH_POINT_ADD => Some(session.has_document && target_ids(session, &command.params).first().is_some_and(|id| is_curve(&session.document, *id))),
         PATH_CLOSE => Some(session.has_document && target_ids(session, &command.params).first().is_some_and(|id| is_curve(&session.document, *id))),
         _ => None,
@@ -34,10 +41,42 @@ pub fn run(session: &mut Session, command: &Command) -> Option<CommandResult> {
         PATH_JOIN => Some(path_join(session, command)),
         PATH_MERGE => Some(merge_curves(session, command)),
         PATH_SEPARATE => Some(separate_curves(session, command)),
+        PATH_FILL_HOLES | PATH_REMOVE_INNER => Some(clean_curve_boundaries(session, command)),
+        PATH_FILL_RULE => Some(set_fill_rule(session, command)),
         PATH_POINT_ADD => Some(path_point_add(session, command)),
         PATH_CLOSE => Some(path_close(session, command)),
         _ => None,
     }
+}
+
+fn fill_rule_objects<'a>(session: &'a Session, params: &Value) -> Option<Vec<&'a Object>> {
+    if !session.has_document { return None; }
+    let ids = super::arrange::target_ids(session, &Command::with_params(PATH_FILL_RULE, params.clone())).ok()?;
+    ids.into_iter().map(|id| {
+        let object = session.document.get_object(id)?;
+        (matches!(object.kind, ObjectKind::Shape | ObjectKind::Curve(_)) && !object.locked
+            && super::symbols::object_link(&session.document, id).is_none()).then_some(object)
+    }).collect()
+}
+
+pub fn fill_rule_checked(session: &Session, rule: FillRule) -> bool {
+    fill_rule_objects(session, &Value::Null)
+        .is_some_and(|objects| objects.iter().all(|object| object.fill_rule == rule))
+}
+
+fn set_fill_rule(session: &mut Session, command: &Command) -> CommandResult {
+    let rule = command.params.get("rule").and_then(|value| serde_json::from_value::<FillRule>(value.clone()).ok())
+        .ok_or_else(CommandError::invalid_params)?;
+    let ids: Vec<_> = fill_rule_objects(session, &command.params).ok_or_else(CommandError::invalid_params)?
+        .into_iter().filter(|object| object.fill_rule != rule).map(|object| object.id).collect();
+    let reply = json!({"ids": ids, "rule": rule});
+    if ids.is_empty() { return Ok(reply); }
+    let mut document = session.document.clone();
+    for id in ids {
+        document.find_object_mut(id.0).ok_or_else(CommandError::not_found)?.fill_rule = rule;
+    }
+    let selection = session.selection.ids.clone();
+    super::document_change::commit(session, PATH_FILL_RULE, document, selection, reply)
 }
 
 fn is_curve(doc: &Document, id: ObjectId) -> bool {
@@ -99,25 +138,33 @@ fn compound_targets<'a>(session: &'a Session, command: &Command) -> Result<Vec<&
     let objects: Vec<_> = doc.objects.iter().filter(|object| set.contains(&object.id)).collect();
     if objects.len() != ids.len() { return Err(CommandError::not_found()); }
     let merge = command.name == PATH_MERGE;
+    let cleanup = matches!(command.name.as_str(), PATH_FILL_HOLES | PATH_REMOVE_INNER);
     if merge && objects.len() < 2 { return Err(CommandError::new("NEED_TWO_CURVES")); }
     let first = objects[0];
     let mut has_multiple_paths = false;
+    let mut has_closed = false;
     for object in &objects {
         let curve = object.curve().filter(|curve| !curve.is_empty())
             .ok_or_else(|| CommandError::new("NOT_A_CURVE"))?;
         has_multiple_paths |= curve.contours().filter(|path| !path.is_empty()).take(2).count() > 1;
+        has_closed |= curve.contours().any(|path| path.closed && path.points.len() >= 2);
         if object.locked { return Err(CommandError::new("LOCKED")); }
         if !object.clip_role.is_none() || carries_path_text(doc, object.id)
             || doc.objects.iter().any(|child| child.parent_id == Some(object.id))
             || doc.layer_masks.iter().any(|mask| mask.object == object.id)
             || crate::geometry::invert_matrix(&crate::geometry::object_matrix(object)).is_none()
+            || (cleanup && crate::commands::symbols::object_link(doc, object.id).is_some())
             || (merge && (object.parent_id != first.parent_id || object.page_id != first.page_id
                 || object.baked_warps != first.baked_warps || object.vector_crop.is_some()))
         {
             return Err(CommandError::invalid_params());
         }
     }
-    if !merge && !has_multiple_paths { return Err(CommandError::invalid_params()); }
+    if (command.name == PATH_SEPARATE && !has_multiple_paths)
+        || (cleanup && !has_closed)
+    {
+        return Err(CommandError::invalid_params());
+    }
     Ok(objects)
 }
 
@@ -143,7 +190,7 @@ fn contour_in_frame(contour: &Contour, matrix: Affine) -> Contour {
     projected
 }
 
-fn reframe(object: &mut Object, mut curve: Curve) -> Result<(), CommandError> {
+pub(crate) fn reframe(object: &mut Object, mut curve: Curve) -> Result<(), CommandError> {
     let [x0, y0, x1, y1] = curve.bounds();
     let extent = [(x1 - x0).max(MIN_CURVE_EXTENT), (y1 - y0).max(MIN_CURVE_EXTENT)];
     let new_origin = curve_frame(object) * Point::new(f64::from(x0 + extent[0] / 2.0), f64::from(y0 + extent[1] / 2.0));
@@ -160,9 +207,7 @@ fn reframe(object: &mut Object, mut curve: Curve) -> Result<(), CommandError> {
     for stroke in std::iter::once(&mut object.stroke).chain(&mut object.additional_strokes) {
         crate::paint::transform_stroke_style_matrix(stroke, matrix);
     }
-    if let crate::paint::Transparency::Gradient { geom, .. } = &mut object.transparency {
-        *geom = geom.transform(matrix);
-    }
+    crate::paint::transform_transparency_matrix(&mut object.transparency, matrix);
     if let Some(crop) = &mut object.vector_crop {
         crop.rect[0] -= x0;
         crop.rect[1] -= y0;
@@ -232,6 +277,37 @@ fn separate_curves(session: &mut Session, command: &Command) -> CommandResult {
     }
     let reply = json!({"ids": selection});
     super::document_change::commit(session, PATH_SEPARATE, document, selection, reply)
+}
+
+fn clean_curve_boundaries(session: &mut Session, command: &Command) -> CommandResult {
+    let targets = compound_targets(session, command)?;
+    let mut edits = Vec::new();
+    for object in targets {
+        let original = object.curve().unwrap();
+        let Some(curve) = crate::boolean::clean_curve_boundaries(original, object.fill_rule, command.name == PATH_FILL_HOLES)? else {
+            continue;
+        };
+        if &curve != original {
+            edits.push((object.id, curve));
+        }
+    }
+    let ids: Vec<_> = edits.iter().map(|(id, _)| *id).collect();
+    let reply = json!({"ids": ids});
+    if edits.is_empty() {
+        return Ok(reply);
+    }
+    let mut document = session.document.clone();
+    for (id, curve) in edits {
+        let object = document.find_object_mut(id.0).ok_or_else(CommandError::not_found)?;
+        if object.curve().unwrap().bounds() == curve.bounds() {
+            object.kind = ObjectKind::Curve(curve);
+        } else {
+            reframe(object, curve)?;
+        }
+        object.fill_rule = FillRule::EvenOdd;
+    }
+    let selection = session.selection.ids.clone();
+    super::document_change::commit(session, &command.name, document, selection, reply)
 }
 
 fn parse_tolerance(params: &Value) -> Result<f64, CommandError> {
@@ -593,9 +669,18 @@ fn path_point_add(session: &mut Session, command: &Command) -> CommandResult {
     if !t.is_finite() || t <= 0.0 || t >= 1.0 {
         return Err(CommandError::invalid_params());
     }
-    let (_, mut curve) = curve_of(&session.document, id)?;
-    let (subpath, from_index) = locate(&curve, PointId(from)).ok_or_else(CommandError::not_found)?;
-    let (to_subpath, to_index) = locate(&curve, PointId(to)).ok_or_else(CommandError::not_found)?;
+    let preserve = preserve_transform(params)?;
+    let (object, mut curve) = topology_curve(&session.document, id, preserve)?;
+    let scope = match params.get("subpath") {
+        None | Some(Value::Null) => None,
+        Some(value) => Some(value.as_u64().and_then(|index| usize::try_from(index).ok()).ok_or_else(CommandError::invalid_params)?),
+    };
+    let locate_point = |id| match scope {
+        Some(index) => contour_at(&curve, index)?.points.iter().position(|point| point.id == PointId(id)).map(|point| (index, point)),
+        None => locate(&curve, PointId(id)),
+    };
+    let (subpath, from_index) = locate_point(from).ok_or_else(CommandError::not_found)?;
+    let (to_subpath, to_index) = locate_point(to).ok_or_else(CommandError::not_found)?;
     if subpath != to_subpath {
         return Err(CommandError::new("NOT_A_SEGMENT"));
     }
@@ -627,7 +712,13 @@ fn path_point_add(session: &mut Session, command: &Command) -> CommandResult {
             PathPoint { id: new_id, pos: lerp(r0, r1, local_t), handle_in: Some(r0), handle_out: Some(r1), kind: crate::curve::NodeKind::Smooth, corner: None }
         }
     };
-    let pos = inserted.pos;
+    let pos = if preserve {
+        let [x, y] = inserted.pos;
+        let world = curve_frame(&object) * Point::new(x, y);
+        [world.x, world.y]
+    } else {
+        inserted.pos
+    };
     let before_id = contour.points[start].id.0;
     let after_id = contour.points[end].id.0;
     contour.points.insert(start + 1, inserted);
@@ -636,7 +727,10 @@ fn path_point_add(session: &mut Session, command: &Command) -> CommandResult {
     let before = session.document.clone();
     if let Some(target) = session.document.find_object_mut(id.0) {
         target.kind = ObjectKind::Curve(curve);
-        fit_bounds(target);
+        // Subdividing a segment leaves the rendered outline and object frame unchanged.
+        if !preserve {
+            fit_bounds(target);
+        }
     }
     let reply = json!({
         "id": id.0,

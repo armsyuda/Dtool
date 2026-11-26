@@ -273,7 +273,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut HatchEditorState) -> bool {
     colour_edit(ui, &text("hatch.colour"), &mut next.colour);
     let mut has_background = next.background.is_some();
     ui.horizontal(|ui| {
-        if ui.checkbox(&mut has_background, text("hatch.background")).changed() {
+        if dtool_design::toggle(ui, &mut has_background, text("hatch.background")).changed() {
             next.background = if has_background { Some(Colour::new(255, 255, 255, 255)) } else { None };
         }
     });

@@ -1,3 +1,4 @@
+use dtool_core::paint::{GradientKind, Paint};
 use dtool_io::{FidelityManifest, LossKind, fidelity_check, import_svg};
 use std::fs;
 use std::path::PathBuf;
@@ -18,12 +19,17 @@ fn fixture(test: &str) -> PathBuf {
 }
 
 #[test]
-fn svg_fidelity_matches_geometry_and_colour_and_reports_gradient_loss() {
+fn svg_fidelity_matches_geometry_colour_and_linear_gradient() {
     let path = fixture("match");
     let original = fs::read(&path).unwrap();
     let (doc, report) = import_svg(&path).expect("svg imports");
     assert_eq!(report.objects, 3);
-    assert!(report.losses.iter().any(|loss| loss.kind == LossKind::Gradient), "{:?}", report.losses);
+    assert!(!report.losses.iter().any(|loss| loss.kind == LossKind::Gradient), "{:?}", report.losses);
+    let band = doc.objects.iter().find(|object| object.name == "band").expect("gradient band");
+    let Paint::Gradient { kind, stops, geom } = &band.fill else { panic!("gradient band has no editable gradient") };
+    assert_eq!(*kind, GradientKind::Linear);
+    assert_eq!((geom.start, geom.end), ([0.0, 0.0], [380.0, 0.0]));
+    assert_eq!(stops.iter().map(|stop| (stop.offset, stop.colour.r)).collect::<Vec<_>>(), [(0.0, 0), (1.0, 255)]);
     let expected = FidelityManifest {
         objects: vec![
             ("box".into(), [60.0, 40.0, 100.0, 80.0]),

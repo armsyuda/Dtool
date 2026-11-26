@@ -56,11 +56,11 @@ pub(crate) fn show(ui: &mut egui::Ui, session: &Session, object: &Object) -> Opt
 }
 
 fn switches(ui: &mut egui::Ui, corner: &mut CornerRecipe, half: f32) {
-    if ui.checkbox(&mut corner.lock, text("corner.single_radius")).changed() && corner.lock {
+    if dtool_design::toggle(ui, &mut corner.lock, text("corner.single_radius")).changed() && corner.lock {
         let radius = corner.radii[0];
         corner.radii.fill(radius);
     }
-    if ui.checkbox(&mut corner.absolute, text("corner.absolute")).changed() {
+    if dtool_design::toggle(ui, &mut corner.absolute, text("corner.absolute")).changed() {
         corner.radii = corner.radii.map(|radius| {
             if corner.absolute { radius.clamp(0.0, 50.0) * half / 50.0 }
             else { radius.clamp(0.0, half) / half * 50.0 }

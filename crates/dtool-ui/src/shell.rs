@@ -145,12 +145,16 @@ pub fn nudge_from_input(ui: &egui::Ui) -> Option<Command> {
     if ui.ctx().memory(|memory| memory.focused().is_some()) {
         return None;
     }
-    ui.input(|input| {
-        let shift = input.modifiers.shift;
-        NUDGE_KEYS
-            .iter()
-            .find(|(key, _)| input.key_pressed(*key))
-            .map(|(_, direction)| nudge_command(*direction, shift))
+    ui.input(|input| nudge_key(input).map(|(direction, shift)| nudge_command(direction, shift)))
+}
+
+pub(crate) fn nudge_key(input: &egui::InputState) -> Option<(NudgeDirection, bool)> {
+    NUDGE_KEYS.iter().find_map(|(key, direction)| {
+        input.events.iter().find_map(|event| match event {
+            egui::Event::Key { key: pressed_key, pressed: true, modifiers, .. } if pressed_key == key =>
+                Some((*direction, modifiers.shift)),
+            _ => None,
+        })
     })
 }
 
@@ -210,6 +214,44 @@ pub(crate) const CUSTOMISE_TOOLS_MENU_ID: &str = "view.tools.customise";
 pub(crate) const CUSTOMISE_TOOLBAR_MENU_ID: &str = "view.top_toolbar.customise";
 
 type TextBarStamp = (ContextId, u64, u64, Option<(u64, Option<u64>, usize, usize)>, Vec<u64>);
+
+struct ZoomDrag {
+    owner: ContextId,
+    start: egui::Pos2,
+    end: egui::Pos2,
+    zoom: f32,
+    scroll: [f32; 2],
+    marquee: bool,
+    moved: bool,
+}
+
+impl ZoomDrag {
+    fn update(&mut self, end: egui::Pos2) {
+        self.end = end;
+        const DRAG_THRESHOLD: f32 = 6.0;
+        self.moved |= self.start.distance_sq(end) > DRAG_THRESHOLD * DRAG_THRESHOLD;
+    }
+
+    fn apply(
+        &self, view: &mut dtool_core::ViewState, rect: egui::Rect, finished: bool, limits: dtool_core::view::ZoomLimits,
+    ) -> Option<egui::Rect> {
+        let local = |pos: egui::Pos2| [pos.x - rect.min.x, pos.y - rect.min.y];
+        if self.marquee {
+            let end = self.end.clamp(rect.min, rect.max);
+            if !finished {
+                return Some(egui::Rect::from_two_pos(self.start, end));
+            }
+            dtool_tools::zoom_tool_marquee_with_limits(view, local(self.start), local(end), [rect.width(), rect.height()], limits);
+        } else {
+            const POINTS_PER_DOUBLING: f32 = 160.0;
+            let factor = ((self.end.x - self.start.x) / POINTS_PER_DOUBLING).exp2();
+            view.zoom = self.zoom;
+            view.scroll = self.scroll;
+            limits.zoom_about(view, self.zoom * factor, local(self.start));
+        }
+        None
+    }
+}
 
 pub struct AppShell {
     last_drawn: Option<(ContextId, u64)>,
@@ -305,7 +347,7 @@ pub struct AppShell {
     studio_windows: crate::studio_editor::StudioWindows,
     pub paste_special_dialog: Option<crate::dialogs::PasteSpecialDialogState>,
     pub navigation_tool: dtool_tools::NavigationTool,
-    pub zoom_drag_start: Option<[f32; 2]>,
+    zoom_drag: Option<ZoomDrag>,
     pan_drag: Option<(dtool_core::workspace::ContextId, egui::PointerButton, egui::Pos2)>,
     pub locked_delete: crate::dialogs::locked_delete::LockedDeleteDialog,
     pub longdoc: crate::longdoc_host::LongdocHost,
@@ -317,6 +359,7 @@ pub struct AppShell {
     trace_dialog: crate::trace_dialog::TraceDialog,
     trace_owner: Option<dtool_core::workspace::ContextId>,
     compound_edit: Option<crate::dialogs::compound::CompoundEdit>,
+    move_duplicate: Option<crate::dialogs::move_duplicate::MoveDuplicateDialog>,
     compound_canvas: crate::compound_canvas::CanvasEditor,
     pub preset_store: crate::presets::PresetStore,
     pub add_preset: crate::presets::AddPresetDialog,
@@ -469,7 +512,7 @@ impl AppShell {
             studio_windows: Default::default(),
             paste_special_dialog: None,
             navigation_tool: dtool_tools::NavigationTool::View,
-            zoom_drag_start: None,
+            zoom_drag: None,
             pan_drag: None,
             locked_delete: crate::dialogs::locked_delete::LockedDeleteDialog::new(),
             longdoc: Default::default(),
@@ -481,6 +524,7 @@ impl AppShell {
             trace_dialog: Default::default(),
             trace_owner: None,
             compound_edit: None,
+            move_duplicate: None,
             compound_canvas: Default::default(),
             preset_store: crate::presets::PresetStore::load_startup(),
             add_preset: Default::default(),
@@ -568,18 +612,24 @@ impl AppShell {
         let pen = &self.app_canvas.input.pen;
         let pen_points = pen.nodes.len();
         let zoom = session.view.zoom;
-        let fresh = self.context_model_view == view_size
+        use crate::canvas_input::{tool_kind, ToolKind};
+
+        let fresh = !matches!(tool_kind(&session.active_tool), ToolKind::Gradient(_) | ToolKind::Transparency)
+            && self.context_model_view == view_size
             && self.context_model_zoom == zoom
             && self.context_model_pen_points == pen_points
             && self.context_model.as_ref().is_some_and(|(cached, generation, tool, selection, model)| {
-                let energy = dtool_core::context_toolbar::CURVE_ENERGY;
-                let displayed = model.item(energy).and_then(|item| match item.control {
-                    crate::context_bar::ContextControl::Toggle(value) => Some(value),
-                    _ => None,
+                use dtool_core::context_toolbar::{CURVE_ENERGY, PEN_CONSTRUCTION_SNAP};
+                let toggles_current = [CURVE_ENERGY, PEN_CONSTRUCTION_SNAP].into_iter().all(|id| {
+                    let displayed = model.item(id).and_then(|item| match item.control {
+                        crate::context_bar::ContextControl::Toggle(value) => Some(value),
+                        _ => None,
+                    });
+                    displayed == session.tool_options.flag(tool, id)
                 });
                 *cached == id && *generation == session.generation && *tool == session.active_tool
                     && *selection == session.selection.ids
-                    && displayed == session.tool_options.flag(tool, energy)
+                    && toggles_current
             });
         if !fresh {
             let mut model = crate::context_bar::ContextBarModel::stamped(session, id).with_view_size(session, view_size);
@@ -690,8 +740,11 @@ impl AppShell {
         let show_text = self.refresh_text_bar() || text_tool;
         let show_frame = self.refresh_picture_frame_bar();
         let show_node = self.workspace.session().is_some_and(|session| session.active_tool == "tool.node");
-        if show_node { self.refresh_wells(); }
-        let mut node_paint = None;
+        let show_move_paint = self.workspace.session().is_some_and(|session| {
+            tool_kind(&session.active_tool) == ToolKind::Move && !session.selection.ids.is_empty()
+        });
+        if show_node || show_move_paint { self.refresh_wells(); }
+        let mut context_paint = None;
         if !show_text && self.font_preview.is_some() {
             let _ = self.font_preview_hover(None);
         }
@@ -729,10 +782,17 @@ impl AppShell {
                 }
                 if show_node && let Some(session) = self.workspace.session() {
                     self.app_canvas.input.nodes.sync_toolbar(session);
-                    (picked, node_paint) = crate::context_bar::show_node_controls(
-                        ui, session, &self.app_canvas.input.nodes, &self.wells, &mut self.icon_cache,
+                    (picked, context_paint) = crate::context_bar::show_node_controls(
+                        ui, session, &mut self.app_canvas.input.nodes, &self.wells, &mut self.icon_cache,
                     );
                     return;
+                }
+                if show_move_paint && let Some(session) = self.workspace.session() {
+                    let can_paint = session.selection.ids.iter().any(|id| {
+                        session.document.get_object(*id).is_some_and(|object| !object.locked)
+                    });
+                    context_paint = crate::context_bar::show_paint_wells(ui, session, &self.wells, can_paint);
+                    ui.separator();
                 }
                 if let Some(session) = self.workspace.session().filter(|session| session.active_tool == "tool.blend") {
                     blend_action = self.app_canvas.input.show_blend_bar(ui, session);
@@ -829,7 +889,7 @@ impl AppShell {
                 });
             }));
         self.toolbar_customisation_menu(ui, context_bar.response.rect, "context");
-        if let Some(role) = node_paint {
+        if let Some(role) = context_paint {
             self.apply_tool_colour_action(crate::panels::colour::ToolColourAction::Edit(role));
         }
         if unload_style {
@@ -858,11 +918,19 @@ impl AppShell {
         for command in artboard_actions {
             if let Err(error) = self.run_and_reconcile(command) { self.status_bar.set_hint_key(&error.message_key); }
         }
-        if let Some(command) = qr_action.or(corner_action).or(blend_action).or(measure_action).or(gradient_action).or(warp_action).or(brush_action) {
+        if let Some(command) = qr_action.or(corner_action).or(blend_action).or(measure_action).or(warp_action).or(brush_action) {
             if let Err(error) = self.run_and_reconcile(command) { self.status_bar.set_hint_key(&error.message_key); }
         }
-        if let Some(command) = picked {
-            if let Err(error) = self.apply_context_pick(command) { self.status_bar.set_hint_key(&error.message_key); }
+        if let Some(command) = gradient_action.or(picked) {
+            let tracks_zoom = command.name == crate::context_bar::OPTION_SET && command.params["id"] == "zoom.level";
+            let previous_zoom = tracks_zoom.then(|| self.workspace.session().map(|session| session.view.zoom)).flatten();
+            match self.apply_context_pick(command) {
+                Ok(_) if previous_zoom.is_some_and(|zoom| self.workspace.session().is_some_and(|session| session.view.zoom != zoom)) => {
+                    self.app_canvas.preview_zoom(ui);
+                }
+                Err(error) => self.status_bar.set_hint_key(&error.message_key),
+                _ => {}
+            }
         }
     }
 
@@ -1096,18 +1164,37 @@ impl AppShell {
         result
     }
 
-    pub fn apply_context_pick(&mut self, command: Command) -> dtool_core::CommandResult {
-        let command = if command.name == crate::context_bar::VIEW_ZOOM_FIT {
-            Command::with_params(crate::context_bar::VIEW_ZOOM_FIT, crate::context_bar::action_params(crate::context_bar::VIEW_ZOOM_FIT, self.canvas_size))
-        } else if command.name == crate::context_bar::OPTION_SET && command.params["id"] == "zoom.level" {
-            let mut command = command;
-            if self.canvas_size.iter().all(|side| *side > 0.0) {
-                command.params["params"] = serde_json::json!({ "view_size": self.canvas_size });
+    pub fn apply_context_pick(&mut self, mut command: Command) -> dtool_core::CommandResult {
+        if command.name == crate::context_bar::OPTION_SET
+            && command.params["id"] == "gradient.type"
+            && command.params["value"] == "bitmap"
+            && command.params["params"]["path"].is_null()
+        {
+            #[cfg(windows)]
+            {
+                let path = crate::dialogs::pick_file_path_with_extensions(
+                    text("ctx.gradient.bitmap.open"), text("dialog.file.filter.image"),
+                    &crate::place_tool::PLACE_IMAGE_EXTENSIONS, None,
+                ).map_err(|_| dtool_core::CommandError::new("IO.OTHER"))?;
+                let Some(path) = path else { return Ok(Value::Null) };
+                let path = path.to_str().ok_or_else(dtool_core::CommandError::invalid_params)?;
+                command.params["params"] = json!({"path": path});
             }
-            command
-        } else {
-            command
-        };
+            #[cfg(not(windows))]
+            return Err(dtool_core::CommandError::not_implemented());
+        }
+        let view_size = self.canvas_size;
+        if command.name == crate::context_bar::VIEW_ZOOM_FIT {
+            command.params = crate::context_bar::action_params(crate::context_bar::VIEW_ZOOM_FIT, view_size);
+        } else if view_size.iter().all(|side| side.is_finite() && *side > 0.0) {
+            if matches!(command.name.as_str(), "view.zoom.in" | "view.zoom.out" | "view.zoom.actual")
+                && command.params.is_null()
+            {
+                command.params = json!({ "view_size": view_size });
+            } else if command.name == crate::context_bar::OPTION_SET && command.params["id"] == "zoom.level" {
+                command.params["params"] = json!({ "view_size": view_size });
+            }
+        }
         self.apply_context_command(command)
     }
 
@@ -1122,6 +1209,8 @@ impl AppShell {
             self.menu_persona = id.to_string();
         }
         if !self.top_toolbar_visible() { return; }
+        let home_open = self.workspace.active().is_none() && self.new_document_dialog.is_some()
+            && self.file_dialog.is_none() && self.exit_review.is_none();
         let mut action = None;
         let mut toolbar_edit = None;
         let header = egui::Panel::top("dtool.shell.persona_header")
@@ -1132,7 +1221,7 @@ impl AppShell {
             .show(ui, |ui| {
                 ui.spacing_mut().interact_size.y = dtool_design::size("bar.toolbar.control.height");
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    self.update_indicator.show(ui, &mut self.icon_cache);
+                    self.update_indicator.show(ui, &mut self.icon_cache, home_open);
                     action = crate::persona_bar::workspace_icons(ui, self.workspace.session(), &mut self.icon_cache);
                     if self.menu_persona == "pixel"
                         && let Some(session) = self.workspace.session()
@@ -1637,6 +1726,12 @@ impl AppShell {
         true
     }
 
+    pub(crate) fn open_move_duplicate(&mut self, ctx: &egui::Context) -> bool {
+        if self.move_duplicate.is_some() { return false; }
+        self.move_duplicate = crate::dialogs::move_duplicate::MoveDuplicateDialog::open(&self.workspace, ctx);
+        self.move_duplicate.is_some()
+    }
+
     pub fn input_blocked(&self, ctx: &egui::Context) -> bool {
         self.modal_blocking || crate::dialog_chrome::modal_open(ctx)
     }
@@ -2111,7 +2206,9 @@ impl AppShell {
         };
         let previous = &self.document_setup.original_setup;
         let already_has_cover = previous.facing_pages && previous.start_on_right;
-        if let Some(result) = self.document_setup.show(ui, &mut context.session) {
+        let result = self.document_setup.show(ui, &mut context.session);
+        context.view_state = context.session.view.clone();
+        if let Some(result) = result {
             let doc = &context.session.document;
             if result == crate::dialogs::document_setup::DialogResult::Ok
                 && !already_has_cover
@@ -2311,6 +2408,9 @@ impl AppShell {
         if Some((id, generation)) == self.last_drawn {
             return;
         }
+        if self.last_drawn.is_none_or(|(previous, _)| previous != id) {
+            self.status_bar.clear_file_open_error();
+        }
         let snapshot = self.workspace.session().and_then(|session| session.query(None).ok()).unwrap_or(Value::Null);
         self.last_drawn = Some((id, generation));
         self.render(snapshot);
@@ -2322,9 +2422,15 @@ impl AppShell {
         true
     }
 
+    #[cfg(windows)]
+    pub fn accepts_vector_paste_shortcut(&self, ctx: &egui::Context) -> bool {
+        !self.input_blocked(ctx) && self.current_focus(ctx) == Focus::Canvas
+            && self.workspace.session().is_some_and(|session| session.text_edit.is_none())
+    }
+
     pub fn run_and_reconcile(&mut self, mut command: Command) -> dtool_core::CommandResult {
         if matches!(command.name.as_str(), "edit.paste" | "edit.paste_inside" | "doc.new_from_clipboard") && self.workspace.session().is_none_or(|session| session.text_edit.is_none()) {
-            crate::os_clipboard::refresh_native_image(self.workspace.app_clipboard());
+            crate::os_clipboard::refresh_native_graphic(self.workspace.app_clipboard());
         }
         if Self::is_pref_command(&command.name) {
             return self.pref_command(&command.name, &command.params);
@@ -2685,7 +2791,13 @@ impl AppShell {
                 if mode == crate::dialogs::FileDialogMode::Open { self.browse_document(); }
                 else { self.open_file_dialog(mode); }
             }
-            else if action.id==crate::menu_tree::recent::CLEAR_ID||crate::menu_tree::recent::item_index(&action.id).is_some(){if let Err(error)=self.recent_files.handle(&mut self.workspace,&action.id){self.status_bar.set_hint_key(&error.message_key);}}
+            else if action.id == crate::menu_tree::recent::CLEAR_ID || crate::menu_tree::recent::item_index(&action.id).is_some() {
+                match self.recent_files.handle(&mut self.workspace, &action.id) {
+                    Ok(crate::menu_tree::recent::RecentOutcome::Opened) => self.status_bar.clear_file_open_error(),
+                    Err(error) => self.status_bar.set_file_open_error(&error.message_key),
+                    _ => {}
+                }
+            }
             else if action.id==crate::home::HOME_MENU_ID{self.open_new_document_dialog();}
             else if action.id==crate::dialogs::NEW_DOCUMENT_MENU{self.open_new_document_dialog();}
             else if action.id == crate::dialogs::NEW_FROM_LAST_PRESET_MENU {
@@ -2705,6 +2817,9 @@ impl AppShell {
                         Err(error) => self.status_bar.set_hint_key(&error.message_key),
                     }
                 }
+            }
+            else if action.id == dtool_core::clipboard::move_duplicate::MOVE_DUPLICATE {
+                self.open_move_duplicate(ui.ctx());
             }
             else if action.id=="vector.edit_compound" {
                 self.compound_edit = crate::dialogs::compound::CompoundEdit::open(&self.workspace);
@@ -2818,9 +2933,9 @@ impl AppShell {
                 let params = if fixed { serde_json::json!({"fixed": true}) } else { serde_json::json!({}) };
                 let result=self.run_and_reconcile(Command::with_params(&name, params));
                 match result {
-                    Ok(_) if matches!(name.as_str(), "edit.copy" | "edit.cut") => {
+                    Ok(_) if matches!(name.as_str(), "edit.copy" | "edit.cut" | dtool_core::clipboard::flattened::COPY_FLATTENED) => {
                         let events = crate::os_clipboard::OsClipboardEvents {
-                            copy: name == "edit.copy", cut: name == "edit.cut", ..Default::default()
+                            copy: name != "edit.cut", cut: name == "edit.cut", ..Default::default()
                         };
                         self.publish_os_clipboard(ui.ctx(), &events);
                     }
@@ -2943,6 +3058,20 @@ impl AppShell {
                 }
             }
         }
+        if self.move_duplicate.as_ref().is_some_and(|dialog| !dialog.matches(&self.workspace)) {
+            self.move_duplicate = None;
+        }
+        if let (Some(dialog), Some(session)) = (&mut self.move_duplicate, self.workspace.session()) {
+            let (cancel, command) = dialog.show(ui.ctx(), session);
+            if cancel {
+                self.move_duplicate = None;
+            } else if let Some(command) = command {
+                match self.run_and_reconcile(command) {
+                    Ok(_) => self.move_duplicate = None,
+                    Err(error) => self.status_bar.set_hint_key(&error.message_key),
+                }
+            }
+        }
         if self.trace_dialog.is_open() {
             if self.workspace.active() != self.trace_owner {
                 self.trace_dialog.close();
@@ -2968,6 +3097,7 @@ impl AppShell {
                     && result == DialogResult::Confirm
                 {
                     self.new_document_dialog = None;
+                    self.status_bar.clear_file_open_error();
                 }
                 let loaded_selection = state.mode == crate::dialogs::FileDialogMode::SelectionLoad
                     && result == DialogResult::Confirm;
@@ -2980,13 +3110,15 @@ impl AppShell {
             let result = review.show(ui, &mut self.workspace);
             if result != DialogResult::Open {
                 self.exit_review = None;
-                if result == DialogResult::Confirm {
+                let approved = result == DialogResult::Confirm;
+                if self.update_indicator.finish_exit(approved) && approved {
                     self.exit_approved = true;
                     ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
                 }
             }
         }
-        if self.file_dialog.is_none() && self.exit_review.is_none() && let Some(state) = &mut self.new_document_dialog {
+        if self.file_dialog.is_none() && self.exit_review.is_none() && !self.update_indicator.dialog_open()
+            && let Some(state) = &mut self.new_document_dialog {
             use crate::dialogs::NewDocumentOutcome;
             let mut action = None;
             let result = crate::dialogs::new_document_dialog_result(ui, state, &mut self.workspace,
@@ -3001,6 +3133,7 @@ impl AppShell {
                 }
                 self.new_document_dialog = None;
                 if matches!(result, NewDocumentOutcome::Created | NewDocumentOutcome::OpenedRecent) {
+                    self.status_bar.clear_file_open_error();
                     self.reconcile_active();
                 }
             }
@@ -3009,6 +3142,10 @@ impl AppShell {
         if let Some(state) = &mut self.paste_special_dialog {
             let done = match self.workspace.session_mut() { Some(session) => crate::dialogs::show_paste_special_dialog(ui, state, session).is_some(), None => true };
             if done { self.paste_special_dialog = None; }
+        }
+        if self.update_indicator.show_dialog(ui.ctx()) {
+            self.request_exit();
+            ui.ctx().request_repaint();
         }
 
         let ids: Vec<_> = self.workspace.contexts().iter().map(|ctx| ctx.id).collect();
@@ -3290,6 +3427,15 @@ impl AppShell {
                         self.open_tool_palette(ctx)?;
                         return Ok(serde_json::json!({ "open": true }));
                     }
+                    if menu_id == Some(crate::resize_canvas_dialog::MENU_ID) {
+                        if !self.resize_canvas.as_ref().is_some_and(|dialog| dialog.owner == owner) {
+                            if self.input_blocked(ctx) {
+                                return Err(dtool_core::CommandError::new("CANNOT_EXECUTE"));
+                            }
+                            self.open_resize_canvas();
+                        }
+                        return Ok(serde_json::json!({ "open": self.resize_canvas.is_some() }));
+                    }
                     if menu_id == Some(crate::menu_tree::LAYER_EFFECTS_MENU_ID) {
                         let id = self.workspace.session().and_then(crate::mask_actions::target)
                             .ok_or_else(|| dtool_core::CommandError::new("CANNOT_EXECUTE"))?.0;
@@ -3492,19 +3638,25 @@ impl AppShell {
         #[cfg(windows)]
         match crate::dialogs::pick_document_path() {
             Ok(Some(path)) => {
-                match self.workspace.open_path(&path) {
+                if path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("pdf")) {
+                    let mut dialog = crate::dialogs::FileDialogState::new(crate::dialogs::FileDialogMode::Open);
+                    dialog.path = path.to_string_lossy().into_owned();
+                    self.file_dialog = Some(dialog);
+                    return true;
+                }
+                match self.run_and_reconcile(Command::with_params("doc.open", json!({ "path": path }))) {
                     Ok(_) => {
-                        self.reconcile_active();
+                        self.status_bar.clear_file_open_error();
                         return true;
                     }
-                    Err(error) => self.status_bar.set_hint_key(&error.message_key),
+                    Err(error) => self.status_bar.set_file_open_error(&error.message_key),
                 }
                 return false;
             }
             Ok(None) => {
                 return false;
             }
-            Err(_) => self.status_bar.set_hint_key("error.io_error"),
+            Err(_) => self.status_bar.set_file_open_error("error.io_error"),
         }
         self.open_file_dialog(crate::dialogs::FileDialogMode::Open);
         false
@@ -3512,6 +3664,7 @@ impl AppShell {
 
     pub fn dialog_open(&self, ctx: &egui::Context) -> bool {
         self.input_blocked(ctx)
+            || self.update_indicator.dialog_open()
             || self.exit_review.is_some()
             || self.file_dialog.is_some()
             || self.new_document_dialog.is_some()
@@ -3876,6 +4029,7 @@ impl AppShell {
 impl AppShell {
     pub fn navigation_canvas(&mut self, ui: &mut egui::Ui) {
         let Some(id) = self.workspace.active() else {
+            self.zoom_drag = None;
             let rect = ui.available_rect_before_wrap();
             ui.painter().rect_filled(rect, 0.0, dtool_design::theme::surface(ui.ctx(), "pasteboard"));
             ui.allocate_rect(rect, egui::Sense::hover());
@@ -3903,12 +4057,12 @@ impl AppShell {
                 }
             } else if context.initial_view_pending {
                 ui.ctx().request_repaint();
-                use dtool_core::view::{ViewTarget, center_region, clamp_zoom};
+                use dtool_core::view::{ViewTarget, center_region};
                 let document = &context.session.document;
                 let target = context.reopen_view_target.take().and_then(|target| target.bounds(document))
                     .or_else(|| ViewTarget::first(document));
                 if let Some(bounds) = target {
-                    view.zoom = clamp_zoom(actual_zoom);
+                    view.zoom = actual_zoom;
                     center_region(view, bounds, available);
                 }
             }
@@ -3916,6 +4070,17 @@ impl AppShell {
             context.session.view_canvas_size = Some(available);
         }
         let ruler_view = context.session.view.clone();
+        if crate::canvas_input::tool_kind(&context.session.active_tool) == crate::canvas_input::ToolKind::Node
+            && let (Some(press), _) = crate::input::primary_button_positions(ui)
+            && inner.contains(press)
+        {
+            let local = press - inner.min;
+            let point = dtool_core::view_to_doc(&ruler_view, [local.x, local.y]);
+            let radius = crate::canvas_input::HANDLE_PX / ruler_view.zoom.max(1e-4);
+            if self.app_canvas.input.nodes.claims_alignment_handle(&context.session, point, radius) {
+                crate::rulers::set_canvas_gesture(ui.ctx(), true);
+            }
+        }
         if rulers_shown {
             match self.rulers.show(ui, &mut context.session, &ruler_view, area) {
                 crate::rulers::RulerDropResult::Refused(key) => self.status_bar.set_hint_key(&key),
@@ -3935,8 +4100,10 @@ impl AppShell {
         let (space, alt, escape) = ui.input(|input| (input.key_down(egui::Key::Space), input.modifiers.alt, input.key_pressed(egui::Key::Escape)));
         let space = space && !self.app_canvas.input.pen.dragging && self.focus == Focus::Canvas && context.session.text_edit.is_none();
         let mut mode = crate::canvas_input::nav_mode(&context.session.active_tool, space, ui.input(|input| input.pointer.middle_down()));
+        let click_mode_out = mode == crate::canvas_input::NavMode::Zoom
+            && context.session.tool_options.choice("tool.zoom", "zoom.mode").as_deref() == Some("out");
+        let limits = context.session.zoom_limits();
         let view = &mut context.session.view;
-        if escape { self.zoom_drag_start = None; }
         let guide_drag = crate::rulers::guide_drag_active(ui.ctx());
         let mut pan = self.pan_drag.take().filter(|(owner, _, _)| *owner == id && !guide_drag && !escape);
         if !guide_drag && !escape {
@@ -3971,16 +4138,77 @@ impl AppShell {
         }
         if !guide_drag && mode == crate::canvas_input::NavMode::Pan {
             if response.hovered() { ui.ctx().set_cursor_icon(if self.pan_drag.is_some() { egui::CursorIcon::Grabbing } else { egui::CursorIcon::Grab }); }
-        } else if !guide_drag && mode == crate::canvas_input::NavMode::Zoom {
-            if response.drag_started() { self.zoom_drag_start = ui.input(|input| input.pointer.press_origin()).map(local); }
-            if response.drag_stopped() {
-                if let (Some(start), Some(end)) = (self.zoom_drag_start.take(), response.interact_pointer_pos().map(local)) {
-                    dtool_tools::zoom_tool_marquee(view, start, end, size);
-                }
-            } else if response.clicked() {
-                if let Some(point) = response.interact_pointer_pos().map(local) { dtool_tools::zoom_tool_click(view, point, alt); }
+        }
+        let blocked = self.modal_blocking || crate::dialog_chrome::modal_open(ui.ctx())
+            || self.move_duplicate.is_some();
+        let mut zoom_marquee = None;
+        if !guide_drag && !blocked && mode == crate::canvas_input::NavMode::Zoom {
+            let button = egui::PointerButton::Primary;
+            let before = (view.zoom, view.scroll);
+            if self.zoom_drag.as_ref().is_some_and(|drag| drag.owner != id) {
+                self.zoom_drag = None;
             }
-            if response.hovered() { ui.ctx().set_cursor_icon(if alt { egui::CursorIcon::ZoomOut } else { egui::CursorIcon::ZoomIn }); }
+            if escape {
+                if let Some(drag) = self.zoom_drag.take() {
+                    view.zoom = drag.zoom;
+                    view.scroll = drag.scroll;
+                }
+            } else {
+                // A fast drag can send both button transitions in the same frame.
+                let events = ui.input(|input| input.events.iter().filter(|event| matches!(event,
+                    egui::Event::PointerMoved(_) | egui::Event::PointerButton { button: egui::PointerButton::Primary, .. }
+                )).cloned().collect::<Vec<_>>());
+                for event in events {
+                    match event {
+                        egui::Event::PointerButton { pos, pressed: true, modifiers, .. }
+                            if response.enabled() && response.interact_rect.contains(pos)
+                            && ui.ctx().layer_id_at(pos) == Some(response.layer_id)
+                            && !egui::Popup::is_any_open(ui.ctx()) =>
+                        {
+                            self.zoom_drag = Some(ZoomDrag {
+                                owner: id, start: pos, end: pos, zoom: view.zoom, scroll: view.scroll,
+                                marquee: modifiers.alt, moved: false,
+                            });
+                        }
+                        egui::Event::PointerMoved(pos) => {
+                            if let Some(drag) = &mut self.zoom_drag {
+                                drag.update(pos);
+                            }
+                        }
+                        egui::Event::PointerButton { pos, pressed: false, modifiers, .. } => {
+                            if let Some(mut drag) = self.zoom_drag.take() {
+                                drag.update(pos);
+                                if drag.moved {
+                                    drag.apply(view, rect, true, limits);
+                                } else if response.clicked_by(button) {
+                                    dtool_tools::zoom_tool_click_with_limits(view, local(pos), click_mode_out ^ modifiers.alt, limits);
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                if !ui.input(|input| input.pointer.primary_down()) {
+                    self.zoom_drag = None;
+                }
+                if let Some(drag) = self.zoom_drag.as_ref().filter(|drag| drag.moved) {
+                    zoom_marquee = drag.apply(view, rect, false, limits);
+                }
+            }
+            if before != (view.zoom, view.scroll) {
+                self.app_canvas.preview_zoom(ui);
+            }
+            if response.hovered() {
+                let cursor = match &self.zoom_drag {
+                    Some(drag) if drag.marquee => egui::CursorIcon::Crosshair,
+                    Some(drag) if drag.end.x < drag.start.x => egui::CursorIcon::ZoomOut,
+                    None if click_mode_out ^ alt => egui::CursorIcon::ZoomOut,
+                    _ => egui::CursorIcon::ZoomIn,
+                };
+                ui.ctx().set_cursor_icon(cursor);
+            }
+        } else {
+            self.zoom_drag = None;
         }
         context.view_state = view.clone();
         let placing = self.place_tool.active_for(id);
@@ -4061,12 +4289,12 @@ impl AppShell {
         if let Some(key) = context_error { self.status_bar.set_hint_key(&key); }
         if context_dialog.is_some() { self.pending_context_dialog = context_dialog; }
         self.app_canvas.input.bind_context(Some(id.0));
-        let blocked = self.modal_blocking || crate::dialog_chrome::modal_open(ui.ctx());
         self.app_canvas.blend_preview = (self.blend_options_owner == Some(id))
             .then(|| self.blend_options.preview(&context.session)).flatten();
         self.app_canvas.tone_preview = self.tone_blend.as_ref().and_then(|dialog| dialog.preview(id, &context.session));
         self.app_canvas.layer_opacity_preview = self.panel_registry.layers.opacity_preview(ui.ctx(), &context.session);
-        let symbol_drag = egui::DragAndDrop::has_payload_of_type::<crate::panels::symbols::SymbolDrag>(ui.ctx());
+        self.app_canvas.stroke_width_preview = self.panel_registry.stroke.width_preview(ui.ctx(), &context.session);
+        let symbol_drag = crate::panels::symbols::dragging(ui.ctx());
         let canvas_input = input && !placing && !blocked && !guide_drag && !symbol_drag;
         let compound = self.compound_canvas.update(ui, &response, &context.session, id, canvas_input);
         let original = compound.draft.as_ref().and_then(|draft| {
@@ -4074,7 +4302,28 @@ impl AppShell {
             self.app_canvas.invalidate();
             Some(std::mem::replace(object, draft.clone()))
         });
-        self.app_canvas.frame(ui, &response, &mut context.session, input && !placing && !blocked && !symbol_drag && !compound.active);
+        let move_dialog = self.move_duplicate.as_mut().filter(|dialog| dialog.owner == id);
+        let preview_drawn = if let Some(dialog) = move_dialog {
+            if !self.modal_blocking && !guide_drag && !symbol_drag {
+                dialog.update_origin(ui, &response, &context.session);
+            }
+            dialog.paint_preview(ui, rect, &context.session)
+        } else {
+            false
+        };
+        if !preview_drawn {
+            self.app_canvas.frame(ui, &response, &mut context.session,
+                input && !placing && !blocked && !symbol_drag && !compound.active);
+        }
+        if let Some(marquee) = zoom_marquee {
+            let painter = ui.painter_at(rect);
+            let accent = dtool_design::color("accent");
+            painter.rect_filled(marquee, 0.0, accent.gamma_multiply(0.15));
+            painter.rect_stroke(marquee, 0.0, egui::Stroke::new(1.0, accent), egui::StrokeKind::Inside);
+        }
+        if let Some(dialog) = self.move_duplicate.as_ref().filter(|dialog| dialog.owner == id) {
+            dialog.paint_origin(ui, rect, &context.session);
+        }
         if let Some(original) = original {
             if let Some(object) = context.session.document.find_object_mut(original.id.0) { *object = original; }
             self.app_canvas.invalidate();
@@ -4110,7 +4359,9 @@ impl AppShell {
         }
         if !guide_drag { self.place_tool.canvas(ui, &response, id, &mut context.session, input); }
         if canvas_input {
-            crate::canvas_input::paint_tool_cursor_badge(ui, &response, &context.session.active_tool, &mut self.icon_cache);
+            crate::canvas_input::paint_canvas_cursor(ui, &response, Some(&context.session.active_tool), &mut self.icon_cache);
+        } else if !blocked {
+            crate::canvas_input::paint_canvas_cursor(ui, &response, None, &mut self.icon_cache);
         }
         if let Some(key) = &self.place_tool.error_key { self.status_bar.set_hint_key(key); }
     }
@@ -4313,6 +4564,7 @@ fn paint_studio_drop_guides(
 
 impl AppShell {
     pub fn show_dock(&mut self, ui: &mut egui::Ui) {
+        crate::panels::symbols::clear_native_drag_frame(ui.ctx());
         if self.ui_hidden() {
             ui.data_mut(|data| data.remove::<crate::panels::DockTabDrag>(crate::panels::DockTabDrag::memory_key()));
             if self.persist_layout().is_err() { self.status_bar.set_hint_key("error.io.other"); }
@@ -4369,6 +4621,9 @@ impl AppShell {
         }
         self.finish_dock_tab_drag(ui.ctx(), &drop_groups, canvas, native_drop);
         let floating_drag = crate::panels::show_floating_with_slices(ui.ctx(), &mut self.layout, &mut self.panel_registry, crate::panels::SessionPanels { slices: &mut self.slices_panel, history: &mut self.history_panel, snapshots: &mut self.snapshots_panel }, &mut self.workspace);
+        if std::mem::take(&mut self.panel_registry.navigator.navigation_changed) {
+            self.app_canvas.preview_zoom(ui);
+        }
         if let Some((panel, pointer, released)) = floating_drag {
             if !released {
                 paint_studio_drop_guides(ui.ctx(), &drop_groups, canvas, pointer);

@@ -404,7 +404,7 @@ impl Gesture {
             .outline
             .filter(|(point, ..)| rect.contains(*point) && ui.rect_contains_pointer(rect))
         {
-            for (width, colour) in [(2.0, Color32::from_black_alpha(180)), (1.0, Color32::WHITE)] {
+            for (width, colour) in [(3.2, super::CURSOR_EDGE), (2.2, super::CURSOR_FACE)] {
                 let stroke = egui::Stroke::new(width, colour);
                 if kind != TipKind::Round {
                     let rot = egui::emath::Rot2::from_angle(

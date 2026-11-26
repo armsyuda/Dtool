@@ -182,23 +182,60 @@ pub struct GradientStop {
     pub colour: Colour,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GradientSpread {
+    #[default]
+    Pad,
+    Repeat,
+    Reflect,
+}
+
+impl GradientSpread {
+    pub fn is_pad(&self) -> bool {
+        *self == Self::Pad
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self { Self::Pad => "pad", Self::Repeat => "repeat", Self::Reflect => "reflect" }
+    }
+
+    pub fn map(self, position: f64) -> f32 {
+        (match self {
+            Self::Pad => position,
+            Self::Repeat => position.rem_euclid(1.0),
+            Self::Reflect => 1.0 - (1.0 - position.rem_euclid(2.0)).abs(),
+        }) as f32
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct GradientGeom {
     pub start: [f64; 2],
     pub end: [f64; 2],
     pub ratio: f64,
+    #[serde(default, skip_serializing_if = "GradientSpread::is_pad")]
+    pub spread: GradientSpread,
+    /// Focal point in units of the two ellipse radii, measured from its center.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub focus: Option<[f64; 2]>,
+    /// Radius of the start circle, relative to the end circle.
+    #[serde(default, skip_serializing_if = "is_zero_radius")]
+    pub focus_radius: f64,
 }
+
+fn is_zero_radius(radius: &f64) -> bool { *radius == 0.0 }
 
 impl Default for GradientGeom {
     fn default() -> Self {
-        Self { start: [0.0, 0.0], end: [1.0, 0.0], ratio: 1.0 }
+        Self { start: [0.0, 0.0], end: [1.0, 0.0], ratio: 1.0, spread: GradientSpread::Pad, focus: None, focus_radius: 0.0 }
     }
 }
 
 impl GradientGeom {
     pub fn from_legacy_angle(angle: f64, bounds: [f64; 4]) -> Self {
         let (start, end) = crate::geometry::gradient_line_from_legacy_angle(angle, bounds);
-        Self { start, end, ratio: 1.0 }
+        Self { start, end, ..Self::default() }
     }
 
     pub fn from_legacy_matrix(matrix: [f64; 6]) -> Self {
@@ -207,7 +244,7 @@ impl GradientGeom {
         let main = (matrix[0] * matrix[0] + matrix[1] * matrix[1]).sqrt();
         let side = (matrix[2] * matrix[2] + matrix[3] * matrix[3]).sqrt();
         let ratio = if main.abs() > 1e-14 { side / main } else { 1.0 };
-        Self { start, end, ratio: if ratio.is_finite() { ratio } else { 1.0 } }
+        Self { start, end, ratio: if ratio.is_finite() { ratio } else { 1.0 }, ..Self::default() }
     }
 
     pub fn to_matrix(&self) -> [f64; 6] {
@@ -232,7 +269,7 @@ impl GradientGeom {
         Self {
             start: apply(matrix, self.start),
             end: apply(matrix, self.end),
-            ratio: self.ratio,
+            ..*self
         }
     }
 }
@@ -251,7 +288,7 @@ struct GradientGeometryWire {
 impl GradientGeometryWire {
     fn resolve(self)->GradientGeom {
         if let Some(geom)=self.geom {return geom;}
-        let mut geom=if let (Some(start),Some(end))=(self.start,self.end) {GradientGeom{start,end,ratio:1.0}}
+        let mut geom=if let (Some(start),Some(end))=(self.start,self.end) {GradientGeom{start,end,..GradientGeom::default()}}
         else if let Some(matrix)=self.matrix {GradientGeom::from_legacy_matrix(matrix)}
         else if let Some(angle)=self.angle {GradientGeom::from_legacy_angle(angle,self.bounds.unwrap_or([0.0,0.0,1.0,1.0]))}
         else {GradientGeom::default()};
@@ -264,13 +301,14 @@ pub enum Transparency {
     #[default]
     None,
     Gradient { kind: GradientKind, stops: Vec<GradientStop>, geom: GradientGeom },
+    InverseBitmap(BitmapPaint),
 }
 
 
 impl Transparency {
     pub fn alpha_at(&self, local: [f64; 2]) -> f32 {
         match self {
-            Self::None => 1.0,
+            Self::None | Self::InverseBitmap(_) => 1.0,
             Self::Gradient { kind, stops, geom } => {
                 let t = gradient_parameter(*kind, local[0], local[1], geom);
                 f32::from(interpolate_stops(stops, t).a) / 255.0
@@ -284,15 +322,35 @@ pub fn gradient_parameter(kind: GradientKind, x: f64, y: f64, geom: &GradientGeo
     let len=dx.hypot(dy);let px=x-geom.start[0];let py=y-geom.start[1];
     if !len.is_finite() || len<=1e-14 || !px.is_finite() || !py.is_finite() {return 0.0;}
     let ux=dx/len;let uy=dy/len;
-    match kind {
-        GradientKind::Linear=>((px*ux+py*uy)/len) as f32,
-        GradientKind::Radial=>(px.hypot(py)/len) as f32,
-        GradientKind::Elliptical=>{
-            let ratio=if geom.ratio.is_finite() && geom.ratio.abs()>1e-14 {geom.ratio} else {1.0};
-            let u=(px*ux+py*uy)/len;let v=(px*(-uy)+py*ux)/len/ratio;u.hypot(v) as f32
+    let position = match kind {
+        GradientKind::Linear => (px * ux + py * uy) / len,
+        GradientKind::Radial | GradientKind::Elliptical => {
+            let ratio = if kind == GradientKind::Elliptical && geom.ratio.is_finite() && geom.ratio.abs() > 1e-14 {
+                geom.ratio
+            } else { 1.0 };
+            let u = (px * ux + py * uy) / len;
+            let v = (-px * uy + py * ux) / (len * ratio);
+            let [fx, fy] = geom.focus.unwrap_or([0.0; 2]);
+            let inner = geom.focus_radius;
+            let growth = 1.0 - inner;
+            if fx == 0.0 && fy == 0.0 && growth > 0.0 {
+                (u.hypot(v) - inner) / growth
+            } else {
+                // Intersect the sample with the expanding circle at stop position t.
+                let qx = u - fx;
+                let qy = v - fy;
+                let a = growth * growth - fx * fx - fy * fy;
+                let b = inner * growth - qx * fx - qy * fy;
+                let c = inner * inner - qx * qx - qy * qy;
+                if a > 0.0 {
+                    let root = (b * b - a * c).max(0.0).sqrt();
+                    if b > 0.0 { -c / (b + root) } else { (root - b) / a }
+                } else { u.hypot(v) }
+            }
         },
-        GradientKind::Conical=>((py.atan2(px)-dy.atan2(dx))/std::f64::consts::TAU).rem_euclid(1.0) as f32,
-    }
+        GradientKind::Conical => return ((py.atan2(px) - dy.atan2(dx)) / std::f64::consts::TAU).rem_euclid(1.0) as f32,
+    };
+    geom.spread.map(position)
 }
 
 pub fn interpolate_stops(stops: &[GradientStop], t: f32) -> Colour {
@@ -343,11 +401,13 @@ enum TransparencyWire {
     None,
     #[serde(alias="gradient")]
     Gradient {kind:GradientKind,stops:Vec<GradientStop>,#[serde(flatten)] geometry:GradientGeometryWire},
+    InverseBitmap(BitmapPaint),
 }
 impl<'de> Deserialize<'de> for Transparency {
     fn deserialize<D:serde::Deserializer<'de>>(deserializer:D)->Result<Self,D::Error> {
         Ok(match TransparencyWire::deserialize(deserializer)? {
             TransparencyWire::None=>Self::None,
+            TransparencyWire::InverseBitmap(bitmap)=>Self::InverseBitmap(bitmap),
             TransparencyWire::Gradient{kind,stops,geometry}=>Self::Gradient{kind,stops,geom:geometry.resolve()},
         })
     }
@@ -777,6 +837,22 @@ pub enum Cap {
     Butt,
     Round,
     Square,
+    RoundInset,
+}
+
+impl Cap {
+    pub fn extends(self) -> bool { matches!(self, Self::Round | Self::Square) }
+
+    pub fn is_round(self) -> bool { matches!(self, Self::Round | Self::RoundInset) }
+
+    pub fn from_options(extends: bool, round: bool) -> Self {
+        match (extends, round) {
+            (false, false) => Self::Butt,
+            (true, false) => Self::Square,
+            (false, true) => Self::RoundInset,
+            (true, true) => Self::Round,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -810,6 +886,8 @@ pub struct StrokeStyle {
     pub paint: Paint,
     pub width: f32,
     pub dash: Vec<f32>,
+    #[serde(default)]
+    pub dash_offset: f32,
     pub cap: Cap,
     pub join: Join,
     pub align: StrokeAlign,
@@ -825,6 +903,7 @@ impl Default for StrokeStyle {
             paint: Paint::None,
             width: 0.0,
             dash: Vec::new(),
+            dash_offset: 0.0,
             cap: Cap::Butt,
             join: Join::Miter { limit: 10.0 },
             align: StrokeAlign::Centre,
@@ -882,7 +961,7 @@ pub fn validate_paint(paint: &Paint) -> bool {
 }
 
 pub fn validate_stroke(style: &StrokeStyle) -> bool {
-    validate_paint(&style.paint) && style.width.is_finite() && style.width >= 0.0 && style.dash.iter().all(|d| d.is_finite() && *d >= 0.0)
+    validate_paint(&style.paint) && style.width.is_finite() && style.width >= 0.0 && style.dash_offset.is_finite() && style.dash.iter().all(|d| d.is_finite() && *d >= 0.0)
 }
 
 impl TableCell {
@@ -1455,18 +1534,40 @@ fn visit_text_value(collector: &mut ResourceCollector, value: &serde_json::Value
     }
 }
 
+pub(crate) fn visit_vector_resources(collector: &mut ResourceCollector, object: &crate::Object) {
+    for fill in std::iter::once(&object.fill).chain(&object.additional_fills) {
+        collector.visit_paint(fill);
+    }
+    for stroke in std::iter::once(&object.stroke).chain(&object.additional_strokes) {
+        collector.visit_stroke(stroke);
+    }
+    if let Transparency::InverseBitmap(bitmap) = &object.transparency {
+        collector.resources.push(PaintResourceRef { kind: PaintResourceKind::Bitmap, id: bitmap.resource_id.clone() });
+    }
+    if let Some(texture) = &object.path_brush {
+        collector.resources.push(PaintResourceRef { kind: PaintResourceKind::Bitmap, id: texture.resource_id.clone() });
+    }
+    if let crate::object::ObjectKind::Compound(compound) = &object.kind {
+        for operand in &compound.operands {
+            visit_vector_resources(collector, operand);
+        }
+    }
+}
+
+pub(crate) fn visit_object_resources(collector: &mut ResourceCollector, object: &crate::Object) {
+    visit_vector_resources(collector, object);
+    if let crate::object::ObjectKind::Table(table) = &object.kind {
+        visit_frame_format(collector, &table.frame_local);
+        for cell in &table.cells {
+            visit_cell_format(collector, &cell.local);
+        }
+    }
+}
+
 pub fn collect_document_resources(doc: &crate::document::Document) -> Vec<PaintResourceRef> {
     let mut collector = ResourceCollector::new();
-
-    for obj in &doc.objects {
-        collector.visit_paint(&obj.fill);
-        collector.visit_stroke(&obj.stroke);
-        if let crate::object::ObjectKind::Table(table) = &obj.kind {
-            visit_frame_format(&mut collector, &table.frame_local);
-            for cell in &table.cells {
-                visit_cell_format(&mut collector, &cell.local);
-            }
-        }
+    for object in &doc.objects {
+        visit_object_resources(&mut collector, object);
     }
     for format in &doc.table_formats {
         visit_frame_format(&mut collector, &format.frame);
@@ -1517,6 +1618,14 @@ pub fn transform_paint_matrix(paint: &mut Paint, transform: [f64; 6]) {
 
 pub fn transform_stroke_style_matrix(style: &mut StrokeStyle, transform: [f64; 6]) {
     transform_paint_matrix(&mut style.paint, transform);
+}
+
+pub(crate) fn transform_transparency_matrix(transparency: &mut Transparency, transform: [f64; 6]) {
+    match transparency {
+        Transparency::None => {}
+        Transparency::Gradient { geom, .. } => *geom = geom.transform(transform),
+        Transparency::InverseBitmap(bitmap) => bitmap.matrix = multiply_matrices(transform, bitmap.matrix),
+    }
 }
 
 fn multiply_matrices(a: [f64; 6], b: [f64; 6]) -> [f64; 6] {
@@ -1699,10 +1808,10 @@ mod gradient_wire_contracts {
     fn explicit_geometry_wins_and_legacy_ratio_is_shared() {
         let value=json!({"type":"gradient","geom":{"start":[3,4],"end":[9,12],"ratio":0.25},"angle":90,"bounds":[0,0,100,50],"ratio":2});
         let Paint::Gradient{geom,..}=serde_json::from_value::<Paint>(value).unwrap() else {panic!("not gradient");};
-        assert_eq!(geom,GradientGeom{start:[3.0,4.0],end:[9.0,12.0],ratio:0.25});
+        assert_eq!(geom,GradientGeom{start:[3.0,4.0],end:[9.0,12.0],ratio:0.25, ..GradientGeom::default() });
         let value=json!({"Gradient":{"kind":"elliptical","stops":[],"angle":0,"bounds":[0,0,100,50],"ratio":0.5}});
         let Transparency::Gradient{geom,..}=serde_json::from_value::<Transparency>(value).unwrap() else {panic!("not gradient");};
-        assert_eq!(geom,GradientGeom{start:[0.0,25.0],end:[100.0,25.0],ratio:0.5});
+        assert_eq!(geom,GradientGeom{start:[0.0,25.0],end:[100.0,25.0],ratio:0.5, ..GradientGeom::default() });
     }
     #[test]
     fn managed_stop_values_survive_geometry_promotion() {

@@ -50,7 +50,7 @@ fn resolve_picks_mapped_command_by_table_priority() {
     assert_eq!(r("G", m(true, false, false)), Some(ShortcutTarget::Run { command: "node.group", params: "{}" }));
     assert_eq!(r("O", m(true, false, false)), Some(ShortcutTarget::Shell(ShellAction::OpenDocument)));
     assert_eq!(r("OemPlus", m(true, false, false)), Some(ShortcutTarget::Shell(ShellAction::ZoomIn)));
-    assert_eq!(r("X", m(false, false, false)), Some(ShortcutTarget::NotImplemented));
+    assert_eq!(r("X", m(false, false, false)), Some(ShortcutTarget::Run { command: "edit.delete", params: "{}" }));
     assert_eq!(r("Q", m(false, false, true)), None);
 }
 

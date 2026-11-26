@@ -6,6 +6,7 @@ use dtool_protocol::{Command, CommandError, CommandResult};
 use serde_json::{json, Value};
 
 mod shape_recipe;
+pub mod gradient;
 
 fn ours(command: &Command) -> bool {
     matches!(command.name.as_str(), QUERY | OPTION_SET | OPTIONS_SET)
@@ -31,6 +32,12 @@ fn check_option(session: &Session, command: &Command) -> Result<(), CommandError
         return Ok(());
     }
     let value = command.params.get("value").ok_or_else(CommandError::invalid_params)?;
+    if id == gradient::TYPE && value == "bitmap"
+        && (gradient::Target::selected_bitmap_target(session, tool).is_none()
+            || command.params["params"]["path"].as_str().is_none_or(|path| path.trim().is_empty()))
+    {
+        return Err(CommandError::invalid_params());
+    }
     spec.normalize(value).map(|_| ()).ok_or_else(CommandError::invalid_params)
 }
 
@@ -107,6 +114,23 @@ fn set_option(session: &mut Session, command: &Command, record: bool) -> Command
             }
         }
     }
+    if spec.id == gradient::TYPE && value == "bitmap" {
+        let path = command.params["params"]["path"].as_str().ok_or_else(CommandError::invalid_params)?;
+        return gradient::apply_bitmap(session, tool, std::path::Path::new(path), record);
+    }
+    if spec.id == gradient::TYPE
+        && let Some(kind) = value.as_str().and_then(gradient::parse_kind)
+        && let Some((object, target)) = gradient::Target::selected(session, tool)
+    {
+        let change = match target.gradient(object) {
+            Some((current, stops, geom)) if kind != current => Some(target.command(object, kind, stops.to_vec(), *geom)),
+            _ if matches!(target.paint(object), Some(Paint::Bitmap(_))) => Some(target.from_bitmap(object, kind)),
+            _ => None,
+        };
+        if let Some(change) = change {
+            if record { session.run(&change)?; } else { session.apply_command(&change)?; }
+        }
+    }
     let (spec, value) = session.tool_options.set(tool, spec.id, &value).ok_or_else(CommandError::invalid_params)?;
     if spec.id == "gradient.target" {
         session.appearance_focus = None;
@@ -130,7 +154,7 @@ fn set_bulk(session: &mut Session, command: &Command, record: bool) -> CommandRe
             }
             continue;
         }
-        if let Some(spec) = find_option(tool, key).filter(|spec| is_stroke_width(spec.id) || spec.id == SHAPE_CORNER_RADIUS) {
+        if let Some(spec) = find_option(tool, key).filter(|spec| is_stroke_width(spec.id) || matches!(spec.id, SHAPE_CORNER_RADIUS | gradient::TYPE)) {
             let command = Command::with_params(OPTION_SET, json!({ "tool": tool, "id": spec.id, "value": value }));
             match set_option(session, &command, record) {
                 Ok(result) => { applied.insert(spec.id.to_string(), result["value"].clone()); }
@@ -210,6 +234,22 @@ pub fn query_with_state(session: &Session, tool: &str) -> Value {
                     Some(ARTBOARD_HEIGHT) => option["value"] = json!(settings.size[1]),
                     Some(ARTBOARD_SPACING) => option["value"] = json!(settings.spacing),
                     _ => {}
+                }
+            } else if option["id"] == gradient::TYPE {
+                if option["value"] == "bitmap" {
+                    option["value"] = json!("linear");
+                }
+                if gradient::Target::selected_bitmap_target(session, tool).is_none()
+                    && let Some(values) = option["values"].as_array_mut()
+                {
+                    values.retain(|value| value != "bitmap");
+                }
+                if let Some((object, target)) = gradient::Target::selected(session, tool) {
+                    if let Some((kind, _, _)) = target.gradient(object) {
+                        option["value"] = json!(gradient::kind_value(kind));
+                    } else if matches!(target.paint(object), Some(Paint::Bitmap(_))) {
+                        option["value"] = json!("bitmap");
+                    }
                 }
             } else if option["id"] == "zoom.level" {
                 option["value"] = json!(zoom_percentage(session));

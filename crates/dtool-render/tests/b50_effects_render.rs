@@ -26,7 +26,7 @@ fn gradient(kind: GradientKind, start: [f64; 2], end: [f64; 2], ratio: f64) -> P
     Paint::Gradient {
         kind,
         stops: vec![GradientStop { offset: 0.0, colour: Colour::new(0, 0, 0, 255) }, GradientStop { offset: 1.0, colour: Colour::new(255, 255, 255, 255) }],
-        geom: GradientGeom { start, end, ratio },
+        geom: GradientGeom { start, end, ratio, ..GradientGeom::default() },
     }
 }
 

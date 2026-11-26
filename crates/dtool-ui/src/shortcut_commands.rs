@@ -39,6 +39,7 @@ pub const PERSONA_TABLE: &[(&str, ShortcutTarget)] = &[
     ("RedoCommand", run("edit.redo")),
     ("CopyCommand", run("edit.copy")),
     ("CutCommand", run("edit.cut")),
+    ("DeleteObjectsCommand", run("edit.delete")),
     ("PasteCommand", run("edit.paste")),
     ("PasteFXCommand", run("edit.paste_fx")),
     ("PasteStyleCommand", run("edit.paste_style")),
@@ -266,6 +267,52 @@ impl AppShell {
             ShortcutTarget::Run { command: dtool_core::commands::quickmask::TOGGLE, .. }
                 if self.menu_persona != "pixel" && !self.workspace.session()?.quick_mask.active => return None,
             ShortcutTarget::Run { command: "selection.all", .. } => self.select_all(),
+            ShortcutTarget::Run { command: "edit.delete", .. } => {
+                let session = self.workspace.session()?;
+                if session.text_edit.is_some() || session.active_tool == "tool.stroke_width" {
+                    return None;
+                }
+                let nodes = &mut self.app_canvas.input.nodes;
+                let node_tool = crate::canvas_input::tool_kind(&session.active_tool) == crate::canvas_input::ToolKind::Node;
+                if node_tool { nodes.sync(session); }
+                if node_tool && nodes.claims_delete() {
+                    if nodes.grab.is_some() { return Some(target); }
+                    for command in nodes.delete_commands(session) {
+                        if let Err(error) = self.run_and_reconcile(command) {
+                            self.status_bar.set_hint_key(&error.message_key);
+                            break;
+                        }
+                    }
+                } else {
+                    self.delete_selection();
+                }
+            }
+            ShortcutTarget::Run { command, .. }
+                if command.starts_with("layer.arrange.align.")
+                    && self.workspace.session().is_some_and(|session| {
+                        crate::canvas_input::tool_kind(&session.active_tool) == crate::canvas_input::ToolKind::Node
+                    }) =>
+            {
+                let session = self.workspace.session()?;
+                if session.text_edit.is_some() { return None; }
+                let nodes = &mut self.app_canvas.input.nodes;
+                nodes.sync(session);
+                let (axis, fraction) = match command {
+                    "layer.arrange.align.left" => (0, 0.0),
+                    "layer.arrange.align.centre" => (0, 0.5),
+                    "layer.arrange.align.right" => (0, 1.0),
+                    "layer.arrange.align.top" => (1, 0.0),
+                    "layer.arrange.align.middle" => (1, 0.5),
+                    "layer.arrange.align.bottom" => (1, 1.0),
+                    _ => return None,
+                };
+                if nodes.grab.is_none() && nodes.selected_count() >= 2
+                    && let Some(edit) = nodes.align_command(session, axis, fraction)
+                    && let Err(error) = self.run_and_reconcile(edit)
+                {
+                    self.status_bar.set_hint_key(&error.message_key);
+                }
+            }
             ShortcutTarget::Run { command: command @ ("edit.undo" | "edit.redo"), .. } => {
                 if self.workspace.session()?.text_edit.is_some() { return None; }
                 self.run_history_shortcut(command);
@@ -363,6 +410,14 @@ impl AppShell {
             return;
         }
         for (key, egui_modifiers) in pressed_keys(ctx) {
+            if key == egui::Key::Enter && egui_modifiers == egui::Modifiers::NONE && !canvas_text
+                && self.workspace.session().is_some_and(|session| {
+                    crate::canvas_input::tool_kind(&session.active_tool) == crate::canvas_input::ToolKind::Move
+                }) && self.open_move_duplicate(ctx)
+            {
+                ctx.input_mut(|input| input.consume_key(egui_modifiers, key));
+                continue;
+            }
             let Some(name) = key_name(key) else { continue };
             let modifiers = modifiers_from(egui_modifiers);
             if canvas_text {

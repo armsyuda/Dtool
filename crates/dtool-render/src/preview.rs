@@ -89,7 +89,7 @@ fn render_preview(document: &Document, view: &ViewState, request: &PreviewReques
         }));
     }
     let items = raster::effect_items(document, &view.canvas_flags, raster::scene_items(&scene), &[]);
-    let has_effects = items.iter().any(|item| matches!(item, Item::Layer(_)));
+    let has_effects = items.iter().any(|item| matches!(item, Item::Layer(_) | Item::GroupBlur { .. }));
     if has_effects && let Some(id) = request.id
         && let Some([x, y, w, h]) = raster::effect_bounds(document, &[], id, &scene.prims)
     {
@@ -140,6 +140,7 @@ fn render_effects(
     let density = f64::from(size[0]) / f64::from(rw);
     let work = items.iter().filter_map(|item| match item {
         Item::Layer(layer) => Some(f64::from(layer.raster_padding()) * density),
+        Item::GroupBlur { blur, .. } => Some(f64::from(dtool_core::layer_style::raster::blur_padding(blur.radii, blur.angle)) * density),
         _ => None,
     }).map(|padding| {
         let pad = 2.0 * (padding.ceil() + 1.0);
@@ -202,10 +203,7 @@ mod tests {
             ..Object::default()
         });
         document.pixel_layers.insert(id, PixelLayer::from_rgba(8, 8, &pixels));
-        document.layer_masks.push(LayerMask {
-            object: id,
-            coverage: PixelSelection::all(8, 8),
-        });
+        document.layer_masks.push(LayerMask::new(id, PixelSelection::all(8, 8)));
         let story = StoryId(1);
         document.stories.push(Story { id: story, text: "Hi".into(), ranges: Vec::new(), specials: Vec::new(), paras: Vec::new() });
         document.create_object(Object {

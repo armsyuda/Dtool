@@ -150,8 +150,8 @@ fn ruler_units_menu(ui: &mut Ui, session: &mut Session) {
             (Some("Pt"), "ruler.unit.pt"),
         ] {
             let label = text(label);
-            let response = ui.radio(current == serde_json::json!(value), label);
-            if crate::menu_tree::command_menu_tooltip(ui, response, label, true, None).clicked() {
+            let response = crate::menu_tree::menu_choice(ui, label, current == serde_json::json!(value));
+            if crate::menu_tree::command_menu_tooltip(ui, response, label, false, None).clicked() {
                 let _ = run_ruler(session, RULER_UNIT_SET, serde_json::json!({ "units": value }));
                 ui.close();
             }
@@ -559,6 +559,7 @@ impl Rulers {
         }
         if session.guides.show && ui.input(|i| i.pointer.button_double_clicked(egui::PointerButton::Primary))
             && !egui::Popup::is_any_open(ui.ctx())
+            && !canvas_gesture_active(ui.ctx())
             && let Some(id) = pointer.filter(|pos| canvas.contains(*pos) && ui.ctx().layer_id_at(*pos) == Some(ui.layer_id()))
                 .and_then(|pos| self.guide_at(ui, session, view, canvas, pos))
             && let Some(guide) = session.guides.get(id)

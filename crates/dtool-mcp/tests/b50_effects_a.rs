@@ -64,7 +64,7 @@ fn green() -> Colour {
 
 #[test]
 fn mcp_outer_shadow_offset_and_angle_are_stored_and_rendered() {
-    let (s, a, _, listed) = round_trip("OuterShadow", EffectParams::Shadow { radius: 0.0, offset: 10.0, angle: 180.0, intensity: 0.0, colour: blue(), knock_out: true });
+    let (s, a, _, listed) = round_trip("OuterShadow", EffectParams::Shadow { radius_y: None, blur_angle: None, radius: 0.0, offset: 10.0, angle: 180.0, intensity: 0.0, colour: blue(), knock_out: true });
     let text = listed.to_string();
     assert!(text.contains("\"offset\":10.0") && text.contains("\"angle\":180.0"), "{text}");
     assert_eq!(px(&s, a, 55.0, 30.0), [0, 0, 255, 255]);
@@ -73,7 +73,7 @@ fn mcp_outer_shadow_offset_and_angle_are_stored_and_rendered() {
 
 #[test]
 fn mcp_inner_shadow_renders_inside_the_edge_only() {
-    let (s, a, _, _) = round_trip("InnerShadow", EffectParams::Shadow { radius: 0.0, offset: 6.0, angle: 0.0, intensity: 0.0, colour: blue(), knock_out: false });
+    let (s, a, _, _) = round_trip("InnerShadow", EffectParams::Shadow { radius_y: None, blur_angle: None, radius: 0.0, offset: 6.0, angle: 0.0, intensity: 0.0, colour: blue(), knock_out: false });
     assert_eq!(px(&s, a, 48.0, 30.0), [0, 0, 255, 255]);
     assert_eq!(px(&s, a, 52.0, 30.0)[3], 0);
 }

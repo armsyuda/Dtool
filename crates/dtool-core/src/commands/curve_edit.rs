@@ -57,10 +57,15 @@ pub fn parse_point(value: &Value, index: usize) -> Result<PathPoint, CommandErro
 
 pub fn parse_contour(points: &Value, closed: bool) -> Result<Contour, CommandError> {
     let items = points.as_array().ok_or_else(CommandError::invalid_params)?;
-    if items.len() < if closed { 3 } else { 2 } {
+    if items.len() < 2 {
         return Err(CommandError::invalid_params());
     }
     let points = items.iter().enumerate().map(|(i, v)| parse_point(v, i)).collect::<Result<Vec<_>, _>>()?;
+    if closed && points.len() == 2
+        && points.iter().all(|point| point.handle_in.is_none() && point.handle_out.is_none())
+    {
+        return Err(CommandError::invalid_params());
+    }
     for (i, point) in points.iter().enumerate() {
         if points[..i].iter().any(|other| other.id == point.id) {
             return Err(CommandError::invalid_params());

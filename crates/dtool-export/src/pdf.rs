@@ -257,6 +257,7 @@ struct PdfShape {
     path: krilla::geom::Path,
     fill_path: Option<krilla::geom::Path>,
     outline: kurbo::BezPath,
+    tolerance: f64,
 }
 
 struct PdfText {
@@ -268,7 +269,7 @@ struct PdfText {
 }
 
 trait PdfObjectExt {
-    fn to_shape(&self, doc: &Document) -> Option<PdfShape>;
+    fn to_shape(&self, doc: &Document, tolerance: f64) -> Option<PdfShape>;
     fn to_text(&self, doc: &Document, output: &OutputColour) -> Option<PdfText>;
 }
 
@@ -278,11 +279,11 @@ fn pdf_opacity(colour: dtool_core::paint::Colour, opacity: f32) -> NormalizedF32
 }
 
 impl PdfObjectExt for dtool_core::Object {
-    fn to_shape(&self, doc: &Document) -> Option<PdfShape> {
-        let path = crate::vector_world_path(self)?;
-        let path = dtool_core::commands::warp::live_warp_outline(doc, self.id, &path).unwrap_or(path);
+    fn to_shape(&self, doc: &Document, tolerance: f64) -> Option<PdfShape> {
+        let path = dtool_core::outline::object_outline_world_with_tolerance(self, tolerance)?;
+        let path = dtool_core::commands::warp::live_warp_outline_with_tolerance(doc, self.id, &path, tolerance).unwrap_or(path);
         let (outline, fill_path) = crate::vector_curve_paths(path);
-        Some(PdfShape { path: pdf_bez_path(&outline)?, fill_path: pdf_bez_path(&fill_path), outline })
+        Some(PdfShape { path: pdf_bez_path(&outline)?, fill_path: pdf_bez_path(&fill_path), outline, tolerance })
     }
 
     fn to_text(&self, doc: &Document, output: &OutputColour) -> Option<PdfText> {
@@ -401,7 +402,7 @@ fn draw_layout_text(
             matrix: dtool_core::geometry::IDENTITY,
         }
     } else {
-        let Some(layout) = text_export_layout(&library, doc, object, opts.fonts == PdfFonts::TextAsCurves || fallback.is_none(), false) else {
+        let Some(layout) = text_export_layout(&library, doc, object, opts.fonts == PdfFonts::TextAsCurves || fallback.is_none()) else {
             return false;
         };
         layout
@@ -798,6 +799,7 @@ pub(crate) fn encode_pdf(
     let page_scoped = req.area.limits_objects_to_page();
 
     let scale = crate::raster::document_unit_points(doc) * opts.scale;
+    let vector_tolerance = crate::vector_export_tolerance(f64::from(scale));
     let effect_pixels_per_unit = opts.raster_dpi_override.unwrap_or_else(|| dtool_core::effect_raster::pdf_dpi(doc))
         * scale / 72.0;
     let mask_pixels_per_unit = opts.raster_dpi_override.unwrap_or(opts.raster_dpi as f32) * scale / 72.0;
@@ -917,6 +919,11 @@ pub(crate) fn encode_pdf(
                         continue;
                     }
                     PdfLayer::OpenGroup(group) => {
+                        let blur = if opts.rasterize == RasterizeMode::Nothing {
+                            None
+                        } else {
+                            crate::effect_image::pdf_group_blur(doc, group, page_effect_scene.as_ref(), effect_pixels_per_unit, scale)
+                        };
                         let board_clip = dtool_core::artboard::is_artboard(group)
                             .then(|| region_path(&[crate::artboard_ring(group)])).flatten();
                         if let Some(path) = &board_clip {
@@ -926,6 +933,7 @@ pub(crate) fn encode_pdf(
                             surface.push_blend_mode(effect_blend(group.blend_mode));
                         }
                         let isolate = group.blend_mode != BlendMode::PassThrough
+                            || blur.is_some()
                             || group.blend_ranges.as_ref().is_some_and(|ranges| ranges.is_valid());
                         if group.opacity < 1.0 {
                             surface.push_opacity(NormalizedF32::new(group.opacity.clamp(0.0, 1.0)).unwrap_or(NormalizedF32::ONE));
@@ -934,9 +942,13 @@ pub(crate) fn encode_pdf(
                         }
                         let (x, y, w, h) = region;
                         let pixel_mask = push_pixel_mask(&mut surface, doc, group);
-                        let transparency = push_object_transparency(&mut surface, group, [x, y, w, h], mask_pixels_per_unit, opts);
+                        let transparency = push_object_transparency(&mut surface, doc, group, [x, y, w, h], mask_pixels_per_unit);
                         let range = ranges.as_ref().and_then(|ranges| ranges.sample(group, range_area, range_scale))
                             .is_some_and(|mask| push_blend_range_mask(&mut surface, mask));
+                        let blur = blur.and_then(|blur| {
+                            let clip = blur.clip_to_bounds.then(|| crop_clip_path(blur.raster.bounds)).flatten();
+                            push_blend_range_mask(&mut surface, blur.source_mask).then_some((blur.raster, clip))
+                        });
                         let group_effects = crate::effect_image::group_effect_images(doc, group, page_effect_scene.as_ref(), effect_pixels_per_unit);
                         for (blend, raster) in group_effects.behind {
                             effects_rasterised |= draw_effect_image(&mut surface, raster, blend, image_transform)?;
@@ -949,14 +961,24 @@ pub(crate) fn encode_pdf(
                         effects_rasterised |= draw_effect_images(&mut surface, doc, bounds, &behind, effect_pixels_per_unit, image_transform)?;
                         let pushes = usize::from(board_clip.is_some()) + usize::from(pixel_mask) + usize::from(transparency) + usize::from(range)
                             + usize::from(group.opacity < 1.0 || isolate) + usize::from(!group.blend_mode.is_normal());
-                        group_stack.push((pushes, bounds, above, group_effects.above));
+                        group_stack.push((pushes, bounds, above, group_effects.above, blur));
                         continue;
                     }
                     PdfLayer::CloseGroup(_) => {
-                        if let Some((pushes, bounds, above, group_above)) = group_stack.pop() {
+                        if let Some((pushes, bounds, above, group_above, blur)) = group_stack.pop() {
                             effects_rasterised |= draw_effect_images(&mut surface, doc, bounds, &above, effect_pixels_per_unit, image_transform)?;
                             for (blend, raster) in group_above {
                                 effects_rasterised |= draw_effect_image(&mut surface, raster, blend, image_transform)?;
+                            }
+                            if let Some((raster, clip)) = blur {
+                                surface.pop();
+                                if let Some(clip) = &clip {
+                                    surface.push_clip_path(clip, &FillRule::NonZero);
+                                }
+                                effects_rasterised |= draw_effect_image(&mut surface, raster, BlendMode::Normal, image_transform)?;
+                                if clip.is_some() {
+                                    surface.pop();
+                                }
                             }
                             for _ in 0..pushes {
                                 surface.pop();
@@ -967,31 +989,47 @@ pub(crate) fn encode_pdf(
                     PdfLayer::Draw(obj, bounds) => (obj, bounds),
                 };
                 let bitmap_blur = bitmap_blurs.get(&obj.id);
+                let primitives = effect_sources.get(&obj.id);
+                let effect_bounds = primitives.and_then(|prims|
+                    dtool_core::layer_style::raster::effect_bounds(doc, &[], obj.id, prims));
                 if bounds.is_some_and(|bounds| !crate::vector_bounds_intersect(bounds, region))
-                    && !bitmap_blur.is_some_and(|([x, y, w, h], _)| {
-                        crate::vector_bounds_intersect([*x, *y, *x + *w, *y + *h], region)
+                    && !effect_bounds.or_else(|| bitmap_blur.map(|(bounds, _)| *bounds)).is_some_and(|[x, y, w, h]| {
+                        crate::vector_bounds_intersect([x, y, x + w, y + h], region)
                     })
                 {
                     continue;
                 }
                 // K08: clip children / vector masks clip by the true path (W* n); fully clipped objects are dropped.
-                let k08 = match dtool_core::clip_mask::clip_region(doc, obj.id) {
+                let k08 = match dtool_core::clip_mask::layer_clip_region(doc, obj.id) {
                     Some(rings) => match region_path(&rings) {
                         Some(path) => Some(path),
                         None => continue,
                     },
                     None => None,
                 };
-                let primitives = effect_sources.get(&obj.id);
-                let effect_bounds = primitives.and_then(|prims|
-                    dtool_core::layer_style::raster::effect_bounds(doc, &[], obj.id, prims));
+                if k08.is_none()
+                    && obj.blend_mode.is_normal()
+                    && matches!(obj.transparency, dtool_core::paint::Transparency::None)
+                    && obj.blend_ranges.is_none() && obj.tone_blend.is_none()
+                    && dtool_core::raster_source::compositing_mask(doc, obj).is_none()
+                    && opts.rasterize != RasterizeMode::Nothing
+                    && !matches!(opts.compat, PdfCompat::X1a2003 | PdfCompat::X3_2003)
+                    && let Some((source, _)) = crate::effect_image::solid_leaf_blur(obj, primitives.map(Vec::as_slice))
+                    && let Some(bounds) = effect_bounds
+                    && draw_solid_blur(&mut surface, doc, obj, source, bounds, effect_pixels_per_unit, &output)
+                {
+                    effects_rasterised = true;
+                    continue;
+                }
                 let (behind, above) = primitives.map_or_else(Default::default, |prims|
                     dtool_core::layer_style::raster::export_effect_layers(doc, obj.id, &prims.iter().collect::<Vec<_>>()));
-                let crop = crate::vector_crop_bounds(obj).and_then(crop_clip_path);
+                // Effects use the cropped source geometry and may extend beyond it.
+                let mut effect_drawn = draw_effect_images(&mut surface, doc, effect_bounds, &behind, effect_pixels_per_unit, image_transform)?;
+                let crop = dtool_core::scene::vector_crop_quad(obj)
+                    .and_then(|quad| region_path(&[quad.into_iter().map(|point| point.map(f64::from)).collect()]));
                 if let Some(path) = crop.as_ref() {
                     surface.push_clip_path(path, &FillRule::NonZero);
                 }
-                let mut effect_drawn = draw_effect_images(&mut surface, doc, effect_bounds, &behind, effect_pixels_per_unit, image_transform)?;
                 if let Some(path) = k08.as_ref() {
                     surface.push_clip_path(path, &FillRule::EvenOdd);
                 }
@@ -1009,11 +1047,11 @@ pub(crate) fn encode_pdf(
                     false
                 } else {
                     let [left, top, right, bottom] = crate::vector_object_bounds(doc, obj);
-                    push_object_transparency(&mut surface, obj, [left, top, right - left, bottom - top], mask_pixels_per_unit, opts)
+                    push_object_transparency(&mut surface, doc, obj, [left, top, right - left, bottom - top], mask_pixels_per_unit)
                 };
                 let warped_text = dtool_core::scene::has_live_text_warp(doc, obj.id).then(|| {
                     let lines = dtool_core::text_lines::text_lines(doc, obj.id);
-                    dtool_core::scene::warped_text_ink(doc, obj, &lines, obj.opacity)
+                    dtool_core::scene::warped_text_ink_with_tolerance(doc, obj, &lines, obj.opacity, vector_tolerance)
                 }).flatten();
                 let decorations = if warped_text.is_some() { Vec::new() } else { dtool_core::text_lines::text_decorations(doc, obj.id) };
                 let text_matrix = dtool_core::geometry::text_matrix(obj);
@@ -1042,7 +1080,9 @@ pub(crate) fn encode_pdf(
                     draw_raster_layer(&mut surface, doc, obj, &output, image_transform, opts.outline_strokes)?
                 };
                 let appearance = !image_drawn && dtool_core::commands::appearance::has_layers(obj);
-                if appearance && let Some(paths) = dtool_core::commands::appearance::vector_paths(doc, obj, &obj.fill, !opts.outline_strokes) {
+                if appearance && let Some(paths) = dtool_core::commands::appearance::vector_paths_with_tolerance(
+                    doc, obj, &obj.fill, !opts.outline_strokes, vector_tolerance,
+                ) {
                     let isolated = obj.opacity < 1.0 || paths.iter().any(|path| !path.blend.is_normal());
                     let opacity = if isolated { 1.0 } else { obj.opacity };
                     let group_opacity = isolated && obj.opacity < 1.0;
@@ -1069,6 +1109,7 @@ pub(crate) fn encode_pdf(
                             }
                         }
                     }
+                    let bounds = crate::vector_object_bounds(doc, obj);
                     for (index, path) in paths.into_iter().enumerate() {
                         use dtool_core::commands::appearance::RowBlend;
                         let RowBlend::Standard(mode) = path.blend else {
@@ -1079,12 +1120,16 @@ pub(crate) fn encode_pdf(
                             continue;
                         };
                         let Some(geometry) = pdf_bez_path(&path.path) else { continue; };
-                        if let Some(style) = path.stroke {
+                        if let Some(mut style) = path.stroke {
+                            if let std::borrow::Cow::Owned(paint) = crate::pdf_paint::bounded_gradient(&style.paint, bounds) {
+                                style.paint = paint;
+                            }
                             let Some(stroke) = crate::pdf_paint::stroke_for_output(&mut surface, &style, opacity, &output, doc) else { continue; };
                             surface.set_fill(None);
                             surface.set_stroke(Some(stroke));
                         } else {
-                            let Some(mut fill) = crate::pdf_paint::fill_for_output(&mut surface, &path.paint, opacity, &output, doc) else { continue; };
+                            let paint = crate::pdf_paint::bounded_gradient(&path.paint, bounds);
+                            let Some(mut fill) = crate::pdf_paint::fill_for_output(&mut surface, &paint, opacity, &output, doc) else { continue; };
                             fill.rule = if path.even_odd { FillRule::EvenOdd } else { FillRule::NonZero };
                             surface.set_stroke(None);
                             surface.set_fill(Some(fill));
@@ -1104,21 +1149,28 @@ pub(crate) fn encode_pdf(
                         surface.pop();
                     }
                 } else if let Some(shape) = (!image_drawn).then(|| {
-                    text_container.as_ref().unwrap_or(obj).to_shape(doc)
+                    text_container.as_ref().unwrap_or(obj).to_shape(doc, vector_tolerance)
                 }).flatten() {
                     use dtool_core::paint::PaintOrder;
                     let transform = pdf_paint_transform(obj).as_coeffs();
+                    let bounds = crate::vector_object_bounds(doc, obj);
                     let fill_paint = transform_pdf_paint(&obj.fill, transform);
-                    let stroke_style = transform_pdf_paint(&obj.stroke.paint, transform)
+                    let fill_paint = crate::pdf_paint::bounded_gradient(fill_paint.as_ref().unwrap_or(&obj.fill), bounds);
+                    let mut stroke_style = transform_pdf_paint(&obj.stroke.paint, transform)
                         .map(|paint| StrokeStyle { paint, ..obj.stroke.clone() });
-                    let fill = crate::pdf_paint::fill_for_output(&mut surface, fill_paint.as_ref().unwrap_or(&obj.fill), obj.opacity, &output, doc);
+                    if let std::borrow::Cow::Owned(paint) = crate::pdf_paint::bounded_gradient(
+                        &stroke_style.as_ref().unwrap_or(&obj.stroke).paint, bounds,
+                    ) {
+                        stroke_style = Some(StrokeStyle { paint, ..obj.stroke.clone() });
+                    }
+                    let fill = crate::pdf_paint::fill_for_output(&mut surface, &fill_paint, obj.opacity, &output, doc);
                     let stroke = crate::pdf_paint::stroke_for_output(&mut surface, stroke_style.as_ref().unwrap_or(&obj.stroke), obj.opacity, &output, doc);
                     let stroke_under = matches!(obj.paint_order, PaintOrder::StrokeUnder);
                     if let Some(stroke) = stroke.as_ref().filter(|_| stroke_under) {
                         draw_shape_stroke(&mut surface, doc, obj, &shape, stroke, opts.outline_strokes);
                     }
                     if let (Some(mut fill), Some(path)) = (fill, shape.fill_path.as_ref()) {
-                        fill.rule = FillRule::EvenOdd;
+                        fill.rule = if obj.fill_rule.is_even_odd() { FillRule::EvenOdd } else { FillRule::NonZero };
                         surface.set_stroke(None);
                         surface.set_fill(Some(fill));
                         surface.draw_path(path);
@@ -1177,10 +1229,10 @@ pub(crate) fn encode_pdf(
                 if k08.is_some() {
                     surface.pop();
                 }
-                effect_drawn |= draw_effect_images(&mut surface, doc, effect_bounds, &above, effect_pixels_per_unit, image_transform)?;
                 if crop.is_some() {
                     surface.pop();
                 }
+                effect_drawn |= draw_effect_images(&mut surface, doc, effect_bounds, &above, effect_pixels_per_unit, image_transform)?;
                 effects_rasterised |= effect_drawn;
             }
 
@@ -1213,8 +1265,58 @@ pub(crate) fn encode_pdf(
     if let Some(profile) = intent_profile {
         bytes_out = with_output_intent(bytes_out, &profile.name, &profile.bytes).ok_or_else(|| CommandError::new("error.export.write_failed"))?;
     }
+    if opts.uses_cmyk() {
+        bytes_out = fix_cmyk_calculator_ranges(bytes_out)
+            .map_err(|_| CommandError::new("error.export.write_failed"))?;
+    }
 
     Ok((bytes_out, warnings))
+}
+
+fn fix_cmyk_calculator_ranges(bytes: Vec<u8>) -> lopdf::Result<Vec<u8>> {
+    use lopdf::{Document, IncrementalDocument, Object};
+
+    let pdf = Document::load_mem(&bytes)?;
+    let mut updates = std::collections::BTreeSet::new();
+    for object in pdf.objects.values() {
+        let Ok(shading) = object.as_dict() else { continue };
+        if shading.get(b"ShadingType").and_then(Object::as_i64).ok() != Some(1) {
+            continue;
+        }
+        let Ok(space) = shading.get_deref(b"ColorSpace", &pdf) else { continue };
+        let cmyk = match space {
+            Object::Name(name) => name == b"DeviceCMYK",
+            Object::Array(parts) if parts.len() == 2 && parts[0].as_name().ok() == Some(b"ICCBased") => {
+                pdf.dereference(&parts[1]).and_then(|(_, profile)| profile.as_stream())
+                    .and_then(|profile| profile.dict.get(b"N")).and_then(Object::as_i64).ok() == Some(4)
+            }
+            _ => false,
+        };
+        if !cmyk {
+            continue;
+        }
+        let id = shading.get(b"Function")?.as_reference()?;
+        let function = pdf.get_object(id)?.as_stream()?;
+        // Krilla 0.8.2 emits four ink values but declares only three output ranges.
+        if function.dict.get(b"FunctionType")?.as_i64()? == 4
+            && function.dict.get(b"Range")?.as_array()?.len() == 6
+        {
+            updates.insert(id);
+        }
+    }
+    if updates.is_empty() {
+        return Ok(bytes);
+    }
+    let mut incremental = IncrementalDocument::create_from(bytes, pdf);
+    for id in updates {
+        incremental.opt_clone_object_to_new_document(id)?;
+        let function = incremental.new_document.get_object_mut(id)?.as_stream_mut()?;
+        let range = function.dict.get_mut(b"Range")?.as_array_mut()?;
+        range.extend([Object::Integer(0), Object::Integer(1)]);
+    }
+    let mut output = Vec::new();
+    incremental.save_to(&mut output)?;
+    Ok(output)
 }
 
 fn draw_vector_ink(surface: &mut PageBuilder<'_>, doc: &Document, ink: Vec<dtool_core::scene::Prim>, output: &OutputColour) {
@@ -1256,6 +1358,24 @@ fn push_pixel_mask(surface: &mut PageBuilder<'_>, doc: &Document, object: &Objec
     if dtool_core::geometry::invert_matrix(&[a, b, c, d, e, f]).is_none() {
         return false;
     }
+    if let Some(outline) = doc.layer_masks.iter().find(|layer| layer.object == object.id)
+        .and_then(|layer| layer.vector_outline.as_ref())
+    {
+        let to_world = transform * kurbo::Affine::scale_non_uniform(f64::from(w), f64::from(h));
+        if let Some(path) = pdf_bez_path(&(to_world * outline.to_kurbo())) {
+            surface.push_clip_path(&path, &FillRule::EvenOdd);
+            return true;
+        }
+    }
+    if mask.coverage.as_slice() == [255] {
+        // A single opaque sample covers exactly the transformed object rectangle.
+        // Use its path so PDF image sampling cannot move the clipping edge.
+        let quad = dtool_core::geometry::object_world_quad(object).map(|point| point.map(f64::from));
+        if let Some(path) = region_path(&[quad.to_vec()]) {
+            surface.push_clip_path(&path, &FillRule::NonZero);
+            return true;
+        }
+    }
     let pixels = mask.coverage.iter().flat_map(|alpha| [255, 255, 255, *alpha]).collect();
     let image = Image::from_rgba8(pixels, mask.width, mask.height);
     let mut stream = surface.stream_builder();
@@ -1271,35 +1391,65 @@ fn push_pixel_mask(surface: &mut PageBuilder<'_>, doc: &Document, object: &Objec
     true
 }
 
-fn push_object_transparency(surface: &mut PageBuilder<'_>, object: &Object, bounds: [f32; 4], pixels_per_unit: f32, opts: &PdfOptions) -> bool {
-    use dtool_core::paint::GradientKind;
-    let dtool_core::paint::Transparency::Gradient { kind, stops, geom } = &object.transparency else {
+fn push_object_transparency(surface: &mut PageBuilder<'_>, doc: &Document, object: &Object, bounds: [f32; 4], pixels_per_unit: f32) -> bool {
+    use dtool_core::paint::{GradientKind, Paint, Transparency};
+    let transform = pdf_paint_transform(object);
+    if let Transparency::InverseBitmap(bitmap) = &object.transparency {
+        let Some(([width, height], pixels)) = crate::effect_image::bitmap_mask_tile(doc, bitmap) else { return false };
+        let image = Image::from_rgba8(pixels, width, height);
+        let matrix = (transform * kurbo::Affine::new(bitmap.matrix)).as_coeffs();
+        return crate::pdf_paint::push_bitmap_transparency(surface, image, matrix, bounds);
+    }
+    let Transparency::Gradient { kind, stops, geom } = &object.transparency else { return false };
+    let push_gradient = |surface: &mut PageBuilder<'_>, stops: &[dtool_core::paint::GradientStop], geom: &dtool_core::paint::GradientGeom| {
+        let mut geom = *geom;
+        if matches!(kind, GradientKind::Radial | GradientKind::Conical) {
+            geom.ratio = 1.0;
+        }
+        let matrix = (transform * kurbo::Affine::new(geom.to_matrix())).as_coeffs();
+        crate::pdf_paint::push_gradient_transparency(surface, kind, stops, &geom, matrix, bounds)
+    };
+    if *kind != GradientKind::Conical && geom.spread.is_pad() {
+        return push_gradient(surface, stops, geom);
+    }
+    if *kind == GradientKind::Conical && !stops.is_empty() {
+        let [dx, dy, ..] = geom.to_matrix();
+        let axis = dx.hypot(dy);
+        let determinant = transform.determinant();
+        if axis.is_finite() && axis > 1e-14 && determinant.is_finite() && determinant != 0.0
+            && push_gradient(surface, stops, geom)
+        {
+            return true;
+        }
+    }
+    if *kind != GradientKind::Conical && transform.determinant() != 0.0 {
+        let paint = Paint::Gradient { kind: *kind, stops: stops.clone(), geom: *geom };
+        let inverse = transform.inverse().as_coeffs().map(|value| value as f32);
+        let [x, y, w, h] = dtool_core::scene::clip_bounds(bounds, &inverse);
+        // PDF calculator shadings with repeated stops can fail in a grayscale mask.
+        // A bounded list of ordinary axial or radial stops remains vector data.
+        if let std::borrow::Cow::Owned(Paint::Gradient { stops, geom, .. }) =
+            crate::pdf_paint::bounded_gradient(&paint, [x, y, x + w, y + h])
+        {
+            return push_gradient(surface, &stops, &geom);
+        }
+    }
+    let [x, y, w, h] = bounds;
+    let Some(extent) = krilla::geom::Size::from_wh(w, h) else { return false };
+    let Some(([width, height], pixels)) = crate::effect_image::transparency_pixels(object, bounds, pixels_per_unit) else {
         return false;
     };
-    if *kind == GradientKind::Conical {
-        let [x, y, w, h] = bounds;
-        let Some(extent) = krilla::geom::Size::from_wh(w, h) else { return false };
-        let Some(([width, height], pixels)) = crate::effect_image::transparency_pixels(object, bounds, pixels_per_unit) else {
-            return false;
-        };
-        let mut stream = surface.stream_builder();
-        {
-            let mut mask = stream.surface();
-            mask.push_transform(&Transform::from_translate(x, y));
-            mask.draw_image(Image::from_rgba8(pixels, width, height), extent);
-            mask.pop();
-            mask.finish();
-        }
-        let stream = stream.finish();
-        surface.push_mask(krilla::mask::Mask::new(stream, krilla::mask::MaskType::Alpha));
-        return true;
+    let mut stream = surface.stream_builder();
+    {
+        let mut mask = stream.surface();
+        mask.push_transform(&Transform::from_translate(x, y));
+        mask.draw_image(Image::from_rgba8(pixels, width, height), extent);
+        mask.pop();
+        mask.finish();
     }
-    let mut geom = *geom;
-    if *kind == GradientKind::Radial {
-        geom.ratio = 1.0;
-    }
-    let matrix = (pdf_paint_transform(object) * kurbo::Affine::new(geom.to_matrix())).as_coeffs();
-    crate::pdf_paint::push_transparency_soft_mask(surface, kind, stops, matrix, bounds, opts)
+    let stream = stream.finish();
+    surface.push_mask(krilla::mask::Mask::new(stream, krilla::mask::MaskType::Alpha));
+    true
 }
 
 fn pdf_paint_transform(object: &dtool_core::Object) -> kurbo::Affine {
@@ -1390,8 +1540,8 @@ fn draw_raster_layer(
     let stroke = crate::pdf_paint::stroke_for_output(surface, &obj.stroke, obj.opacity, output, doc);
     let stroke_under = matches!(obj.paint_order, PaintOrder::StrokeUnder);
     let draw_border = |surface: &mut PageBuilder<'_>, stroke: &Stroke| {
-        if (outline_strokes || !obj.stroke.pressure.is_empty())
-            && draw_outlined_stroke(surface, &stroke_path, stroke, &obj.stroke)
+        if (outline_strokes || !obj.stroke.pressure.is_empty() || obj.stroke.cap == dtool_core::paint::Cap::RoundInset)
+            && draw_outlined_stroke(surface, &stroke_path, stroke, &obj.stroke, dtool_core::boolean::DEFAULT_TOLERANCE)
         {
             return;
         }
@@ -1424,6 +1574,47 @@ fn draw_raster_layer(
         draw_border(surface, stroke);
     }
     Ok(true)
+}
+
+fn draw_solid_blur(
+    surface: &mut PageBuilder<'_>, doc: &Document, object: &Object, source: &dtool_core::scene::Prim,
+    bounds: [f32; 4], pixels_per_unit: f32, output: &OutputColour,
+) -> bool {
+    use dtool_core::scene::Prim;
+
+    let Prim::Fill { contours, paint, .. } = source else { return false };
+    let rings: Vec<_> = contours.iter()
+        .map(|ring| ring.iter().map(|point| point.map(f64::from)).collect())
+        .collect();
+    let Some(path) = region_path(&rings) else { return false };
+    let Some(mut fill) = crate::pdf_paint::fill_for_output(surface, paint, 1.0, output, doc) else { return false };
+    let Some(layer) = dtool_core::layer_style::raster::blurred_base(source, &object.effects) else { return false };
+    let Some(size) = crate::effect_image::size(bounds, std::slice::from_ref(&layer), pixels_per_unit) else { return false };
+    let Some(raster) = crate::effect_image::rgba(doc, bounds, size, &layer) else { return false };
+    let mask = crate::blend_range_mask::RangeMask {
+        bounds: raster.bounds,
+        size: raster.size,
+        alpha: raster.pixels.chunks_exact(4).map(|pixel| pixel[3]).collect(),
+    };
+    if !push_blend_range_mask(surface, mask) {
+        return false;
+    }
+    // Extend the flat paint under the soft edge. The mask alone controls its opacity.
+    let stroke = Stroke {
+        paint: fill.paint.clone(),
+        opacity: NormalizedF32::ONE,
+        width: 2.0 * (layer.raster_padding() + 2.0),
+        line_join: krilla::paint::LineJoin::Round,
+        ..Stroke::default()
+    };
+    fill.opacity = NormalizedF32::ONE;
+    fill.rule = FillRule::EvenOdd;
+    surface.set_fill(Some(fill));
+    surface.set_stroke(Some(stroke));
+    surface.draw_path(&path);
+    surface.set_stroke(None);
+    surface.pop();
+    true
 }
 
 fn draw_effect_images(
@@ -1489,8 +1680,17 @@ fn effect_blend(mode: dtool_core::blend::BlendMode) -> krilla::blend::BlendMode 
 
 fn draw_outlined_stroke(
     surface: &mut PageBuilder<'_>, path: &kurbo::BezPath, stroke: &Stroke, style: &StrokeStyle,
+    tolerance: f64,
 ) -> bool {
-    let Some((outline, even_odd)) = dtool_core::outline::styled_stroke_path(path, style) else { return false; };
+    let geometry = dtool_core::outline::styled_stroke_path_with_tolerance(path, style, tolerance)
+        .or_else(|| {
+            if tolerance < dtool_core::boolean::DEFAULT_TOLERANCE {
+                dtool_core::outline::styled_stroke_path(path, style)
+            } else {
+                None
+            }
+        });
+    let Some((outline, even_odd)) = geometry else { return false; };
     if outline.elements().is_empty() { return true; }
     let rule = if even_odd { FillRule::EvenOdd } else { FillRule::NonZero };
     let Some(path) = pdf_bez_path(&outline) else { return false; };
@@ -1501,7 +1701,9 @@ fn draw_outlined_stroke(
 }
 
 fn draw_shape_stroke(surface: &mut PageBuilder<'_>, doc: &Document, obj: &dtool_core::Object, shape: &PdfShape, stroke: &Stroke, outline: bool) {
-    if !((outline || !obj.stroke.pressure.is_empty()) && draw_outlined_stroke(surface, &shape.outline, stroke, &obj.stroke)) {
+    if !((outline || !obj.stroke.pressure.is_empty() || obj.stroke.cap == dtool_core::paint::Cap::RoundInset)
+        && draw_outlined_stroke(surface, &shape.outline, stroke, &obj.stroke, shape.tolerance))
+    {
         surface.set_fill(None);
         surface.set_stroke(Some(stroke.clone()));
         surface.draw_path(&shape.path);
@@ -1544,7 +1746,7 @@ fn draw_arrowheads(surface: &mut PageBuilder, doc: &Document, object: &dtool_cor
                 join: object.stroke.join.clone(),
                 ..Default::default()
             };
-            if outline && draw_outlined_stroke(surface, &geometry, &stroke, &style) {
+            if outline && draw_outlined_stroke(surface, &geometry, &stroke, &style, dtool_core::boolean::DEFAULT_TOLERANCE) {
                 continue;
             }
             surface.set_fill(None);
@@ -1597,7 +1799,7 @@ fn draw_dimension(surface: &mut PageBuilder<'_>, obj: &dtool_core::Object, geome
         path.line_to((end[0], end[1]));
     }
     let style = StrokeStyle { width, ..Default::default() };
-    if !(opts.outline_strokes && draw_outlined_stroke(surface, &path, &stroke, &style))
+    if !(opts.outline_strokes && draw_outlined_stroke(surface, &path, &stroke, &style, dtool_core::boolean::DEFAULT_TOLERANCE))
         && let Some(path) = pdf_bez_path(&path)
     {
         surface.set_fill(None);

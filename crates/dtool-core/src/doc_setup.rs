@@ -365,6 +365,7 @@ impl DocSetup {
         let curve_scale = if rescale { [factor * scale[0], factor * scale[1]] } else { [factor, factor] };
         transform_object_dimensions(&mut doc.objects, factor, curve_scale, place)?;
         if factor != 1.0 {
+            doc.symbols.convert_units(factor)?;
             doc.rulers.origin = doc.rulers.origin.map(|value| value * factor);
             if let Some(settings) = &mut doc.grid.baseline {
                 settings.offset *= factor;
@@ -451,12 +452,7 @@ pub(crate) fn transform_object_dimensions(
             object.size[axis] = size;
         }
         if factor != 1.0 {
-            for stroke in std::iter::once(&mut object.stroke).chain(&mut object.additional_strokes) {
-                stroke.width *= factor;
-                for dash in &mut stroke.dash {
-                    *dash *= factor;
-                }
-            }
+            convert_object_lengths(object, factor)?;
         }
         if curve_scale != [1.0, 1.0] {
             if let crate::object::ObjectKind::Curve(curve) = &mut object.kind {
@@ -485,6 +481,88 @@ pub(crate) fn transform_object_dimensions(
                     point[1] *= curve_scale[1];
                 }
             }
+        }
+    }
+    Ok(())
+}
+
+fn convert_object_lengths(object: &mut crate::Object, factor: f32) -> Result<(), CommandError> {
+    use crate::layer_style::EffectParams;
+    use crate::object::ObjectKind;
+    use crate::paint::{Transparency, transform_paint_matrix};
+
+    let scale = f64::from(factor);
+    let transform = kurbo::Affine::scale(scale);
+    let paint = |value: &mut crate::paint::Paint| transform_paint_matrix(value, transform.as_coeffs());
+    for fill in std::iter::once(&mut object.fill).chain(&mut object.additional_fills) {
+        paint(fill);
+    }
+    for stroke in std::iter::once(&mut object.stroke).chain(&mut object.additional_strokes) {
+        paint(&mut stroke.paint);
+        stroke.width *= factor;
+        stroke.dash_offset *= factor;
+        for dash in &mut stroke.dash {
+            *dash *= factor;
+        }
+    }
+    match &mut object.transparency {
+        Transparency::Gradient { geom, .. } => *geom = geom.transform(transform.as_coeffs()),
+        Transparency::InverseBitmap(bitmap) => {
+            bitmap.matrix = (transform * kurbo::Affine::new(bitmap.matrix)).as_coeffs();
+        }
+        Transparency::None => {}
+    }
+    if let Some(shape) = &mut object.shape {
+        shape.size = shape.size.map(|length| length * factor);
+        if let Some(corner) = shape.corner.as_mut().filter(|corner| corner.absolute) {
+            corner.radii = corner.radii.map(|length| length * factor);
+        }
+    }
+    if let Some(crop) = &mut object.vector_crop {
+        crop.rect = crop.rect.map(|length| length * factor);
+    }
+    match &mut object.kind {
+        ObjectKind::Curve(curve) => {
+            for contour in std::iter::once(&mut curve.contour).chain(&mut curve.holes) {
+                for corner in contour.points.iter_mut().filter_map(|point| point.corner.as_mut()) {
+                    corner.radius *= scale;
+                }
+            }
+        }
+        ObjectKind::Compound(compound) => {
+            compound.origin = compound.origin.map(|length| length * factor);
+            transform_object_dimensions(&mut compound.operands, factor, [factor; 2], |pos, size, _| {
+                (pos * factor, size * factor)
+            })?;
+        }
+        ObjectKind::Dimension(dimension) => {
+            dimension.start = dimension.start.map(|length| length * scale);
+            dimension.end = dimension.end.map(|length| length * scale);
+            dimension.offset *= scale;
+        }
+        _ => {}
+    }
+    for effect in &mut object.effects {
+        match &mut effect.params {
+            EffectParams::Blur { radius, radius_y, .. } => {
+                *radius *= factor;
+                *radius_y = radius_y.map(|length| length * factor);
+            }
+            EffectParams::Shadow { radius, radius_y, offset, .. } => {
+                *radius *= factor;
+                *radius_y = radius_y.map(|length| length * factor);
+                *offset *= factor;
+            }
+            EffectParams::Glow { radius, .. } => *radius *= factor,
+            EffectParams::Outline { width, fill, .. } => {
+                *width *= factor;
+                paint(fill);
+            }
+            EffectParams::Light { radius, soften, .. } => {
+                *radius *= factor;
+                *soften *= factor;
+            }
+            EffectParams::Overlay { fill } => paint(fill),
         }
     }
     Ok(())

@@ -11,8 +11,11 @@ struct Sample {
 
 /// Expand pressure along the original centreline before output transforms are applied.
 pub fn pressure_stroke_path(path: &BezPath, style: &StrokeStyle, width: f64) -> Option<BezPath> {
-    if !(width.is_finite() && width > 0.0 && path.is_finite())
-        || style.pressure.is_empty()
+    pressure_stroke_path_with_tolerance(path, style, width, DEFAULT_TOLERANCE)
+}
+
+fn pressure_stroke_path_with_tolerance(path: &BezPath, style: &StrokeStyle, width: f64, tolerance: f64) -> Option<BezPath> {
+    if !(width.is_finite() && width > 0.0 && path.is_finite() && style.dash_offset.is_finite())
         || style
             .pressure
             .iter()
@@ -24,13 +27,13 @@ pub fn pressure_stroke_path(path: &BezPath, style: &StrokeStyle, width: f64) -> 
         || style
             .dash
             .iter()
-            .any(|dash| !dash.is_finite() || *dash <= 0.0)
+            .any(|dash| !dash.is_finite() || *dash < 0.0)
     {
         return None;
     }
     let mut outline = BezPath::new();
     let mut budget = MAX_BOOLEAN_POINTS;
-    for (points, closed) in super::flatten_subpaths(path, DEFAULT_TOLERANCE) {
+    for (points, closed) in super::flatten_subpaths(path, tolerance) {
         let mut points: Vec<_> = points.into_iter().map(|[x, y]| Point::new(x, y)).collect();
         points.dedup();
         if points.len() < 2 {
@@ -55,8 +58,20 @@ pub fn pressure_stroke_path(path: &BezPath, style: &StrokeStyle, width: f64) -> 
         stops.extend(style.pressure.iter().map(|[x, _]| f64::from(*x) * length));
         stops.sort_unstable_by(f64::total_cmp);
         stops.dedup();
-        let runs = dash_runs(length, &style.dash, budget)?;
-        for range in runs {
+        let runs = dash_runs(length, &style.dash, f64::from(style.dash_offset), budget)?;
+        let closed_run = closed && style.dash.iter().all(|length| *length == 0.0);
+        for mut range in runs {
+            let mut caps = None;
+            // Move the round cap centres inwards, keeping the visible tips on the path endpoints.
+            if style.cap == Cap::RoundInset && !closed_run {
+                let half = (range.end - range.start) * 0.5;
+                let start = (width * 0.5 * pressure(&style.pressure, range.start / length)).min(half);
+                let end = (width * 0.5 * pressure(&style.pressure, range.end / length)).min(half);
+                let trim = |radius: f64| radius.min(half * (1.0 - 1e-7));
+                range.start += trim(start);
+                range.end -= trim(end);
+                caps = Some([trim(start), trim(end)]);
+            }
             let first = stops.partition_point(|stop| *stop <= range.start);
             let last = stops.partition_point(|stop| *stop < range.end);
             let sample = |at: f64| {
@@ -71,16 +86,37 @@ pub fn pressure_stroke_path(path: &BezPath, style: &StrokeStyle, width: f64) -> 
                     radius: width * 0.5 * pressure(&style.pressure, at / length),
                 }
             };
-            let samples: Vec<_> = std::iter::once(range.start)
+            if range.is_empty() {
+                let dot = sample(range.start);
+                let before = distances.partition_point(|stop| *stop < range.start).clamp(1, points.len() - 1);
+                let after = distances.partition_point(|stop| *stop <= range.start).clamp(1, points.len() - 1);
+                let incoming = (points[before] - points[before - 1]).normalize();
+                let outgoing = (points[after] - points[after - 1]).normalize();
+                if style.cap == Cap::Round && before == after && dot.radius > 0.0 {
+                    let Point { x, y } = dot.point;
+                    outline.extend(crate::geometry::ellipse_to_bez_path(x, y, dot.radius, dot.radius));
+                } else if style.cap != Cap::RoundInset {
+                    cap(&mut outline, dot, -incoming, style.cap);
+                    cap(&mut outline, dot, outgoing, style.cap);
+                }
+                budget = budget.checked_sub(1)?;
+                if outline.elements().len() > MAX_BOOLEAN_POINTS { return None; }
+                continue;
+            }
+            let mut samples: Vec<_> = std::iter::once(range.start)
                 .chain(stops[first..last].iter().copied())
                 .chain(std::iter::once(range.end))
                 .map(sample)
                 .collect();
+            if let Some([start, end]) = caps {
+                samples.first_mut()?.radius = start;
+                samples.last_mut()?.radius = end;
+            }
             budget = budget.checked_sub(samples.len())?;
             append_run(
                 &mut outline,
                 &samples,
-                closed && style.dash.is_empty(),
+                closed_run,
                 style,
             );
             if outline.elements().len() > MAX_BOOLEAN_POINTS {
@@ -92,6 +128,7 @@ pub fn pressure_stroke_path(path: &BezPath, style: &StrokeStyle, width: f64) -> 
 }
 
 fn pressure(profile: &[[f32; 2]], at: f64) -> f64 {
+    if profile.is_empty() { return 1.0; }
     let upper = profile.partition_point(|point| f64::from(point[0]) <= at);
     if upper == 0 {
         return f64::from(profile[0][1]);
@@ -104,17 +141,26 @@ fn pressure(profile: &[[f32; 2]], at: f64) -> f64 {
     weight + (next - weight) * offset
 }
 
-fn dash_runs(length: f64, dash: &[f32], budget: usize) -> Option<Vec<Range<f64>>> {
-    if dash.is_empty() {
+fn dash_runs(length: f64, dash: &[f32], offset: f64, budget: usize) -> Option<Vec<Range<f64>>> {
+    let sum = dash.iter().copied().map(f64::from).sum::<f64>();
+    if sum == 0.0 {
         return Some(std::iter::once(0.0..length).collect());
     }
     let mut runs = Vec::new();
-    let mut start = 0.0;
-    for (index, step) in dash.iter().cycle().take(budget).enumerate() {
-        let end = (start + f64::from(*step)).min(length);
-        if end <= start {
-            return None;
+    let period = if dash.len() % 2 == 0 { sum } else { sum * 2.0 };
+    let mut phase = offset.rem_euclid(period);
+    let mut pattern = dash.iter().copied().map(f64::from).cycle().enumerate().peekable();
+    while let Some(&(_, step)) = pattern.peek() {
+        if phase <= step {
+            break;
         }
+        phase -= step;
+        pattern.next();
+    }
+    let mut start = 0.0;
+    for (index, step) in pattern.take(budget) {
+        let end = (start + (step - phase)).min(length);
+        phase = 0.0;
         if index % 2 == 0 {
             runs.push(start..end);
         }
@@ -226,7 +272,7 @@ fn cap(path: &mut BezPath, sample: Sample, outward: Vec2, style: Cap) {
                 ],
             );
         }
-        Cap::Round => sector(path, centre, -across, std::f64::consts::PI),
+        Cap::Round | Cap::RoundInset => sector(path, centre, -across, std::f64::consts::PI),
     }
 }
 
@@ -265,14 +311,18 @@ fn polygon(path: &mut BezPath, points: &[Point]) {
 
 /// Expand a styled world-space centerline. The flag selects even-odd filling.
 pub fn styled_stroke_path(path: &kurbo::BezPath, style: &crate::paint::StrokeStyle) -> Option<(kurbo::BezPath, bool)> {
+    styled_stroke_path_with_tolerance(path, style, DEFAULT_TOLERANCE)
+}
+
+pub fn styled_stroke_path_with_tolerance(path: &BezPath, style: &StrokeStyle, tolerance: f64) -> Option<(BezPath, bool)> {
     use crate::paint::{Cap, Join, StrokeAlign};
     use kurbo::ParamCurveArclen;
-    if !(style.width.is_finite() && style.width > 0.0)
-        || style.dash.iter().any(|dash| !dash.is_finite() || *dash <= 0.0)
+    if !(style.width.is_finite() && style.width > 0.0 && style.dash_offset.is_finite())
+        || style.dash.iter().any(|dash| !dash.is_finite() || *dash < 0.0)
     {
         return None;
     }
-    let cap = match style.cap { Cap::Butt => kurbo::Cap::Butt, Cap::Round => kurbo::Cap::Round, Cap::Square => kurbo::Cap::Square };
+    let cap = match style.cap { Cap::Butt => kurbo::Cap::Butt, Cap::Round | Cap::RoundInset => kurbo::Cap::Round, Cap::Square => kurbo::Cap::Square };
     let (join, limit) = match style.join {
         Join::Miter { limit } => (kurbo::Join::Miter, f64::from(limit)),
         Join::Round => (kurbo::Join::Round, 4.0),
@@ -283,15 +333,14 @@ pub fn styled_stroke_path(path: &kurbo::BezPath, style: &crate::paint::StrokeSty
         && path.elements().iter().any(|element| matches!(element, kurbo::PathEl::ClosePath));
     let width = f64::from(style.width) * if aligned { 2.0 } else { 1.0 };
     let pattern = style.dash.iter().copied().map(f64::from);
-    let shortest = pattern.clone().fold(f64::INFINITY, f64::min);
-    let tolerance = crate::boolean::DEFAULT_TOLERANCE;
+    let shortest = pattern.clone().filter(|step| *step > 0.0).fold(f64::INFINITY, f64::min);
     if path.segments().map(|segment| segment.arclen(tolerance)).sum::<f64>() / shortest
         > crate::boolean::MAX_BOOLEAN_POINTS as f64 / 2.0
     {
         return None;
     }
-    let outline = if style.pressure.is_empty() {
-        let stroke = kurbo::Stroke::new(width).with_caps(cap).with_join(join).with_miter_limit(limit).with_dashes(0.0, pattern);
+    let outline = if style.pressure.is_empty() && style.cap != Cap::RoundInset && !style.dash.contains(&0.0) {
+        let stroke = kurbo::Stroke::new(width).with_caps(cap).with_join(join).with_miter_limit(limit).with_dashes(f64::from(style.dash_offset), pattern);
         let outline = kurbo::stroke(path.elements().iter().copied(), &stroke, &Default::default(), tolerance);
         if cap == kurbo::Cap::Round {
             close_stroke_subpaths(&outline)
@@ -299,7 +348,7 @@ pub fn styled_stroke_path(path: &kurbo::BezPath, style: &crate::paint::StrokeSty
             outline
         }
     } else {
-        pressure_stroke_path(path, style, width)?
+        pressure_stroke_path_with_tolerance(path, style, width, tolerance)?
     };
     if outline.elements().is_empty() { return Some((outline, false)); }
     let outline = if aligned {

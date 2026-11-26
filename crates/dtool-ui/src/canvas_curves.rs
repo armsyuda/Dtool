@@ -1,14 +1,15 @@
 use dtool_core::command::Session;
 use dtool_core::commands::curve_edit::{map_contours, world_contours, CURVE_ADD, CURVE_NODES_SET};
 use dtool_core::commands::curves::{preview_contours, SHAPE_CONVERT};
-use dtool_core::commands::curve_nodes::{CURVE_NODES_CONVERT, CURVE_NODES_DELETE, CURVE_NODES_INSERT};
-use dtool_core::commands::path_nodes::{PATH_BREAK, PATH_CLOSE, PATH_JOIN};
+use dtool_core::commands::curve_nodes::{CURVE_NODES_CONVERT, CURVE_NODES_DELETE, CURVE_NODES_INSERT, segment_count, segment_point_within};
+use dtool_core::commands::path_nodes::{PATH_BREAK, PATH_CLOSE, PATH_JOIN, PATH_POINT_ADD};
 use dtool_core::curve::{Contour, NodeKind, PathPoint, PointId};
 use dtool_core::geometry::{IDENTITY, invert_matrix, object_matrix};
 use dtool_core::object::ObjectId;
 use dtool_core::transform::Anchor;
 use dtool_protocol::Command;
 use serde_json::json;
+use std::collections::{HashMap, HashSet};
 
 #[path = "pen_spline.rs"]
 mod pen_spline;
@@ -144,6 +145,7 @@ pub struct Pen {
     pub last: Option<[f32; 2]>,
     pub stroke: Option<dtool_core::paint::StrokeStyle>,
     pub extension: Option<(PathExtension, f32)>,
+    pub construction_snap: Option<ConstructionSnap>,
 }
 
 impl Pen {
@@ -254,8 +256,29 @@ impl Pen {
         last.kind = NodeKind::Smooth;
     }
 
+    pub(crate) fn drag_with_construction(&mut self, point: [f32; 2], enabled: bool, tolerance: f32) {
+        self.construction_snap = None;
+        if enabled && self.dragging && self.handles() && !self.alt && !self.shift && !self.space
+            && let [.., previous, node] = self.nodes.as_slice()
+        {
+            let anchor = p32(node.pos);
+            let incoming = [2.0 * anchor[0] - point[0], 2.0 * anchor[1] - point[1]];
+            self.construction_snap = construction_handle_point(
+                anchor, p32(previous.pos), previous.handle_out.map(p32), incoming, tolerance,
+            );
+            if let Some(snap) = self.construction_snap {
+                let target = snap.moving[1];
+                self.drag([2.0 * anchor[0] - target[0], 2.0 * anchor[1] - target[1]]);
+                self.last = Some(point);
+                return;
+            }
+        }
+        self.drag(point);
+    }
+
     pub fn release(&mut self) {
         self.dragging = false;
+        self.construction_snap = None;
     }
 
     pub fn drop_duplicate_tail(&mut self, near: f32) {
@@ -268,13 +291,14 @@ impl Pen {
     pub fn cancel(&mut self) {
         self.nodes.clear();
         self.dragging = false;
+        self.construction_snap = None;
         self.last = None;
         self.extension = None;
     }
 
     pub fn finish_command(&mut self, closed: bool) -> Option<Command> {
         let mut nodes = std::mem::take(&mut self.nodes);
-        self.dragging = false;
+        self.release();
         self.last = None;
         if let Some((extension, near)) = self.extension.take() {
             if closed && nodes.len() >= 2 {
@@ -657,50 +681,127 @@ pub enum NodePart {
     Out(usize, usize),
     Segment(usize, usize),
     Scale,
+    Rotate,
+    Shear(NodeShear),
+    Align(NodeAlignHandle),
+    Origin,
+}
+
+pub(crate) enum NodeAnchorSnap {
+    Point { offset: [f32; 2], target: [f32; 2] },
+    /// Each axis has its own offset and target coordinate.
+    Axes([Option<(f32, f32)>; 2]),
+}
+
+impl NodePart {
+    fn is_shear(self) -> bool { matches!(self, Self::Shear(_)) }
+
+    fn allows_separate_transform(self) -> bool {
+        matches!(self, Self::Scale | Self::Rotate) || self.is_shear()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NodeAlignHandle {
+    pub(crate) axis: usize,
+    edge: usize,
+}
+
+impl NodeAlignHandle {
+    fn coordinate(self, bounds: [f32; 4]) -> f32 {
+        let low = bounds[self.axis];
+        let high = bounds[self.axis + 2];
+        match self.edge {
+            0 => low,
+            1 => low.midpoint(high),
+            _ => high,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NodeShear { Top, Bottom, Left, Right }
+
+impl NodeShear {
+    // The coordinate displaced by the shear. The other coordinate is fixed.
+    pub(crate) fn axis(self) -> usize {
+        match self {
+            Self::Top | Self::Bottom => 0,
+            Self::Left | Self::Right => 1,
+        }
+    }
+
+    fn edges(self, bounds: [f32; 4]) -> (f32, f32) {
+        let axis = 1 - self.axis();
+        if matches!(self, Self::Top | Self::Left) {
+            (bounds[axis], bounds[axis + 2])
+        } else {
+            (bounds[axis + 2], bounds[axis])
+        }
+    }
 }
 
 pub const NODE_TRANSFORM_ANCHOR: Anchor = Anchor::TopLeft;
-
-fn cubic(a: [f64; 2], b: [f64; 2], c: [f64; 2], d: [f64; 2], t: f64) -> [f32; 2] {
-    let u = 1.0 - t;
-    let w = [u * u * u, 3.0 * u * u * t, 3.0 * u * t * t, t * t * t];
-    p32([w[0] * a[0] + w[1] * b[0] + w[2] * c[0] + w[3] * d[0], w[0] * a[1] + w[1] * b[1] + w[2] * c[1] + w[3] * d[1]])
-}
+pub(crate) const NODE_CONVERSION_CHOICES: [(NodeKind, &str); 3] = [
+    (NodeKind::Sharp, "context.node.convert.sharp"),
+    (NodeKind::Smooth, "context.node.convert.smooth"),
+    (NodeKind::Smart, "context.node.convert.smart"),
+];
 
 pub fn segment_at(contours: &[Contour], point: [f32; 2], radius: f32) -> Option<(usize, usize)> {
-    let mut best: Option<(f32, usize, usize)> = None;
+    let point = p64(point);
+    let mut distance = f64::from(radius);
+    let mut best = None;
     for (c, contour) in contours.iter().enumerate() {
-        let n = contour.points.len();
-        let count = if contour.closed { n } else { n.saturating_sub(1) };
-        for i in 0..count {
-            let (p, q) = (&contour.points[i], &contour.points[(i + 1) % n]);
-            let (b, cc) = (p.handle_out.unwrap_or(p.pos), q.handle_in.unwrap_or(q.pos));
-            let samples: Vec<[f32; 2]> = (0..=24).map(|k| cubic(p.pos, b, cc, q.pos, f64::from(k) / 24.0)).collect();
-            let d = samples.windows(2).map(|w| segment_distance(point, w[0], w[1])).fold(f32::INFINITY, f32::min);
-            if d <= radius && best.is_none_or(|(bd, _, _)| d < bd) {
-                best = Some((d, c, i));
+        for i in 0..segment_count(contour) {
+            if let Some(hit) = segment_point_within(contour, i, point, distance) {
+                let next_distance = (hit[0] - point[0]).hypot(hit[1] - point[1]);
+                if best.is_none() || next_distance < distance {
+                    distance = next_distance;
+                    best = Some((c, i));
+                }
             }
         }
     }
-    best.map(|(_, c, i)| (c, i))
+    best
 }
 
 pub fn selection_box(contours: &[Contour], selected: &[(usize, usize)]) -> Option<[f32; 4]> {
-    let points: Vec<[f32; 2]> = selected.iter().filter_map(|&(c, i)| contours.get(c)?.points.get(i).map(|n| p32(n.pos))).collect();
-    let first = points.first()?;
-    let mut b = [first[0], first[1], first[0], first[1]];
-    for p in &points {
-        b = [b[0].min(p[0]), b[1].min(p[1]), b[2].max(p[0]), b[3].max(p[1])];
-    }
-    Some(b)
+    selected.iter()
+        .filter_map(|&(c, i)| Some(p32(contours.get(c)?.points.get(i)?.pos)))
+        .map(|[x, y]| [x, y, x, y])
+        .reduce(union_node_bounds)
 }
 
-pub fn scale_handle(contours: &[Contour], selected: &[(usize, usize)]) -> Option<[f32; 2]> {
-    if selected.len() < 2 {
-        return None;
-    }
-    let b = selection_box(contours, selected)?;
-    Some([b[2], b[3]])
+fn union_node_bounds(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
+    [a[0].min(b[0]), a[1].min(b[1]), a[2].max(b[2]), a[3].max(b[3])]
+}
+
+fn curve_outline_bounds(contours: &[Contour]) -> Option<[f32; 4]> {
+    contours.iter().filter(|contour| !contour.points.is_empty())
+        .map(Contour::bounds).reduce(union_node_bounds)
+}
+
+fn node_box_center([left, top, right, bottom]: [f32; 4]) -> [f32; 2] {
+    [left.midpoint(right), top.midpoint(bottom)]
+}
+
+pub(crate) fn node_rotate_handle([left, top, right, _]: [f32; 4], offset: f32) -> [f32; 2] {
+    [left.midpoint(right), top - offset]
+}
+
+pub(crate) fn node_shear_handles([left, top, right, bottom]: [f32; 4], radius: f32) -> impl Iterator<Item = (NodeShear, [f32; 2])> {
+    use dtool_tools::move_tool::shear_handle_points;
+    let width = right - left;
+    let height = bottom - top;
+    let [top_grip, bottom_grip] = shear_handle_points([left, top, width, height], radius);
+    let [left_grip, right_grip] = shear_handle_points([top, left, height, width], radius);
+    [
+        (height, NodeShear::Top, top_grip),
+        (height, NodeShear::Bottom, bottom_grip),
+        (width, NodeShear::Left, [left_grip[1], left_grip[0]]),
+        (width, NodeShear::Right, [right_grip[1], right_grip[0]]),
+    ].into_iter().filter_map(move |(lever, side, point)| (lever > radius * 2.0).then_some((side, point)))
 }
 
 #[derive(Debug, Clone)]
@@ -720,11 +821,122 @@ pub struct NodeEdit {
     pub primitive: bool,
     pub alt: bool,
     pub shift: bool,
+    pub(crate) ctrl: bool,
     pub transform_mode: bool,
+    pub(crate) construction_snap: Option<ConstructionSnap>,
+    pub(crate) marquee: Option<(egui::Pos2, egui::Pos2, bool)>,
     display_to_edit: Option<[f32; 6]>,
     context: Option<dtool_core::workspace::ContextId>,
     point_order: Vec<Vec<PointId>>,
     point_order_generation: Option<u64>,
+    other_selected: HashMap<ObjectId, HashSet<(usize, PointId)>>,
+    other_drags: Vec<CurveNodeDrag>,
+    group_transform: Option<NodeGroupTransform>,
+    individual_origins: HashMap<ObjectId, [f64; 2]>,
+    transform_bounds: Option<[f32; 4]>,
+    gesture_origin: Option<[f32; 2]>,
+    origin_preview: Option<[f32; 2]>,
+    custom_origin: Option<NodeOrigin>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct NodeOrigin {
+    point: [f32; 2],
+    selection: Vec<(ObjectId, usize, PointId)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum NodeGroupTransform {
+    Translate([f64; 2]),
+    Scale { origin: [f64; 2], factors: [f64; 2] },
+    Rotate { origin: [f64; 2], sin: f64, cos: f64 },
+    Shear { axis: usize, origin: f64, factor: f64 },
+}
+
+impl NodeGroupTransform {
+    fn scale(bounds: [f32; 4], delta: [f64; 2], proportional: bool) -> Self {
+        let origin = [f64::from(bounds[0]), f64::from(bounds[1])];
+        let span = [f64::from(bounds[2]) - origin[0], f64::from(bounds[3]) - origin[1]];
+        let mut factors = std::array::from_fn(|axis| {
+            if span[axis] > 1e-6 { 1.0 + delta[axis] / span[axis] } else { 1.0 }
+        });
+        if proportional {
+            let length_squared = span[0] * span[0] + span[1] * span[1];
+            if length_squared > 1e-12 {
+                let factor = 1.0 + (delta[0] * span[0] + delta[1] * span[1]) / length_squared;
+                factors = [factor; 2];
+            }
+        }
+        Self::Scale { origin, factors }
+    }
+
+    fn map(self, point: [f64; 2]) -> [f64; 2] {
+        match self {
+            Self::Translate(delta) => shifted(point, delta),
+            Self::Scale { origin, factors } => scale_about(point, origin, factors),
+            Self::Rotate { origin, sin, cos } => {
+                let x = point[0] - origin[0];
+                let y = point[1] - origin[1];
+                [origin[0] + cos * x - sin * y, origin[1] + sin * x + cos * y]
+            }
+            Self::Shear { axis, origin, factor } => {
+                let mut moved = point;
+                moved[axis] += (point[1 - axis] - origin) * factor;
+                moved
+            }
+        }
+    }
+
+    fn with_origin(self, point: Option<[f64; 2]>) -> Self {
+        let Some(origin) = point else { return self };
+        match self {
+            Self::Scale { factors, .. } => Self::Scale { origin, factors },
+            Self::Rotate { sin, cos, .. } => Self::Rotate { origin, sin, cos },
+            Self::Shear { axis, factor, .. } => Self::Shear { axis, origin: origin[1 - axis], factor },
+            Self::Translate(_) => self,
+        }
+    }
+
+    fn apply(self, contours: &mut [Contour], indices: &[(usize, usize)]) {
+        for &(c, i) in indices {
+            if let Some(node) = contours.get_mut(c).and_then(|contour| contour.points.get_mut(i)) {
+                node.pos = self.map(node.pos);
+                node.handle_in = node.handle_in.map(|point| self.map(point));
+                node.handle_out = node.handle_out.map(|point| self.map(point));
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct CurveNodeDrag {
+    id: ObjectId,
+    contours: Vec<Contour>,
+    indices: Vec<(usize, usize)>,
+    matrix: [f32; 6],
+}
+
+impl CurveNodeDrag {
+    fn transformed(&self, transform: NodeGroupTransform) -> Vec<Contour> {
+        let mut contours = self.contours.clone();
+        transform.apply(&mut contours, &self.indices);
+        contours
+    }
+
+    fn command(mut self) -> Command {
+        if self.matrix != IDENTITY {
+            map_contours(&mut self.contours, self.matrix);
+        }
+        Command::with_params(CURVE_NODES_SET, json!({"id": self.id.0, "contours": self.contours, "preserve_transform": true}))
+    }
+}
+
+fn batch_curves(mut commands: Vec<Command>) -> Option<Command> {
+    match commands.len() {
+        0 => None,
+        1 => commands.pop(),
+        _ => Some(Command::with_params("edit.batch", json!({"commands": commands}))),
+    }
 }
 
 pub fn editable(session: &Session, id: ObjectId) -> Option<Vec<Contour>> {
@@ -836,30 +1048,15 @@ pub fn drag_part(base: &[Contour], part: NodePart, selected: &[(usize, usize)], 
         }
         NodePart::Scale => {
             let Some(b) = selection_box(base, selected) else { return out };
-            let origin = [f64::from(b[0]), f64::from(b[1])];
-            let span = [f64::from(b[2] - b[0]), f64::from(b[3] - b[1])];
-            let s = [if span[0] > 1e-6 { (span[0] + d[0]) / span[0] } else { 1.0 }, if span[1] > 1e-6 { (span[1] + d[1]) / span[1] } else { 1.0 }];
-            for &(c, i) in selected {
-                if let Some(node) = out.get_mut(c).and_then(|contour| contour.points.get_mut(i)) {
-                    node.pos = scale_about(node.pos, origin, s);
-                    node.handle_in = node.handle_in.map(|h| scale_about(h, origin, s));
-                    node.handle_out = node.handle_out.map(|h| scale_about(h, origin, s));
-                }
-            }
+            NodeGroupTransform::scale(b, d, shift).apply(&mut out, selected);
             return out;
         }
         _ => {}
     }
     match part {
-        NodePart::Segment(..) | NodePart::Scale => {}
+        NodePart::Segment(..) | NodePart::Scale | NodePart::Rotate | NodePart::Shear(_) | NodePart::Align(_) | NodePart::Origin => {}
         NodePart::Anchor(..) => {
-            for &(c, i) in selected {
-                if let Some(node) = out.get_mut(c).and_then(|contour| contour.points.get_mut(i)) {
-                    node.pos = shifted(node.pos, d);
-                    node.handle_in = node.handle_in.map(|h| shifted(h, d));
-                    node.handle_out = node.handle_out.map(|h| shifted(h, d));
-                }
-            }
+            NodeGroupTransform::Translate(d).apply(&mut out, selected);
         }
         NodePart::In(c, i) | NodePart::Out(c, i) => {
             if let Some(node) = out.get_mut(c).and_then(|contour| contour.points.get_mut(i)) {
@@ -901,10 +1098,16 @@ pub fn join_command(session: &Session) -> Option<Command> {
 }
 
 pub(crate) fn node_context_menu(session: &Session) -> bool {
-    session.active_tool == "tool.node" && match session.selection.ids.as_slice() {
-        [id] => session.document.get_object(*id).is_some_and(|object| !object.locked && object.curve().is_some()),
-        ids => ids.len() > 1 && join_command(session).is_some(),
-    }
+    session.active_tool == "tool.node" && selected_curves(session).next().is_some()
+}
+
+fn selected_curves(session: &Session) -> impl Iterator<Item = ObjectId> + '_ {
+    session.selection.ids.iter().copied().filter(|&id| {
+        session.document.get_object(id).is_some_and(|object| {
+            !object.locked && object.pickable && object.curve().is_some()
+                && invert_matrix(&object_matrix(object)).is_some()
+        })
+    })
 }
 
 pub fn insert_command(id: ObjectId, contour: usize, point: [f32; 2]) -> Command {
@@ -913,14 +1116,64 @@ pub fn insert_command(id: ObjectId, contour: usize, point: [f32; 2]) -> Command 
 
 impl NodeEdit {
     pub fn sync(&mut self, session: &Session) {
-        let editable = match session.selection.ids.as_slice() {
-            [id] => node_contours(session, *id).map(|(contours, primitive)| (*id, contours, primitive)),
-            _ => None,
+        let geometry_changed = self.point_order_generation != Some(session.generation);
+        let target = match session.selection.ids.as_slice() {
+            [id] => Some(*id),
+            _ => selected_curves(session).find(|id| self.context == session.context && Some(*id) == self.target)
+                .or_else(|| selected_curves(session).next()),
         };
+        self.sync_target(session, target);
+        if !self.other_selected.is_empty() {
+            let eligible: HashSet<_> = selected_curves(session).collect();
+            self.other_selected.retain(|id, selection| {
+                if !eligible.contains(id) { return false; }
+                if geometry_changed
+                    && let Some(curve) = session.document.get_object(*id).and_then(|object| object.curve())
+                {
+                    let live: HashSet<_> = curve.contours().enumerate().flat_map(|(c, contour)| {
+                        contour.points.iter().map(move |node| (c, node.id))
+                    }).collect();
+                    selection.retain(|point| live.contains(point));
+                }
+                !selection.is_empty()
+            });
+        }
+        if !self.other_drags.is_empty() && (
+            self.other_drags.iter().any(|curve| !self.other_selected.contains_key(&curve.id))
+                || (geometry_changed && self.other_drags != self.selected_other_curves(session))
+        ) {
+            self.cancel();
+        }
+        if self.custom_origin.as_ref().is_some_and(|origin| origin.selection != self.node_signature()) {
+            self.custom_origin = None;
+        }
+    }
+
+    fn sync_target(&mut self, session: &Session, target: Option<ObjectId>) {
+        let editable = target.and_then(|id| {
+            node_contours(session, id).map(|(contours, primitive)| (id, contours, primitive))
+        });
         let single = editable.as_ref().map(|(id, _, _)| *id);
         if single != self.target || self.context != session.context {
+            let mut other_selected = HashMap::new();
+            if self.context == session.context && single.is_some() && !self.primitive {
+                other_selected = std::mem::take(&mut self.other_selected);
+                if let Some(prior) = self.target.filter(|id| session.selection.ids.contains(id)) {
+                    let points: HashSet<_> = self.selected.iter().filter_map(|&(c, i)| {
+                        self.point_order.get(c)?.get(i).copied().map(|id| (c, id))
+                    }).collect();
+                    if !points.is_empty() {
+                        other_selected.insert(prior, points);
+                    }
+                }
+            }
+            let custom_origin = (self.context == session.context).then(|| self.custom_origin.take()).flatten();
             *self = NodeEdit { target: single, context: session.context, alt: self.alt, shift: self.shift,
-                transform_mode: self.transform_mode, ..NodeEdit::default() };
+                transform_mode: self.transform_mode, other_selected, custom_origin, ..NodeEdit::default() };
+            if let Some((id, contours, false)) = &editable {
+                self.selected = self.other_indices(*id, contours);
+                self.other_selected.remove(id);
+            }
         }
         self.primitive = false;
         if let Some((_, contours, primitive)) = editable {
@@ -941,10 +1194,300 @@ impl NodeEdit {
     }
 
     pub(crate) fn sync_toolbar(&mut self, session: &Session) {
-        let single = match session.selection.ids.as_slice() { [id] => Some(*id), _ => None };
-        if self.target != single || self.context != session.context || self.point_order_generation != Some(session.generation) {
+        if self.context != session.context || self.point_order_generation != Some(session.generation)
+            || self.target.is_none_or(|id| !session.selection.ids.contains(&id))
+            || (self.primitive && session.selection.ids.len() != 1)
+        {
             self.sync(session);
         }
+    }
+
+    pub(crate) fn other_curves<'a>(&self, session: &'a Session) -> impl Iterator<Item = (ObjectId, Vec<Contour>)> + 'a {
+        let target = self.target;
+        selected_curves(session).filter(move |id| Some(*id) != target)
+            .filter_map(|id| editable(session, id).map(|contours| (id, contours)))
+    }
+
+    pub(crate) fn other_node_selected(&self, id: ObjectId, contour: usize, node: PointId) -> bool {
+        self.other_selected.get(&id).is_some_and(|points| points.contains(&(contour, node)))
+    }
+
+    fn other_indices(&self, id: ObjectId, contours: &[Contour]) -> Vec<(usize, usize)> {
+        let Some(points) = self.other_selected.get(&id) else { return Vec::new(); };
+        contours.iter().enumerate().flat_map(|(c, contour)| {
+            contour.points.iter().enumerate().filter_map(move |(i, node)| points.contains(&(c, node.id)).then_some((c, i)))
+        }).collect()
+    }
+
+    pub(crate) fn selected_count(&self) -> usize {
+        self.selected.len() + self.other_selected.values().map(HashSet::len).sum::<usize>()
+    }
+
+    pub(crate) fn clear_selection(&mut self) {
+        self.selected.clear();
+        self.other_selected.clear();
+        self.custom_origin = None;
+    }
+
+    pub(crate) fn has_cross_selection(&self) -> bool {
+        !self.other_selected.is_empty()
+    }
+
+    fn set_other_selection(&mut self, session: &Session, contains: impl Fn([f32; 2]) -> bool) {
+        let hits: Vec<_> = self.other_curves(session).filter_map(|(id, contours)| {
+            let points: Vec<_> = contours.iter().enumerate().flat_map(|(c, contour)| {
+                contour.points.iter().filter(|node| contains(p32(node.pos))).map(move |node| (c, node.id))
+            }).collect();
+            (!points.is_empty()).then_some((id, points))
+        }).collect();
+        for (id, points) in hits {
+            self.other_selected.entry(id).or_default().extend(points);
+        }
+    }
+
+    fn selected_other_curves(&self, session: &Session) -> Vec<CurveNodeDrag> {
+        if self.other_selected.is_empty() { return Vec::new(); }
+        self.other_curves(session).filter_map(|(id, contours)| {
+            let indices = self.other_indices(id, &contours);
+            let matrix = invert_matrix(&object_matrix(session.document.get_object(id)?))?;
+            (!indices.is_empty()).then_some(CurveNodeDrag { id, contours, indices, matrix })
+        }).collect()
+    }
+
+    pub(crate) fn separate_transforms(&self, session: &Session) -> bool {
+        if self.grab.is_some_and(|(part, _)| part.allows_separate_transform()) {
+            return !self.individual_origins.is_empty();
+        }
+        usize::from(!self.selected.is_empty()) + self.other_selected.len() > 1
+            && session.tool_options.flag(
+                "tool.node", dtool_core::context_toolbar::NODE_TRANSFORM_SEPARATELY,
+            ).unwrap_or(false)
+    }
+
+    fn curve_origins(&self, active: &[Contour], others: &[CurveNodeDrag]) -> HashMap<ObjectId, [f64; 2]> {
+        let primary = self.target.filter(|_| !self.selected.is_empty()).map(|id| (id, active));
+        primary.into_iter().chain(others.iter().map(|curve| (curve.id, curve.contours.as_slice())))
+            .filter_map(|(id, contours)| Some((id, p64(node_box_center(curve_outline_bounds(contours)?)))))
+            .collect()
+    }
+
+    pub(crate) fn displayed_individual_origins(&self, session: &Session, active: &[Contour]) -> Vec<[f32; 2]> {
+        if !self.separate_transforms(session)
+            || !session.tool_options.flag("tool.node", "node.show_transform_origin").unwrap_or(false)
+        {
+            return Vec::new();
+        }
+        if !self.individual_origins.is_empty() {
+            return self.individual_origins.values().copied().map(p32).collect();
+        }
+        self.curve_origins(active, &self.selected_other_curves(session)).into_values().map(p32).collect()
+    }
+
+    pub(crate) fn transform_box(&self, session: &Session, contours: &[Contour]) -> Option<[f32; 4]> {
+        if !self.transform_mode || self.primitive {
+            return None;
+        }
+        let from_curves = session.tool_options.flag("tool.node", dtool_core::context_toolbar::NODE_BOX_FROM_CURVES).unwrap_or(false);
+        let minimum_nodes = if from_curves { 1 } else { 2 };
+        if self.selected_count() < minimum_nodes {
+            return None;
+        }
+        // Keep the drag handle attached to the preview. Refit the box when the
+        // edit commits, since nodes outside the selection stay where they are.
+        if self.grab.is_some_and(|(part, _)| part == NodePart::Rotate || part.is_shear())
+            || ((from_curves || !self.individual_origins.is_empty()) && matches!(self.grab, Some((NodePart::Scale, _))))
+            || matches!(self.grab, Some((NodePart::Align(_), _)))
+        {
+            return self.transform_bounds;
+        }
+        let bounds = |contours: &[Contour], selected: &[(usize, usize)]| {
+            if from_curves && !selected.is_empty() {
+                curve_outline_bounds(contours)
+            } else {
+                selection_box(contours, selected)
+            }
+        };
+        let active = bounds(contours, &self.selected);
+        let others = self.selected_other_curves(session);
+        active.into_iter().chain(others.iter().filter_map(|curve| {
+            let live = self.live_other_contours(curve.id);
+            bounds(live.as_deref().unwrap_or(&curve.contours), &curve.indices)
+        })).reduce(union_node_bounds)
+    }
+
+    pub(crate) fn hide_transform_box(&self, session: &Session) -> bool {
+        self.live.is_some() && session.tool_options.flag(
+            "tool.node", dtool_core::context_toolbar::NODE_HIDE_TRANSFORM_BOX,
+        ).unwrap_or(false)
+    }
+
+    fn node_signature(&self) -> Vec<(ObjectId, usize, PointId)> {
+        let mut points: Vec<_> = self.other_selected.iter().flat_map(|(&id, points)| {
+            points.iter().map(move |&(c, point)| (id, c, point))
+        }).collect();
+        if let Some(id) = self.target {
+            points.extend(self.selected.iter().filter_map(|&(c, i)| {
+                Some((id, c, *self.point_order.get(c)?.get(i)?))
+            }));
+        }
+        points.sort_unstable_by_key(|(id, c, point)| (id.0, *c, point.0));
+        points
+    }
+
+    pub(crate) fn has_custom_origin(&self) -> bool { self.custom_origin.is_some() }
+
+    pub(crate) fn reset_origin(&mut self) { self.custom_origin = None; }
+
+    pub(crate) fn transform_origin(&self, session: &Session, bounds: [f32; 4]) -> Option<[f32; 2]> {
+        (!self.separate_transforms(session) && session.tool_options.flag("tool.node", "node.show_transform_origin").unwrap_or(false))
+            .then(|| self.origin_preview.or(self.gesture_origin)
+                .or_else(|| self.custom_origin.as_ref().map(|origin| origin.point))
+                .unwrap_or_else(|| self.transform_display_point(session, node_box_center(bounds))))
+    }
+
+    pub(crate) fn transform_display_point(&self, session: &Session, point: [f32; 2]) -> [f32; 2] {
+        match self.group_transform {
+            Some(transform @ (NodeGroupTransform::Rotate { .. } | NodeGroupTransform::Shear { .. })) => p32(transform.map(p64(point))),
+            Some(translation @ NodeGroupTransform::Translate(_))
+                if matches!(self.grab, Some((NodePart::Align(_), _))) =>
+                p32(translation.map(p64(point))),
+            Some(scale @ NodeGroupTransform::Scale { .. })
+                if !self.individual_origins.is_empty()
+                    || session.tool_options.flag("tool.node", dtool_core::context_toolbar::NODE_BOX_FROM_CURVES).unwrap_or(false) =>
+                p32(scale.map(p64(point))),
+            _ => point,
+        }
+    }
+
+    pub(crate) fn alignment_handles(
+        session: &Session, bounds: [f32; 4], radius: f32,
+    ) -> impl Iterator<Item = (NodeAlignHandle, [f32; 2])> {
+        let enabled = session.tool_options.flag(
+            "tool.node", dtool_core::context_toolbar::NODE_SHOW_ALIGNMENT_HANDLES,
+        ).unwrap_or(false);
+        (0..2).flat_map(|axis| (0..3).map(move |edge| NodeAlignHandle { axis, edge }))
+            .filter_map(move |handle| {
+                let axis = handle.axis;
+                if !enabled || (handle.edge != 1 && bounds[axis + 2] - bounds[axis] <= radius * 4.0) {
+                    return None;
+                }
+                let offset = radius * 2.0;
+                let coordinate = handle.coordinate(bounds);
+                let point = if axis == 0 { [coordinate, bounds[3] + offset] } else { [bounds[0] - offset, coordinate] };
+                Some((handle, point))
+            })
+    }
+
+    fn hit_transform_handle(
+        &self, session: &Session, contours: &[Contour], point: [f32; 2], radius: f32,
+    ) -> Option<(NodePart, [f32; 4])> {
+        let bounds = self.transform_box(session, contours)?;
+        let offset = radius * (crate::canvas_input::ROTATE_PX / crate::canvas_input::HANDLE_PX);
+        [
+            (NodePart::Origin, self.transform_origin(session, bounds)),
+            (NodePart::Rotate, Some(node_rotate_handle(bounds, offset))),
+            (NodePart::Scale, Some([bounds[2], bounds[3]])),
+        ].into_iter()
+            .chain(node_shear_handles(bounds, radius).map(|(side, point)| (NodePart::Shear(side), Some(point))))
+            .chain(Self::alignment_handles(session, bounds, radius).map(|(handle, point)| (NodePart::Align(handle), Some(point))))
+            .find_map(|(part, handle)| {
+            handle.filter(|&p| distance(p, point) <= radius).map(|_| (part, bounds))
+        })
+    }
+
+    pub(crate) fn transform_handle(&self, session: &Session, point: [f32; 2], radius: f32) -> Option<NodePart> {
+        if let Some((part, _)) = self.grab {
+            return Some(part);
+        }
+        if !self.transform_mode { return None; }
+        self.hit_transform_handle(session, &self.contours(session)?, point, radius).map(|(part, _)| part)
+    }
+
+    pub(crate) fn claims_alignment_handle(&self, session: &Session, point: [f32; 2], radius: f32) -> bool {
+        self.context == session.context && matches!(self.transform_handle(session, point, radius), Some(NodePart::Align(_)))
+    }
+
+    pub(crate) fn pointer_part(&self, session: &Session, point: [f32; 2], radius: f32) -> Option<NodePart> {
+        if self.primitive { return None; }
+        if let Some((part, _)) = self.grab { return Some(part); }
+        let contours = self.contours(session);
+        if let Some(contours) = &contours {
+            if self.transform_mode
+                && let Some((part, _)) = self.hit_transform_handle(session, contours, point, radius)
+            {
+                return Some(part);
+            }
+            if let Some(part) = hit_part(contours, &self.selected, point, radius) {
+                return Some(part);
+            }
+        }
+        if let Some((_, part)) = self.hit_other_node(session, point, radius) {
+            return Some(part);
+        }
+        segment_at(contours.as_deref()?, point, radius).map(|(c, i)| NodePart::Segment(c, i))
+    }
+
+    pub(crate) fn dragging_transform_handle(&self) -> bool { self.transform_bounds.is_some() }
+
+    pub(crate) fn snap_transform_handle(&self, session: &Session, pointer: [f32; 2]) -> Option<([f32; 2], Option<[f32; 2]>)> {
+        let bounds = self.transform_bounds?;
+        let (part, start) = self.grab?;
+        if pointer == start || part == NodePart::Rotate
+            || ((part == NodePart::Scale || part.is_shear()) && (self.shift || !self.individual_origins.is_empty()))
+            || (part.is_shear() && self.alt)
+        {
+            return Some((pointer, None));
+        }
+        let exclude: Vec<_> = self.drag_targets().collect();
+        if let NodePart::Align(handle) = part {
+            let axis = handle.axis;
+            if pointer[axis] == start[axis] {
+                return Some((pointer, None));
+            }
+            let mut anchor = node_box_center(bounds);
+            anchor[axis] = handle.coordinate(bounds) + pointer[axis] - start[axis];
+            let snap = crate::canvas_tools::axis_snaps(session, &[anchor], &exclude)[axis];
+            let mut snapped = pointer;
+            if let Some(snap) = snap {
+                snapped[axis] += snap.delta;
+            }
+            return Some((snapped, snap.map(|snap| snap.point)));
+        }
+        if let NodePart::Shear(side) = part {
+            let radius = crate::canvas_input::HANDLE_PX / session.view.zoom.max(1e-4);
+            let axis = side.axis();
+            let (_, mut grip) = node_shear_handles(bounds, radius).find(|(edge, _)| *edge == side)?;
+            grip[axis] += pointer[axis] - start[axis];
+            let (target, mark) = crate::canvas_tools::snap_point(session, grip, &exclude);
+            let mut snapped = pointer;
+            snapped[axis] += target[axis] - grip[axis];
+            return Some((snapped, mark.filter(|_| target[axis] != grip[axis])));
+        }
+        let origin = if part == NodePart::Origin { self.gesture_origin? } else { [bounds[2], bounds[3]] };
+        let corner = [origin[0] + (pointer[0] - start[0]), origin[1] + (pointer[1] - start[1])];
+        let (target, mark) = crate::canvas_tools::snap_point(session, corner, &exclude);
+        Some(([pointer[0] + (target[0] - corner[0]), pointer[1] + (target[1] - corner[1])], mark))
+    }
+
+    fn focus_node_curve(&mut self, session: &Session, point: [f32; 2], radius: f32) {
+        if session.selection.ids.len() < 2 || self.grab.is_some() {
+            return;
+        }
+        if self.contours(session).is_some_and(|contours| {
+            hit_part(&contours, &self.selected, point, radius).is_some()
+        }) {
+            return;
+        }
+        if let Some((id, _)) = self.hit_other_node(session, point, radius) {
+            self.sync_target(session, Some(id));
+        }
+    }
+
+    fn hit_other_node(&self, session: &Session, point: [f32; 2], radius: f32) -> Option<(ObjectId, NodePart)> {
+        if session.selection.ids.len() < 2 { return None; }
+        self.other_curves(session).find_map(|(id, contours)| {
+            hit_part(&contours, &self.other_indices(id, &contours), point, radius).map(|part| (id, part))
+        })
     }
 
     fn reconcile_point_order(&mut self, contours: &[Contour]) {
@@ -991,12 +1534,37 @@ impl NodeEdit {
         })
     }
 
+    pub(crate) fn live_other_contours(&self, id: ObjectId) -> Option<Vec<Contour>> {
+        let transform = self.group_transform?.with_origin(self.individual_origins.get(&id).copied());
+        self.other_drags.iter().find(|curve| curve.id == id).map(|curve| curve.transformed(transform))
+    }
+
+    pub(crate) fn live_curve_overrides(&self) -> Option<Vec<(ObjectId, Vec<Contour>)>> {
+        let mut curves = vec![(self.target?, self.live_edit_contours()?.into_owned())];
+        if let Some(transform) = self.group_transform {
+            curves.extend(self.other_drags.iter().map(|curve| {
+                let mut contours = curve.transformed(transform.with_origin(self.individual_origins.get(&curve.id).copied()));
+                if curve.matrix != IDENTITY {
+                    map_contours(&mut contours, curve.matrix);
+                }
+                (curve.id, contours)
+            }));
+        }
+        Some(curves)
+    }
+
+    pub(crate) fn drag_targets(&self) -> impl Iterator<Item = ObjectId> + '_ {
+        self.target.into_iter().chain(self.other_drags.iter().map(|curve| curve.id))
+    }
+
     pub fn select_at(&mut self, session: &Session, point: [f32; 2], radius: f32) -> bool {
         self.sync(session);
+        self.focus_node_curve(session, point, radius);
         let Some((contours, _)) = self.target.and_then(|id| node_contours(session, id)) else { return false };
         match hit_part(&contours, &[], point, radius) {
             Some(NodePart::Anchor(c, i)) => {
                 if !self.selected.contains(&(c, i)) {
+                    self.other_selected.clear();
                     self.selected = vec![(c, i)];
                 }
                 true
@@ -1005,11 +1573,31 @@ impl NodeEdit {
         }
     }
 
-    pub fn break_command(&self, session: &Session) -> Option<Command> {
+    pub(crate) fn split_after_node_command(&self, session: &Session) -> Option<Command> {
+        if self.has_cross_selection() { return None; }
         let id = self.target?;
-        let [(0, i)] = self.selected.as_slice() else { return None };
+        let [(subpath, index)] = self.selected.as_slice() else { return None };
+        let object = session.document.get_object(id)?;
+        if object.locked || invert_matrix(&object_matrix(object)).is_none() { return None; }
+        let contour = object.curve()?.contours().nth(*subpath)?;
+        let from = contour.points.get(*index)?;
+        let to = contour.points.get(index + 1).or_else(|| {
+            (contour.closed && contour.points.len() > 1).then(|| &contour.points[0])
+        })?;
+        Some(Command::with_params(PATH_POINT_ADD, json!({
+            "id": id.0,
+            "subpath": subpath,
+            "segment": { "from_id": from.id.0, "to_id": to.id.0 },
+            "preserve_transform": true,
+        })))
+    }
+
+    pub fn break_command(&self, session: &Session) -> Option<Command> {
+        if self.has_cross_selection() { return None; }
+        let id = self.target?;
+        let [(c, i)] = self.selected.as_slice() else { return None };
         let contours = editable(session, id)?;
-        let contour = contours.first()?;
+        let contour = contours.get(*c)?;
         let node = contour.points.get(*i)?;
         if !contour.closed && (*i == 0 || *i + 1 == contour.points.len()) {
             return None;
@@ -1018,6 +1606,7 @@ impl NodeEdit {
     }
 
     pub(crate) fn reverse_command(&self, session: &Session) -> Option<Command> {
+        if self.has_cross_selection() { return None; }
         let command = self.preserve_edit_transform(Command::with_params(
             dtool_core::commands::path_points::REVERSE,
             json!({"id": self.target?.0, "subpath": self.selected.first().map_or(0, |(index, _)| *index)}),
@@ -1025,19 +1614,62 @@ impl NodeEdit {
         session.can_execute(&command).then_some(command)
     }
 
+    pub(crate) fn smooth_command(&self, session: &Session) -> Option<Command> {
+        if self.has_cross_selection() { return None; }
+        let id = self.target?;
+        let object = session.document.get_object(id)?;
+        if object.locked || self.primitive || invert_matrix(&object_matrix(object)).is_none() { return None; }
+        let curve = object.curve()?;
+        let mut subpaths: Vec<_> = self.selected.iter().map(|&(subpath, _)| subpath).collect();
+        if subpaths.is_empty() { subpaths.push(0); }
+        subpaths.sort_unstable();
+        subpaths.dedup();
+        let mut commands: Vec<_> = subpaths.into_iter().filter(|&subpath| {
+            curve.contours().nth(subpath).is_some_and(|contour| contour.points.len() >= 3)
+        }).map(|subpath| Command::with_params(dtool_core::commands::path_points::SMOOTH, json!({
+            "id": id.0, "subpath": subpath, "preserve_transform": true,
+        }))).collect();
+        match commands.len() {
+            0 => None,
+            1 => commands.pop(),
+            _ => Some(Command::with_params("edit.batch", json!({ "commands": commands }))),
+        }
+    }
+
     pub fn claims_delete(&self) -> bool {
-        self.target.is_some() && !self.primitive && !self.selected.is_empty()
+        self.target.is_some() && !self.primitive && self.selected_count() != 0
     }
 
     pub fn press(&mut self, session: &Session, point: [f32; 2], shift: bool, alt: bool, radius: f32) -> NodePress {
         self.sync(session);
-        let (Some(id), Some((contours, _))) = (self.target, self.target.and_then(|id| node_contours(session, id))) else { return NodePress::Miss };
-        if self.transform_mode && scale_handle(&contours, &self.selected).is_some_and(|h| distance(h, point) <= radius) {
-            self.grab = Some((NodePart::Scale, point));
+        if self.transform_mode
+            && let Some(contours) = self.contours(session)
+            && let Some((part, bounds)) = self.hit_transform_handle(session, &contours, point, radius)
+        {
+            let separate = part.allows_separate_transform() && self.separate_transforms(session);
+            self.gesture_origin = if part.is_shear() {
+                (!separate).then(|| {
+                    self.transform_origin(session, bounds).filter(|_| self.has_custom_origin())
+                }).flatten()
+            } else if matches!(part, NodePart::Origin | NodePart::Rotate) {
+                Some(self.transform_origin(session, bounds).unwrap_or_else(|| node_box_center(bounds)))
+            } else {
+                None
+            };
+            self.grab = Some((part, point));
             self.base = Some(contours);
             self.live = None;
+            self.transform_bounds = Some(bounds);
+            if part != NodePart::Origin {
+                self.other_drags = self.selected_other_curves(session);
+            }
+            if separate {
+                self.individual_origins = self.curve_origins(self.base.as_deref().unwrap_or_default(), &self.other_drags);
+            }
             return NodePress::Grab;
         }
+        self.focus_node_curve(session, point, radius);
+        let (Some(id), Some((contours, _))) = (self.target, self.target.and_then(|id| node_contours(session, id))) else { return NodePress::Miss };
         match hit_part(&contours, &self.selected, point, radius) {
             Some(NodePart::Anchor(..)) if alt && self.primitive => NodePress::Grab,
             Some(NodePart::Anchor(c, i)) if alt => NodePress::Run(self.preserve_edit_transform(convert_command(id, c, &contours[c].points[i]))),
@@ -1050,8 +1682,10 @@ impl NodeEdit {
                         }
                         self.selected.push((c, i));
                     } else if !self.selected.contains(&(c, i)) {
+                        self.other_selected.clear();
                         self.selected = vec![(c, i)];
                     }
+                    self.other_drags = self.selected_other_curves(session);
                 }
                 self.grab = Some((part, point));
                 self.base = Some(contours);
@@ -1065,9 +1699,6 @@ impl NodeEdit {
                     self.live = None;
                     return NodePress::Grab;
                 }
-                if !shift {
-                    self.selected.clear();
-                }
                 NodePress::Miss
             }
         }
@@ -1076,16 +1707,70 @@ impl NodeEdit {
     pub fn select_all(&mut self, session: &Session) -> bool {
         self.sync(session);
         let Some((contours, _)) = self.target.and_then(|id| node_contours(session, id)) else { return false };
+        self.other_selected.clear();
         self.selected = contours.iter().enumerate().flat_map(|(c, contour)| (0..contour.points.len()).map(move |i| (c, i))).collect();
+        self.set_other_selection(session, |_| true);
         true
     }
 
+    pub(crate) fn select_rect(
+        &mut self, session: &Session, rect: egui::Rect, add: bool, project: impl Fn([f32; 2]) -> egui::Pos2,
+    ) {
+        let Some(contours) = self.target.and_then(|id| editable(session, id)) else { return; };
+        if !add {
+            self.clear_selection();
+        }
+        for (c, contour) in contours.iter().enumerate() {
+            for (i, node) in contour.points.iter().enumerate() {
+                if rect.contains(project(p32(node.pos))) && !self.selected.contains(&(c, i)) {
+                    self.selected.push((c, i));
+                }
+            }
+        }
+        self.set_other_selection(session, |point| rect.contains(project(point)));
+    }
+
+    pub(crate) fn align_command(&self, session: &Session, axis: usize, fraction: f64) -> Option<Command> {
+        let id = self.target?;
+        let primary = CurveNodeDrag {
+            id,
+            contours: editable(session, id)?,
+            indices: self.selected.clone(),
+            matrix: self.display_to_edit.unwrap_or(IDENTITY),
+        };
+        let curves = std::iter::once(primary).chain(self.selected_other_curves(session)).collect::<Vec<_>>();
+        let (mut min, mut max) = (f64::INFINITY, f64::NEG_INFINITY);
+        for curve in &curves {
+            for &(c, i) in &curve.indices {
+                let coordinate = curve.contours.get(c)?.points.get(i)?.pos[axis];
+                min = min.min(coordinate);
+                max = max.max(coordinate);
+            }
+        }
+        if min >= max { return None; }
+        let coordinate = min + (max - min) * fraction;
+        batch_curves(curves.into_iter().filter_map(|mut curve| {
+            let mut changed = false;
+            for &(c, i) in &curve.indices {
+                let node = &mut curve.contours[c].points[i];
+                let offset = coordinate - node.pos[axis];
+                changed |= offset != 0.0;
+                node.pos[axis] = coordinate;
+                for handle in [&mut node.handle_in, &mut node.handle_out].into_iter().flatten() {
+                    handle[axis] += offset;
+                }
+            }
+            changed.then(|| curve.command())
+        }).collect())
+    }
+
     pub fn close_command(&self, session: &Session) -> Option<Command> {
+        if self.has_cross_selection() { return None; }
         let id = self.target?;
         let contours = editable(session, id)?;
         let c = self.selected.first().map_or(0, |(c, _)| *c);
         let contour = contours.get(c)?;
-        (!contour.closed && contour.points.len() >= 3).then(|| {
+        (!contour.closed && contour.points.len() >= 2).then(|| {
             self.preserve_edit_transform(Command::with_params(PATH_CLOSE, json!({ "target": format!("node:{}", id.0), "subpath": c })))
         })
     }
@@ -1093,8 +1778,166 @@ impl NodeEdit {
     pub fn moving_points(&self, point: [f32; 2]) -> Option<Vec<[f32; 2]>> {
         let (Some((NodePart::Anchor(..), start)), Some(base)) = (self.grab, self.base.as_ref()) else { return None };
         let d = [point[0] - start[0], point[1] - start[1]];
-        let points: Vec<[f32; 2]> = self.selected.iter().filter_map(|&(c, i)| base.get(c)?.points.get(i).map(|n| p32(n.pos))).map(|p| [p[0] + d[0], p[1] + d[1]]).collect();
+        let points: Vec<[f32; 2]> = std::iter::once((base.as_slice(), self.selected.as_slice()))
+            .chain(self.other_drags.iter().map(|curve| (curve.contours.as_slice(), curve.indices.as_slice())))
+            .flat_map(|(contours, indices)| indices.iter().filter_map(|&(c, i)| contours.get(c)?.points.get(i).map(|n| p32(n.pos))))
+            .map(|p| [p[0] + d[0], p[1] + d[1]]).collect();
         (!points.is_empty()).then_some(points)
+    }
+
+    pub(crate) fn snap_handle(
+        &mut self, session: &Session, pointer: [f32; 2], tolerance: f32,
+    ) -> Option<([f32; 2], Option<[f32; 2]>)> {
+        self.construction_snap = None;
+        let (part, start) = self.grab?;
+        let (c, i, incoming) = match part {
+            NodePart::In(c, i) => (c, i, true),
+            NodePart::Out(c, i) => (c, i, false),
+            _ => return None,
+        };
+        if pointer == start || self.shift || self.alt {
+            return Some((pointer, None));
+        }
+        let contour = self.base.as_ref()?.get(c)?;
+        let anchor = contour.points.get(i)?;
+        let origin = if incoming { anchor.handle_in? } else { anchor.handle_out? };
+        let origin = p32(origin);
+        let tip = [origin[0] + (pointer[0] - start[0]), origin[1] + (pointer[1] - start[1])];
+        let construction = session.tool_options.flag("tool.node", "node.snap_handle_construction").unwrap_or(false);
+        if construction
+            && let Some(neighbor) = handle_neighbor(contour, i, incoming)
+        {
+            let reference = if incoming { neighbor.handle_out } else { neighbor.handle_in };
+            self.construction_snap = construction_handle_point(
+                p32(anchor.pos), p32(neighbor.pos), reference.map(p32), tip, tolerance,
+            );
+        }
+        let global = session.tool_options.flag("tool.node", "node.snap_handle_global").unwrap_or(true);
+        let (position, mark) = if let Some(snap) = self.construction_snap {
+            (snap.moving[1], None)
+        } else if global {
+            crate::canvas_tools::snap_point(session, tip, self.target.as_slice())
+        } else {
+            (tip, None)
+        };
+        Some(([pointer[0] + (position[0] - tip[0]), pointer[1] + (position[1] - tip[1])], mark))
+    }
+
+    pub(crate) fn snap_anchors(
+        &self, session: &Session, pointer: [f32; 2], tolerance: f32,
+        align: bool, geometry: bool, all_selected: bool,
+    ) -> Option<NodeAnchorSnap> {
+        let (NodePart::Anchor(c, i), start) = self.grab? else { return None; };
+        let base = self.base.as_ref()?;
+        let delta = [pointer[0] - start[0], pointer[1] - start[1]];
+        if delta == [0.0, 0.0] { return None; }
+        let grabbed = (c, i);
+        let selected: std::collections::HashSet<_> = self.selected.iter().copied().collect();
+        if !selected.contains(&grabbed) { return None; }
+        let moving = if all_selected { self.selected.as_slice() } else { std::slice::from_ref(&grabbed) };
+        let moving: Vec<_> = if all_selected {
+            self.moving_points(pointer)?
+        } else {
+            moving.iter().filter_map(|&(c, i)| base.get(c)?.points.get(i)).map(|node| {
+                let pos = p32(node.pos);
+                [pos[0] + delta[0], pos[1] + delta[1]]
+            }).collect()
+        };
+        let others: Vec<_> = self.other_curves(session).collect();
+        let mut stationary = Vec::new();
+        let mut segments = Vec::new();
+        for (c, contour) in base.iter().enumerate() {
+            for (i, node) in contour.points.iter().enumerate() {
+                if !selected.contains(&(c, i)) {
+                    stationary.push(p32(node.pos));
+                }
+            }
+            if geometry {
+                // Segments attached to a dragged anchor change during the gesture.
+                segments.extend((0..segment_count(contour)).filter(|&i| {
+                    !selected.contains(&(c, i)) && !selected.contains(&(c, (i + 1) % contour.points.len()))
+                }).map(|i| (contour, i)));
+            }
+        }
+        for (id, contours) in &others {
+            for (c, contour) in contours.iter().enumerate() {
+                let is_moving = |i: usize| self.other_node_selected(*id, c, contour.points[i].id);
+                stationary.extend(contour.points.iter().enumerate().filter_map(|(i, node)| {
+                    (!is_moving(i)).then_some(p32(node.pos))
+                }));
+                if geometry {
+                    segments.extend((0..segment_count(contour)).filter(|&i| {
+                        !is_moving(i) && !is_moving((i + 1) % contour.points.len())
+                    }).map(|i| (contour, i)));
+                }
+            }
+        }
+        if align && !geometry {
+            // Geometry mode compares nearby nodes and segments together below.
+            // With alignment alone, keep a nearby node as a single two-axis target.
+            stationary.sort_unstable_by(|a, b| a[0].total_cmp(&b[0]));
+            let hit = moving.iter().flat_map(|&source| {
+                let start = stationary.partition_point(|p| p[0] < source[0] - tolerance);
+                stationary[start..].iter().copied().take_while(move |p| p[0] <= source[0] + tolerance)
+                    .map(move |target| (distance(source, target), source, target))
+            }).filter(|(d, _, _)| *d <= tolerance).min_by(|a, b| a.0.total_cmp(&b.0));
+            if let Some((_, source, target)) = hit {
+                return Some(NodeAnchorSnap::Point {
+                    offset: [target[0] - source[0], target[1] - source[1]], target,
+                });
+            }
+        }
+        if geometry {
+            let mut radius = tolerance;
+            let mut best = None;
+            for &source in &moving {
+                for &target in &stationary {
+                    let d = distance(source, target);
+                    if d <= radius && (best.is_none() || d < radius) {
+                        radius = d;
+                        best = Some((source, target));
+                    }
+                }
+                for &(contour, index) in &segments {
+                    if let Some(target) = segment_point_within(contour, index, p64(source), f64::from(radius)) {
+                        let target = p32(target);
+                        let d = distance(source, target);
+                        if best.is_none() || d < radius {
+                            radius = d;
+                            best = Some((source, target));
+                        }
+                    }
+                }
+            }
+            if let Some((source, target)) = best {
+                // Keep both coordinates together so axis snapping cannot pull the node off the path.
+                return Some(NodeAnchorSnap::Point {
+                    offset: [target[0] - source[0], target[1] - source[1]], target,
+                });
+            }
+        }
+        if !align {
+            return None;
+        }
+        let mut best: [Option<(f32, [f32; 2])>; 2] = [None; 2];
+        for axis in 0..2 {
+            if axis == 1 {
+                stationary.sort_unstable_by(|a, b| a[axis].total_cmp(&b[axis]));
+            }
+            for source in &moving {
+                let next = stationary.partition_point(|p| p[axis] < source[axis]);
+                for target in stationary[next.saturating_sub(1)..next.saturating_add(1).min(stationary.len())].iter().copied() {
+                    let offset = target[axis] - source[axis];
+                    if offset.abs() <= tolerance && best[axis].is_none_or(|(previous, _)| offset.abs() < previous.abs()) {
+                        best[axis] = Some((offset, target));
+                    }
+                }
+            }
+        }
+        best[0].or(best[1])?;
+        Some(NodeAnchorSnap::Axes(std::array::from_fn(|axis| {
+            best[axis].map(|(offset, target)| (offset, target[axis]))
+        })))
     }
 
     pub fn insert_at(&self, session: &Session, point: [f32; 2], radius: f32, tolerance: f64) -> Option<Command> {
@@ -1110,6 +1953,7 @@ impl NodeEdit {
     }
 
     pub(crate) fn double_click(&mut self, session: &Session, point: [f32; 2], radius: f32, tolerance: f64) -> Option<Command> {
+        self.focus_node_curve(session, point, radius);
         let id = self.target?;
         let contours = editable(session, id)?;
         if let Some(NodePart::Anchor(c, i)) = hit_part(&contours, &[], point, radius) {
@@ -1122,66 +1966,242 @@ impl NodeEdit {
         self.insert_at(session, point, radius, tolerance)
     }
 
+    fn selected_nodes<'a>(&self, session: &'a Session) -> Vec<(ObjectId, usize, &'a PathPoint)> {
+        let mut nodes = Vec::new();
+        for id in selected_curves(session) {
+            let Some(curve) = session.document.get_object(id).and_then(|object| object.curve()) else { continue; };
+            if Some(id) == self.target {
+                nodes.extend(self.selected.iter().filter_map(|&(c, i)| {
+                    curve.contours().nth(c)?.points.get(i).map(|node| (id, c, node))
+                }));
+            } else if let Some(selected) = self.other_selected.get(&id) {
+                nodes.extend(curve.contours().enumerate().flat_map(|(c, contour)| {
+                    contour.points.iter().filter(move |node| selected.contains(&(c, node.id)))
+                        .map(move |node| (id, c, node))
+                }));
+            }
+        }
+        nodes
+    }
+
+    pub(crate) fn selected_node_kinds(&self, session: &Session) -> Vec<NodeKind> {
+        self.selected_nodes(session).into_iter().map(|(_, _, node)| node.kind).collect()
+    }
+
     pub(crate) fn convert_selected(&self, session: &Session, kind: NodeKind) -> Option<Command> {
-        let id = self.target?;
-        let contours = editable(session, id)?;
-        let mut groups = std::collections::BTreeMap::<usize, Vec<u64>>::new();
-        for &(c, i) in &self.selected {
-            let node = contours.get(c)?.points.get(i)?;
+        let mut groups = std::collections::BTreeMap::<(u64, usize), Vec<u64>>::new();
+        for (id, c, node) in self.selected_nodes(session) {
             if node.kind != kind {
-                groups.entry(c).or_default().push(node.id.0);
+                groups.entry((id.0, c)).or_default().push(node.id.0);
             }
         }
         let kind = match kind { NodeKind::Sharp => "sharp", NodeKind::Smooth => "smooth", NodeKind::Smart => "smart" };
-        let mut commands: Vec<_> = groups.into_iter().map(|(contour, nodes)| {
-            self.preserve_edit_transform(Command::with_params(CURVE_NODES_CONVERT,
-                json!({ "id": id.0, "contour": contour, "nodes": nodes, "kind": kind })))
-        }).collect();
-        match commands.len() {
-            0 => None,
-            1 => commands.pop(),
-            _ => Some(Command::with_params("edit.batch", json!({ "commands": commands }))),
-        }
+        batch_curves(groups.into_iter().map(|((id, contour), nodes)| {
+            Command::with_params(CURVE_NODES_CONVERT, json!({
+                "id": id, "contour": contour, "nodes": nodes, "kind": kind, "preserve_transform": true,
+            }))
+        }).collect())
     }
 
     pub fn delete_commands(&mut self, session: &Session) -> Vec<Command> {
         let (Some(id), Some(contours)) = (self.target, self.target.and_then(|id| editable(session, id))) else { return Vec::new() };
-        let mut by_contour: Vec<(usize, Vec<u64>)> = Vec::new();
-        for &(c, i) in &self.selected {
-            let Some(node) = contours.get(c).and_then(|contour| contour.points.get(i)) else { continue };
-            match by_contour.iter_mut().find(|(k, _)| *k == c) {
-                Some((_, ids)) => ids.push(node.id.0),
-                None => by_contour.push((c, vec![node.id.0])),
+        let primary = CurveNodeDrag { id, contours, indices: self.selected.clone(), matrix: IDENTITY };
+        let others = self.selected_other_curves(session);
+        let across_curves = !others.is_empty();
+        let commands = std::iter::once(primary).chain(others).flat_map(|curve| {
+            let mut by_contour = std::collections::BTreeMap::<usize, Vec<u64>>::new();
+            for (c, i) in curve.indices {
+                if let Some(node) = curve.contours.get(c).and_then(|contour| contour.points.get(i)) {
+                    by_contour.entry(c).or_default().push(node.id.0);
+                }
             }
-        }
-        by_contour.sort_by(|a, b| b.0.cmp(&a.0));
-        self.selected.clear();
-        by_contour.into_iter().map(|(c, nodes)| {
-            self.preserve_edit_transform(Command::with_params(CURVE_NODES_DELETE, json!({ "id": id.0, "contour": c, "nodes": nodes })))
-        }).collect()
+            by_contour.into_iter().rev().map(move |(c, nodes)| {
+                Command::with_params(CURVE_NODES_DELETE, json!({
+                    "id": curve.id.0, "contour": c, "nodes": nodes, "preserve_transform": true,
+                }))
+            })
+        }).collect();
+        self.clear_selection();
+        if across_curves { batch_curves(commands).into_iter().collect() } else { commands }
     }
 
     pub fn drag(&mut self, point: [f32; 2]) {
         let (Some((part, start)), Some(base)) = (self.grab, self.base.as_ref()) else { return };
         let delta = [point[0] - start[0], point[1] - start[1]];
-        self.live = (delta != [0.0, 0.0]).then(|| drag_part(base, part, &self.selected, delta, self.shift, self.alt));
+        self.group_transform = None;
+        if part == NodePart::Origin {
+            self.origin_preview = self.gesture_origin.map(|origin| {
+                [origin[0] + delta[0], origin[1] + delta[1]]
+            });
+            return;
+        }
+        if delta == [0.0, 0.0] {
+            self.live = None;
+        } else if let Some(bounds) = self.transform_bounds {
+            let transform = if part == NodePart::Rotate {
+                let origin = p64(self.gesture_origin.unwrap_or_else(|| node_box_center(bounds)));
+                let a = [f64::from(start[0]) - origin[0], f64::from(start[1]) - origin[1]];
+                let b = [f64::from(point[0]) - origin[0], f64::from(point[1]) - origin[1]];
+                let cross = a[0] * b[1] - a[1] * b[0];
+                let dot = a[0] * b[0] + a[1] * b[1];
+                let mut angle = cross.atan2(dot);
+                if self.shift {
+                    let step = 15.0_f64.to_radians();
+                    angle = (angle / step).round() * step;
+                }
+                let (sin, cos) = angle.sin_cos();
+                NodeGroupTransform::Rotate { origin, sin, cos }
+            } else if let NodePart::Align(handle) = part {
+                let mut translation = [0.0; 2];
+                translation[handle.axis] = f64::from(delta[handle.axis]);
+                NodeGroupTransform::Translate(translation)
+            } else if let NodePart::Shear(side) = part {
+                let axis = side.axis();
+                let (grip, opposite) = side.edges(bounds);
+                let origin = self.gesture_origin.map(|origin| origin[1 - axis])
+                    .filter(|origin| (grip - origin).abs() > 1e-6)
+                    .unwrap_or_else(|| if self.ctrl { grip.midpoint(opposite) } else { opposite });
+                let mut angle = (f64::from(delta[axis]) / f64::from(grip - origin)).atan().to_degrees();
+                if self.shift {
+                    let step = f64::from(crate::canvas_tools::ROTATE_STEP_DEG);
+                    angle = (angle / step).round() * step;
+                }
+                NodeGroupTransform::Shear { axis, origin: f64::from(origin), factor: angle.clamp(-89.0, 89.0).to_radians().tan() }
+            } else {
+                NodeGroupTransform::scale(bounds, p64(delta), self.shift)
+            };
+            let mut contours = base.clone();
+            let origin = self.target.and_then(|id| self.individual_origins.get(&id).copied());
+            transform.with_origin(origin).apply(&mut contours, &self.selected);
+            self.live = Some(contours);
+            self.group_transform = Some(transform);
+        } else {
+            self.live = Some(drag_part(base, part, &self.selected, delta, self.shift, self.alt));
+            if matches!(part, NodePart::Anchor(..)) && !self.other_drags.is_empty() {
+                self.group_transform = Some(NodeGroupTransform::Translate(p64(delta)));
+            }
+        }
     }
 
     pub fn release(&mut self) -> Option<Command> {
         self.grab = None;
-        self.base = None;
+        self.construction_snap = None;
+        let base = self.base.take();
+        self.transform_bounds = None;
+        let origin = self.gesture_origin.take();
+        if let Some(point) = self.origin_preview.take().filter(|point| Some(*point) != origin) {
+            self.custom_origin = Some(NodeOrigin { point, selection: self.node_signature() });
+        }
+        let others = std::mem::take(&mut self.other_drags);
+        let individual_origins = std::mem::take(&mut self.individual_origins);
+        let transform = self.group_transform.take();
         let mut contours = self.live.take()?;
-        self.unproject_contours(&mut contours);
         let id = self.target?;
-        let name = if self.primitive { SHAPE_CONVERT } else { CURVE_NODES_SET };
-        Some(self.preserve_edit_transform(Command::with_params(name, json!({ "id": id.0, "contours": contours }))))
+        let mut commands = Vec::new();
+        if base.as_ref() != Some(&contours) {
+            self.unproject_contours(&mut contours);
+            let name = if self.primitive { SHAPE_CONVERT } else { CURVE_NODES_SET };
+            let mut command = self.preserve_edit_transform(Command::with_params(name, json!({ "id": id.0, "contours": contours })));
+            if !others.is_empty() {
+                command.params["preserve_transform"] = json!(true);
+            }
+            commands.push(command);
+        }
+        if let Some(transform) = transform {
+            commands.extend(others.into_iter().filter_map(|mut curve| {
+                let contours = curve.transformed(transform.with_origin(individual_origins.get(&curve.id).copied()));
+                if contours == curve.contours { return None; }
+                curve.contours = contours;
+                Some(curve.command())
+            }));
+        }
+        batch_curves(commands)
     }
 
     pub fn cancel(&mut self) {
         self.grab = None;
+        self.construction_snap = None;
         self.base = None;
         self.live = None;
+        self.marquee = None;
+        self.other_drags.clear();
+        self.individual_origins.clear();
+        self.group_transform = None;
+        self.transform_bounds = None;
+        self.gesture_origin = None;
+        self.origin_preview = None;
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ConstructionSnap {
+    pub(crate) moving: [[f32; 2]; 2],
+    pub(crate) reference: [[f32; 2]; 2],
+    pub(crate) triangle: Option<[[f32; 2]; 3]>,
+}
+
+fn handle_neighbor(contour: &Contour, index: usize, incoming: bool) -> Option<&PathPoint> {
+    let len = contour.points.len();
+    if len < 2 { return None; }
+    let neighbor_index = match (incoming, index, contour.closed) {
+        (true, 0, true) => len - 1,
+        (true, 0, false) => return None,
+        (true, i, _) => i - 1,
+        (false, i, true) => (i + 1) % len,
+        (false, i, false) => i + 1,
+    };
+    contour.points.get(neighbor_index)
+}
+
+fn construction_handle_point(
+    anchor: [f32; 2], neighbor: [f32; 2], neighbor_tip: Option<[f32; 2]>, tip: [f32; 2], tolerance: f32,
+) -> Option<ConstructionSnap> {
+    let chord_reference = [anchor, neighbor];
+    let tangent_reference = [neighbor, neighbor_tip.unwrap_or(neighbor)];
+    let anchor = egui::Vec2::from(anchor);
+    let neighbor_pos = egui::Vec2::from(neighbor);
+    let chord = (neighbor_pos - anchor).normalized();
+    let tangent = neighbor_tip.map(|tip| (egui::Vec2::from(tip) - neighbor_pos).normalized())
+        .unwrap_or_default();
+    let reflected = 2.0 * tangent.dot(chord) * chord - tangent;
+    let tip = egui::Vec2::from(tip);
+    let delta = tip - anchor;
+    let nearest = [(chord, chord_reference), (chord.rot90(), chord_reference),
+        (tangent, tangent_reference), (tangent.rot90(), tangent_reference), (reflected, tangent_reference)].into_iter()
+        .filter(|(direction, _)| direction.length_sq() > 0.0)
+        .map(|(direction, reference)| {
+            let position = anchor + delta.dot(direction) * direction;
+            ((position - tip).length_sq(), ConstructionSnap {
+                moving: [anchor.into(), position.into()], reference, triangle: None,
+            })
+        })
+        .filter(|(distance, _)| *distance <= tolerance * tolerance)
+        .min_by(|a, b| a.0.total_cmp(&b.0));
+
+    // The two nodes are the ends of the hypotenuse. Choose the right-angle
+    // vertex on the side towards the adjacent node's facing control handle.
+    let normal = chord.rot90();
+    let side = tangent.dot(normal).signum();
+    let half_chord = (neighbor_pos - anchor) * 0.5;
+    let corner = anchor + half_chord + normal * side * half_chord.length();
+    let adjacent_leg = corner - neighbor_pos;
+    let moving_leg = (corner - anchor).normalized();
+    let length = delta.dot(moving_leg);
+    let snapped = anchor + moving_leg * length;
+    let distance = (snapped - tip).length();
+    let line_error = adjacent_leg.dot(tangent.rot90()).abs();
+    if adjacent_leg.dot(tangent) > 0.0 && length > 0.0
+        && line_error <= (tolerance * 0.25).min(adjacent_leg.length() * 0.01)
+        && distance <= tolerance
+        && nearest.is_none_or(|(other, _)| distance <= other.sqrt() + tolerance * 0.1)
+    {
+        return Some(ConstructionSnap {
+            moving: [anchor.into(), snapped.into()],
+            reference: chord_reference,
+            triangle: Some([anchor.into(), corner.into(), neighbor]),
+        });
+    }
+    nearest.map(|(_, position)| position)
 }
 
 #[cfg(test)]

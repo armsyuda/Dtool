@@ -736,7 +736,7 @@ mod k09_contracts {
         let mut session = Session::new(Document::new([400.0, 300.0], Units::Px, 72.0, 1));
         let id = session.document.create_object(Object { pos: [0.0, 0.0], size: [4.0, 4.0], ..Object::default() });
         session.document.pixel_layers.insert(id, PixelLayer::from_rgba(4, 4, &[255u8; 64]));
-        session.document.layer_masks.push(LayerMask { object: id, coverage: PixelSelection::from_coverage(4, 4, vec![200; 16]) });
+        session.document.layer_masks.push(LayerMask::new(id, PixelSelection::from_coverage(4, 4, vec![200; 16])));
         paint_region(&mut session, id, [1, 1, 1, 1], &[1, 2, 3, 4]).unwrap();
         let painted = session.document.pixel_layers.get(id).unwrap().to_rgba();
         session.run_named("object.delete", json!({ "id": id.0 })).unwrap();

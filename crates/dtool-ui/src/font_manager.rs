@@ -271,9 +271,15 @@ pub fn render_font_manager(
     }
     let mut action = None;
     let mut window_open = true;
+    let viewport = ui.ctx().content_rect();
+    let available = (viewport.size() - egui::vec2(36.0, 64.0)).max(egui::vec2(340.0, 220.0));
+    let initial = egui::vec2(700.0, 392.0).min(available);
     egui::Window::new(text("fontmgr.title"))
-        .min_width(640.0)
-        .min_height(300.0)
+        .collapsible(false)
+        .default_size(initial)
+        .default_pos(viewport.center() - initial * 0.5)
+        .min_size(egui::vec2(490.0, 260.0).min(available))
+        .max_size(available)
         .resizable(true)
         .open(&mut window_open)
         .show(ui.ctx(), |ui| {
@@ -291,89 +297,100 @@ fn render_font_manager_content(
     replace_state: &mut ReplaceFontState,
 ) -> Option<FontManagerAction> {
     let mut action = None;
-    egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
-        egui::Grid::new("font_manager.rows").num_columns(5).striped(true).show(ui, |ui| {
-            for (label, sortable) in [("fontmgr.name", Some(false)), ("fontmgr.style", None),
-                ("fontmgr.status", Some(true)), ("fontmgr.subst", None), ("fontmgr.subst_style", None)] {
-                if let Some(by_status) = sortable {
-                    let active = state.sort_by_status == by_status;
-                    let caption = if active {
-                        format!("{} {}", text(label), if state.sort_descending { "▼" } else { "▲" })
+    dtool_design::dialog_section(ui, |ui| {
+        let table_height = (ui.available_height() - 42.0).max(124.0);
+        let column_width = ((ui.available_width() - 5.0 * ui.spacing().item_spacing.x - 14.0) / 5.0).max(68.0);
+        egui::ScrollArea::vertical().id_salt("font_manager.table")
+            .max_height(table_height).auto_shrink([false, false]).show(ui, |ui| {
+            egui::Grid::new("font_manager.rows").num_columns(5).min_col_width(column_width)
+                .striped(true).show(ui, |ui| {
+                for (label, sortable) in [("fontmgr.name", Some(false)), ("fontmgr.style", None),
+                    ("fontmgr.status", Some(true)), ("fontmgr.subst", None), ("fontmgr.subst_style", None)] {
+                    if let Some(by_status) = sortable {
+                        let active = state.sort_by_status == by_status;
+                        let caption = if active {
+                            format!("{} {}", text(label), if state.sort_descending { "▼" } else { "▲" })
+                        } else {
+                            text(label).to_owned()
+                        };
+                        if dtool_design::frameless_button(ui, caption).clicked() {
+                            state.sort_by_status = by_status;
+                            state.sort_descending = active && !state.sort_descending;
+                        }
                     } else {
-                        text(label).to_owned()
-                    };
-                    if ui.button(caption).clicked() {
-                        state.sort_by_status = by_status;
-                        state.sort_descending = active && !state.sort_descending;
+                        ui.strong(text(label));
                     }
-                } else {
-                    ui.strong(text(label));
                 }
-            }
-            ui.end_row();
-            let mut rows: Vec<_> = state.usages.iter().enumerate().collect();
-            rows.sort_by(|(_, left), (_, right)| {
-                let category = if state.sort_by_status { left.status.cmp(&right.status) } else { std::cmp::Ordering::Equal };
-                let order = category.then_with(|| left.family.cmp(&right.family)).then_with(|| left.style.cmp(&right.style));
-                if state.sort_descending { order.reverse() } else { order }
-            });
-            for (idx, row) in rows {
-                let selected = state.selected_index == Some(idx);
-                let name = ui.selectable_label(selected, &row.family);
-                let style = ui.selectable_label(selected, &row.style);
-                if (name.clicked() || style.clicked()) && !selected {
-                    state.selected_index = Some(idx);
-                    state.last_located = None;
-                }
-                let (characters, message) = if row.missing {
-                    (&row.substitute_unsupported_chars, text("fontmgr.status.substitute_unsupported"))
-                } else {
-                    (&row.unsupported_chars, text("fontmgr.status.unsupported"))
-                };
-                if characters.is_empty() {
-                    ui.label(&row.status);
-                } else {
-                    let mut details = characters.iter().take(16).map(|ch| format!("{ch} (U+{:04X})", *ch as u32)).collect::<Vec<_>>().join(", ");
-                    if characters.len() > 16 { details.push_str(", …"); }
-                    let caption = if row.missing { format!("{} · {} ({})", row.status, message, characters.len()) }
-                        else { format!("{} ({})", message, characters.len()) };
-                    ui.label(egui::RichText::new(caption).color(ui.visuals().warn_fg_color)).on_hover_text(details);
-                }
-                let family = row.substitute_family.as_deref().unwrap_or("");
-                let mut face_style = row.substitute_style.clone().unwrap_or_default();
-                if row.missing {
-                    let library = dtool_tools::dtool_text::FontLibrary::shared();
-                    let source = || FontFaceName { family: row.family.clone(), style: row.style.clone() };
-                    ui.push_id(("substitute_family", idx), |ui| {
-                        if let Some(family) = crate::font_combo::font_combo(ui, "family", &mut state.substitute_combo, &library, family) {
-                            let style = library.resolve(&family, "Regular")
-                                .or_else(|| library.resolve_nearest(&family, 400, false))
-                                .and_then(|id| library.face(id)).map(|face| face.style.clone());
-                            if let Some(style) = style {
+                ui.end_row();
+                let mut rows: Vec<_> = state.usages.iter().enumerate().collect();
+                rows.sort_by(|(_, left), (_, right)| {
+                    let category = if state.sort_by_status { left.status.cmp(&right.status) } else { std::cmp::Ordering::Equal };
+                    let order = category.then_with(|| left.family.cmp(&right.family)).then_with(|| left.style.cmp(&right.style));
+                    if state.sort_descending { order.reverse() } else { order }
+                });
+                for (idx, row) in rows {
+                    let selected = state.selected_index == Some(idx);
+                    let name = dtool_design::with_icon_selection(ui, |ui| {
+                        ui.add(egui::Button::selectable(selected, &row.family).truncate()).on_hover_text(&row.family)
+                    });
+                    let style_label = if row.style.is_empty() { dtool_design::MIXED_TEXT } else { &row.style };
+                    let style = dtool_design::with_icon_selection(ui, |ui| {
+                        ui.add(egui::Button::selectable(selected, style_label).truncate()).on_hover_text(style_label)
+                    });
+                    if (name.clicked() || style.clicked()) && !selected {
+                        state.selected_index = Some(idx);
+                        state.last_located = None;
+                    }
+                    let (characters, message) = if row.missing {
+                        (&row.substitute_unsupported_chars, text("fontmgr.status.substitute_unsupported"))
+                    } else {
+                        (&row.unsupported_chars, text("fontmgr.status.unsupported"))
+                    };
+                    if characters.is_empty() {
+                        ui.label(&row.status);
+                    } else {
+                        let mut details = characters.iter().take(16).map(|ch| format!("{ch} (U+{:04X})", *ch as u32)).collect::<Vec<_>>().join(", ");
+                        if characters.len() > 16 { details.push_str(", …"); }
+                        let caption = if row.missing { format!("{} · {} ({})", row.status, message, characters.len()) }
+                            else { format!("{} ({})", message, characters.len()) };
+                        ui.label(egui::RichText::new(caption).color(ui.visuals().warn_fg_color)).on_hover_text(details);
+                    }
+                    let family = row.substitute_family.as_deref().unwrap_or("");
+                    let mut face_style = row.substitute_style.clone().unwrap_or_default();
+                    if row.missing {
+                        let library = dtool_tools::dtool_text::FontLibrary::shared();
+                        let source = || FontFaceName { family: row.family.clone(), style: row.style.clone() };
+                        ui.push_id(("substitute_family", idx), |ui| {
+                            if let Some(family) = crate::font_combo::font_combo(ui, "family", &mut state.substitute_combo, &library, family) {
+                                let style = library.resolve(&family, "Regular")
+                                    .or_else(|| library.resolve_nearest(&family, 400, false))
+                                    .and_then(|id| library.face(id)).map(|face| face.style.clone());
+                                if let Some(style) = style {
+                                    action = Some(FontManagerAction::Substitute {
+                                        source: source(), target: Some(FontFaceName { family, style }),
+                                    });
+                                    state.selected_index = Some(idx);
+                                }
+                            }
+                        });
+                        ui.push_id(("substitute_style", idx), |ui| {
+                            if crate::font_combo::style_combo(ui, "style", &library, family, &mut face_style) {
                                 action = Some(FontManagerAction::Substitute {
-                                    source: source(), target: Some(FontFaceName { family, style }),
+                                    source: source(), target: Some(FontFaceName { family: family.to_owned(), style: face_style }),
                                 });
                                 state.selected_index = Some(idx);
                             }
-                        }
-                    });
-                    ui.push_id(("substitute_style", idx), |ui| {
-                        if crate::font_combo::style_combo(ui, "style", &library, family, &mut face_style) {
-                            action = Some(FontManagerAction::Substitute {
-                                source: source(), target: Some(FontFaceName { family: family.to_owned(), style: face_style }),
-                            });
-                            state.selected_index = Some(idx);
-                        }
-                    });
-                } else {
-                    ui.label(family);
-                    ui.label(face_style);
+                        });
+                    } else {
+                        ui.label(family);
+                        ui.label(face_style);
+                    }
+                    ui.end_row();
                 }
-                ui.end_row();
-            }
+            });
         });
     });
-    ui.add_space(space("md"));
+    ui.separator();
     ui.horizontal(|ui| {
         let selected = state.has_selection();
         let locate_state = ControlState::enabled(selected);
@@ -391,14 +408,18 @@ fn render_font_manager_content(
                 });
             }
         }
-        if dtool_design::button(ui, text("common.close")).clicked() {
-            action = Some(FontManagerAction::Close);
-        }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if dtool_design::button(ui, text("common.close")).clicked() {
+                action = Some(FontManagerAction::Close);
+            }
+        });
     });
     if replace_state.open {
         if let Some(replace_action) = render_replace_font_dialog(ui, replace_state) {
             action = Some(replace_action);
         }
+    } else if dtool_design::dialog_keys(ui) == Some(dtool_design::DialogKey::Cancel) {
+        action = Some(FontManagerAction::Close);
     }
     action
 }

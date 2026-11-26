@@ -20,6 +20,7 @@ pub struct StatusBar {
     pub stats_text: Option<String>,
     pub zoom_text: Option<String>,
     base_hint_key: String,
+    file_open_error: Option<String>,
     tool_id: String,
     shift_held: bool,
     alt_held: bool,
@@ -34,6 +35,7 @@ impl Default for StatusBar {
             stats_text: None,
             zoom_text: None,
             base_hint_key: "status.hint.default".to_string(),
+            file_open_error: None,
             tool_id: String::new(),
             shift_held: false,
             alt_held: false,
@@ -48,8 +50,20 @@ impl StatusBar {
     }
 
     pub fn set_hint_key(&mut self, key: &str) {
+        self.file_open_error = None;
         self.base_hint_key = key.to_string();
         self.hint_key = key.to_string();
+    }
+
+    pub fn set_file_open_error(&mut self, key: &str) {
+        self.file_open_error = Some(key.to_string());
+        self.recompute_hint();
+    }
+
+    pub fn clear_file_open_error(&mut self) {
+        if self.file_open_error.take().is_some() {
+            self.recompute_hint();
+        }
     }
 
     pub fn set_tool(&mut self, tool_id: &str) {
@@ -65,6 +79,10 @@ impl StatusBar {
     }
 
     fn recompute_hint(&mut self) {
+        if let Some(key) = &self.file_open_error {
+            self.hint_key.clone_from(key);
+            return;
+        }
         if self.tool_id.is_empty() {
             self.hint_key = self.base_hint_key.clone();
             return;

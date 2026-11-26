@@ -312,6 +312,16 @@ pub fn run(session: &mut Session, command: &Command) -> Option<CommandResult> {
 }
 
 pub fn apply(session: &mut Session, command: &Command) -> Option<Result<(), CommandError>> {
+    if matches!(command.name.as_str(),
+        curve_edit::CURVE_NODES_SET | curve_nodes::CURVE_NODES_DELETE | curve_nodes::CURVE_NODES_CONVERT
+    ) {
+        // A batch writes one document snapshot. Reuse the leaf command (including symbol
+        // propagation) without adding its private undo entry to the batch history.
+        let undo = std::mem::take(&mut session.undo);
+        let result = curve_edit::run(session, command).or_else(|| curve_nodes::run(session, command));
+        session.undo = undo;
+        return result.map(|result| result.map(|_| ()));
+    }
     if let Some(value) = selection_key::apply(session, command) { return Some(value); }
     if let Some(value)=text_wrap_cmd::apply(session,command) {return Some(value);}
     if let Some(value) = layer_style::apply(session, command) { return Some(value); }

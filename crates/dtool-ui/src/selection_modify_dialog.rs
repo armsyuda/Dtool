@@ -97,7 +97,7 @@ impl ModifyDialog {
                         .labelled_by(label.id);
                 });
                 if extent {
-                    ui.checkbox(&mut self.circular, text("selection.modify.circular"));
+                    dtool_design::toggle(ui, &mut self.circular, text("selection.modify.circular"));
                 }
                 if self.kind == Kind::Outline {
                     ui.horizontal(|ui| {

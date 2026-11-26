@@ -353,7 +353,7 @@ fn show_editor_with_icons(ui: &mut egui::Ui, state: &mut StudioManagerState, run
                 }) {
                     ui.add(egui::Image::new(&texture).fit_to_exact_size(egui::Vec2::splat(16.0)));
                 }
-                ui.checkbox(&mut on, text(tool.0)).changed()
+                dtool_design::toggle(ui, &mut on, text(tool.0)).changed()
             }).inner;
             if changed {
                 editor.toggle_tool(tool);
@@ -362,7 +362,7 @@ fn show_editor_with_icons(ui: &mut egui::Ui, state: &mut StudioManagerState, run
         ui.label(text("studio.editor.panels"));
         for panel in selectable_panels() {
             let mut on = editor.panels.contains(&panel);
-            if ui.checkbox(&mut on, panel_label(&panel)).changed() {
+            if dtool_design::toggle(ui, &mut on, panel_label(&panel)).changed() {
                 editor.toggle_panel(&panel);
             }
         }

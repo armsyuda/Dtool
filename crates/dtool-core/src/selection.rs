@@ -143,6 +143,9 @@ pub fn selection_marquee_with_flags(
             continue;
         }
         let mut visible = quad.to_vec();
+        if let Some(crop) = crate::scene::vector_crop_quad(obj) {
+            visible = clip_convex_polygon(visible, &crop);
+        }
         if clip_to_artboards {
             let mut ancestor = obj.parent_id;
             for _ in 0..doc.objects.len() {
@@ -187,6 +190,9 @@ pub fn selection_hit(
 
     for obj in iter_objects(doc) {
         if !crate::scene_hit::canvas_candidate(doc, obj) {
+            continue;
+        }
+        if !crate::scene::vector_crop_contains(obj, point) {
             continue;
         }
 

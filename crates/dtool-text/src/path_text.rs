@@ -592,12 +592,12 @@ pub fn path_text_contours(lib: &FontLibrary, doc: &dtool_core::document::Documen
         return Vec::new();
     };
     let mut contours = Vec::new();
-    visit_path_contours(lib, &story, layout, object, |_, contour| contours.push(contour));
+    visit_path_contours(lib, &story, layout, object, None, |_, contour| contours.push(contour));
     contours
 }
 
 fn visit_path_contours(
-    lib: &FontLibrary, story: &Story, layout: PathTextLayout, object: &dtool_core::Object,
+    lib: &FontLibrary, story: &Story, layout: PathTextLayout, object: &dtool_core::Object, tolerance: Option<f64>,
     mut add: impl FnMut(Option<&CharStyle>, Vec<[f32; 2]>),
 ) {
     let matrix = dtool_core::geometry::text_matrix(object);
@@ -611,7 +611,7 @@ fn visit_path_contours(
         let style = story.chars.iter().rev().find(|run| run.range.start <= placed.cluster.start && placed.cluster.start < run.range.end).map(|run| &run.style).unwrap_or(&fallback);
         let (sin, cos) = placed.angle.sin_cos();
         let side = if placed.flipped { -1.0 } else { 1.0 };
-        for contour in lib.shared_glyph_contours(placed.glyph.font, placed.glyph.gid, style.size_pt).iter() {
+        for contour in lib.glyph_contours_with_tolerance(placed.glyph.font, placed.glyph.gid, style.size_pt, tolerance).iter() {
             add(Some(style), contour.iter().map(|point| {
                 let x = point[0];
                 let y = -side * point[1];
@@ -622,17 +622,23 @@ fn visit_path_contours(
 }
 
 pub fn path_text_ink(lib: &FontLibrary, doc: &dtool_core::Document, object: &dtool_core::Object) -> Option<Vec<dtool_core::text_lines::TextInk>> {
+    path_text_ink_with_tolerance(lib, doc, object, None)
+}
+
+pub(crate) fn path_text_ink_with_tolerance(lib: &FontLibrary, doc: &dtool_core::Document, object: &dtool_core::Object,
+    tolerance: Option<f64>,
+) -> Option<Vec<dtool_core::text_lines::TextInk>> {
     let core = doc.stories.iter().find(|core| Some(core.id) == object.story_id())?;
     let paint = path_text_paint(doc, object);
-    if !crate::canvas_text::has_local_text_fill(core, &paint) {
+    if tolerance.is_none() && !crate::canvas_text::has_local_text_fill(core, &paint) {
         return None;
     }
     let (story, layout) = path_text_layout_in_doc(lib, doc, object)?;
-    if !story.chars.iter().any(|run| run.style.fill.as_ref().is_some_and(|fill| fill != &paint)) {
+    if tolerance.is_none() && !story.chars.iter().any(|run| run.style.fill.as_ref().is_some_and(|fill| fill != &paint)) {
         return None;
     }
     let mut ink = Vec::new();
-    visit_path_contours(lib, &story, layout, object, |style, contour| {
+    visit_path_contours(lib, &story, layout, object, tolerance, |style, contour| {
         let fill = style.and_then(|style| style.fill.as_ref()).unwrap_or(&paint);
         dtool_core::text_lines::TextInk::append(&mut ink, fill, contour);
     });

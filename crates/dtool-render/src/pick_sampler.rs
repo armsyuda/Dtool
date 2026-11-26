@@ -85,7 +85,7 @@ fn glyph_items(doc: &Document, flags: &CanvasFlags) -> (Scene, Vec<Item>) {
 pub fn effect_scene(doc: &Document, flags: &CanvasFlags, staged: &[StagedEffect]) -> Scene {
     let (scene, items) = glyph_items(doc, flags);
     let prims = effect_items(doc, flags, items, staged).iter().map(|item| item.prim().clone()).collect();
-    Scene { version: scene.version, prims, quads: scene.quads }
+    Scene { prims, ..scene }
 }
 
 pub fn rasterize_with_glyphs(doc: &Document, flags: &CanvasFlags, bounds: [f32; 4], width: u32, height: u32) -> Vec<u8> {

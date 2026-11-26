@@ -29,6 +29,7 @@ pub fn visible_strokes(object: &Object) -> impl Iterator<Item = &StrokeStyle> {
 
 pub struct AppearancePath {
     pub path: kurbo::BezPath,
+    pub slot: PaintSlot,
     pub paint: Paint,
     pub stroke: Option<StrokeStyle>,
     pub even_odd: bool,
@@ -36,11 +37,17 @@ pub struct AppearancePath {
 }
 
 pub fn vector_paths(doc: &crate::Document, object: &Object, primary_fill: &Paint, native_strokes: bool) -> Option<Vec<AppearancePath>> {
-    let local = crate::outline::object_outline(object)?;
+    vector_paths_with_tolerance(doc, object, primary_fill, native_strokes, crate::outline::OUTLINE_TOLERANCE)
+}
+
+pub fn vector_paths_with_tolerance(doc: &crate::Document, object: &Object, primary_fill: &Paint,
+    native_strokes: bool, tolerance: f64,
+) -> Option<Vec<AppearancePath>> {
+    let world = crate::outline::object_outline_world_with_tolerance(object, tolerance)?;
     let [x, y] = object.pos.map(f64::from);
     let matrix = kurbo::Affine::new(crate::geometry::object_matrix(object).map(f64::from)) * kurbo::Affine::translate((x, y));
-    let world = matrix * local;
-    let world = crate::commands::warp::live_warp_outline(doc, object.id, &world).unwrap_or(world);
+    let world = crate::commands::warp::live_warp_outline_with_tolerance(doc, object.id, &world, tolerance).unwrap_or(world);
+    let stroke_tolerance = tolerance.min(crate::boolean::DEFAULT_TOLERANCE);
     let mut closed = kurbo::BezPath::new();
     let mut start = 0;
     for (index, element) in world.elements().iter().enumerate() {
@@ -52,16 +59,26 @@ pub fn vector_paths(doc: &crate::Document, object: &Object, primary_fill: &Paint
     }
     let mapped = |paint: &Paint| match paint {
         Paint::Gradient { kind, stops, geom } => Paint::Gradient { kind: *kind, stops: stops.clone(), geom: geom.transform(matrix.as_coeffs()) },
+        Paint::Bitmap(bitmap) => Paint::Bitmap(crate::paint::BitmapPaint {
+            matrix: (matrix * kurbo::Affine::new(bitmap.matrix)).as_coeffs(),
+            ..bitmap.clone()
+        }),
         paint => paint.clone(),
     };
     let mut paths = Vec::new();
-    let add_stroke = |paths: &mut Vec<AppearancePath>, path: &kurbo::BezPath, style: &StrokeStyle, blend: RowBlend| {
-        let native = native_strokes && !blend.erases() && style.pressure.is_empty() && style.align == crate::paint::StrokeAlign::Centre;
+    let add_stroke = |paths: &mut Vec<AppearancePath>, path: &kurbo::BezPath, style: &StrokeStyle, slot: PaintSlot, blend: RowBlend| {
+        let native = native_strokes && !blend.erases() && style.pressure.is_empty()
+            && style.cap != crate::paint::Cap::RoundInset && style.align == crate::paint::StrokeAlign::Centre;
         let paint = mapped(&style.paint);
         if native {
-            paths.push(AppearancePath { path: path.clone(), stroke: Some(StrokeStyle { paint: paint.clone(), ..style.clone() }), paint, even_odd: false, blend });
-        } else if let Some((outline, even_odd)) = crate::outline::styled_stroke_path(path, style) {
-            paths.push(AppearancePath { path: outline, paint, stroke: None, even_odd, blend });
+            paths.push(AppearancePath { path: path.clone(), slot, stroke: Some(StrokeStyle { paint: paint.clone(), ..style.clone() }), paint, even_odd: false, blend });
+        } else if let Some((outline, even_odd)) = crate::outline::styled_stroke_path_with_tolerance(path, style, stroke_tolerance)
+            .or_else(|| {
+                (stroke_tolerance < crate::boolean::DEFAULT_TOLERANCE)
+                    .then(|| crate::outline::styled_stroke_path(path, style)).flatten()
+            })
+        {
+            paths.push(AppearancePath { path: outline, slot, paint, stroke: None, even_odd, blend });
         }
     };
     let fill_count = object.additional_fills.len() + usize::from(
@@ -79,30 +96,17 @@ pub fn vector_paths(doc: &crate::Document, object: &Object, primary_fill: &Paint
         if kind == Kind::Fill {
             let paint = if index == 0 { primary_fill } else { &object.additional_fills[index - 1] };
             if *paint != Paint::None && !closed.elements().is_empty() {
-                paths.push(AppearancePath { path: closed.clone(), paint: mapped(paint), stroke: None, even_odd: true, blend });
+                paths.push(AppearancePath { path: closed.clone(), slot, paint: mapped(paint), stroke: None, even_odd: object.fill_rule.is_even_odd(), blend });
             }
             continue;
         }
         let Some(stroke) = slot.stroke(object).filter(|stroke| stroke.width > 0.0 && stroke.paint != Paint::None) else { continue; };
-        add_stroke(&mut paths, &world, stroke, blend);
-        if stroke.start_arrow.is_none() && stroke.end_arrow.is_none() {
-            continue;
-        }
-        for (points, closed) in crate::outline::flatten_subpaths(&world, crate::outline::OUTLINE_TOLERANCE) {
-            let points: Vec<_> = points.into_iter().map(|point| point.map(|value| value as f32)).collect();
-            for arrow in crate::commands::stroke::arrowheads(stroke, &points, closed, stroke.width) {
-                let mut path = kurbo::BezPath::new();
-                let Some((&first, rest)) = arrow.points.split_first() else { continue; };
-                path.move_to((f64::from(first[0]), f64::from(first[1])));
-                for &[x, y] in rest { path.line_to((f64::from(x), f64::from(y))); }
-                if arrow.filled {
-                    path.close_path();
-                    paths.push(AppearancePath { path, paint: mapped(&stroke.paint), stroke: None, even_odd: false, blend });
-                } else {
-                    let style = StrokeStyle { width: arrow.line_width, paint: stroke.paint.clone(),
-                        cap: stroke.cap, join: stroke.join.clone(), ..Default::default() };
-                    add_stroke(&mut paths, &path, &style, blend);
-                }
+        add_stroke(&mut paths, &world, stroke, slot, blend);
+        for (path, arrow_stroke) in crate::commands::stroke::arrow_paths(&world, stroke) {
+            if let Some(style) = arrow_stroke {
+                add_stroke(&mut paths, &path, &style, slot, blend);
+            } else {
+                paths.push(AppearancePath { path, slot, paint: mapped(&stroke.paint), stroke: None, even_odd: false, blend });
             }
         }
     }

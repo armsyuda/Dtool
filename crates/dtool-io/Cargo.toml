@@ -10,12 +10,14 @@ publish.workspace = true
 crc32fast = "1.5"
 dtool-core.workspace = true
 image.workspace = true
+kurbo.workspace = true
 lcms2.workspace = true
 tiff = "0.11.3"
 zune-core.workspace = true
 zune-jpeg.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+skrifa.workspace = true
 
 lopdf.workspace = true
 flate2.workspace = true
@@ -23,6 +25,7 @@ zstd.workspace = true
 
 dtool-protocol.workspace = true
 usvg.workspace = true
+resvg = { workspace = true, features = ["raster-images", "text"] }
 roxmltree.workspace = true
 zip.workspace = true
 jxl-oxide = { workspace = true, optional = true }

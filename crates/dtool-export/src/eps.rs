@@ -137,11 +137,15 @@ fn write_stroke(out: &mut String, object: &Object, warnings: &mut Vec<String>) -
         return false;
     }
     let Some(colour) = colour_op(&object.stroke.paint, object.id.0, warnings) else { return false; };
-    let dash: Vec<String> = object.stroke.dash.iter().filter(|v| v.is_finite() && **v >= 0.0).map(|v| num(*v)).collect();
+    let dash: Vec<String> = if object.stroke.dash.iter().any(|length| *length > 0.0 && length.is_finite()) {
+        object.stroke.dash.iter().filter(|v| v.is_finite() && **v >= 0.0).map(|v| num(*v)).collect()
+    } else {
+        Vec::new()
+    };
     use dtool_core::paint::{Cap, Join};
     let cap = match object.stroke.cap {
         Cap::Butt => 0,
-        Cap::Round => 1,
+        Cap::Round | Cap::RoundInset => 1,
         Cap::Square => 2,
     };
     let join = match object.stroke.join {
@@ -154,7 +158,8 @@ fn write_stroke(out: &mut String, object: &Object, warnings: &mut Vec<String>) -
     {
         let _ = writeln!(out, "{} setmiterlimit", num(limit));
     }
-    let _ = writeln!(out, "{colour}\n{} setlinewidth\n{cap} setlinecap\n{join} setlinejoin\n[{}] 0 setdash\nstroke", num(width), dash.join(" "));
+    let offset = if dash.is_empty() { 0.0 } else { object.stroke.dash_offset };
+    let _ = writeln!(out, "{colour}\n{} setlinewidth\n{cap} setlinecap\n{join} setlinejoin\n[{}] {} setdash\nstroke", num(width), dash.join(" "), num(offset));
     true
 }
 
@@ -185,7 +190,7 @@ fn write_vector(out: &mut String, warnings: &mut Vec<String>, doc: &Document, ob
     let fill = if contours.iter().any(|(_, closed)| *closed) { colour_op(&object.fill, object.id.0, warnings) } else { None };
     write_contours(out, frame, &contours);
     if let Some(colour) = fill {
-        let op = if contours.len() > 1 { "eofill" } else { "fill" };
+        let op = if object.fill_rule.is_even_odd() { "eofill" } else { "fill" };
         out.push_str(&format!("gsave\n{colour}\n{op}\ngrestore\n"));
     }
     let arrows = if write_stroke(out, object, warnings) { crate::arrowheads_for(Some(doc), object) } else { Vec::new() };
@@ -290,13 +295,13 @@ fn write_dimension(out: &mut String, warnings: &mut Vec<String>, object: &Object
 }
 
 fn write_crop(out: &mut String, object: &Object, frame: &Frame) {
-    let Some([x, y, w, h]) = crate::vector_crop_bounds(object) else { return; };
+    let Some(quad) = dtool_core::scene::vector_crop_quad(object) else { return; };
     out.push_str(&format!(
         "newpath\n{} moveto\n{} lineto\n{} lineto\n{} lineto\nclosepath\nclip\nnewpath\n",
-        frame.point(x, y),
-        frame.point(x + w, y),
-        frame.point(x + w, y + h),
-        frame.point(x, y + h)
+        frame.point(quad[0][0], quad[0][1]),
+        frame.point(quad[1][0], quad[1][1]),
+        frame.point(quad[2][0], quad[2][1]),
+        frame.point(quad[3][0], quad[3][1])
     ));
 }
 
@@ -326,7 +331,8 @@ fn needs_composite(doc: &Document, object: &Object) -> bool {
 fn uses_vector_appearance(object: &Object) -> bool {
     appearance::has_layers(object)
         || matches!(object.kind, ObjectKind::Shape | ObjectKind::Curve(_) | ObjectKind::Compound(_))
-            && (matches!(object.fill, Paint::Gradient { .. }) || matches!(object.stroke.paint, Paint::Gradient { .. }))
+            && (matches!(object.fill, Paint::Gradient { .. }) || matches!(object.stroke.paint, Paint::Gradient { .. })
+                || object.stroke.cap == dtool_core::paint::Cap::RoundInset)
 }
 
 fn appearance_needs_composite(object: &Object) -> bool {
@@ -422,7 +428,7 @@ pub fn eps_document(doc: &Document, area: &ExportArea, title: &str, control: &Ex
         if has_appearance && !crate::vector_bounds_intersect(crate::vector_object_bounds(doc, object), region) {
             continue;
         }
-        let clip = dtool_core::clip_mask::clip_region(doc, object.id);
+        let clip = dtool_core::clip_mask::layer_clip_region(doc, object.id);
         if clip.as_ref().is_some_and(Vec::is_empty) {
             continue;
         }

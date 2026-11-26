@@ -181,7 +181,8 @@ impl RecentFiles {
             self.missing = Some(RecentMissingDialogState::new(&path.to_string_lossy()));
             return Ok(RecentOutcome::Missing(path));
         }
-        workspace.open_path(&path).map(|_| RecentOutcome::Opened)
+        let command = dtool_protocol::Command::with_params("doc.open", json!({ "path": path }));
+        workspace.run(dtool_core::Scope::active(), command).1.map(|_| RecentOutcome::Opened)
     }
 
     pub fn resolve_missing(&mut self, workspace: &mut Workspace, remove: bool) {

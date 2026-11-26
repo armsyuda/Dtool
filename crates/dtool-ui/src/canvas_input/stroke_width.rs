@@ -6,7 +6,7 @@ use egui::{Pos2, Rect, Response, Stroke, Ui, Vec2};
 use serde_json::json;
 
 use crate::input::primary_button_positions;
-use super::{click_select_command, screen};
+use super::{CURSOR_EDGE, CURSOR_FACE, click_select_command, screen};
 
 fn paint_width_cursor(ui: &Ui, rect: Rect, at: Pos2, normal: Vec2) {
     let painter = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("stroke_width_cursor")))
@@ -20,13 +20,13 @@ fn paint_width_cursor(ui: &Ui, rect: Rect, at: Pos2, normal: Vec2) {
         [p(7.0, 0.0), p(4.0, -3.0)],
         [p(7.0, 0.0), p(4.0, 3.0)],
     ];
-    for stroke in [Stroke::new(3.8, egui::Color32::BLACK), Stroke::new(1.5, egui::Color32::WHITE)] {
+    for stroke in [Stroke::new(3.4, CURSOR_EDGE), Stroke::new(2.3, CURSOR_FACE)] {
         for segment in segments {
             painter.line_segment(segment, stroke);
         }
     }
-    painter.circle_filled(at, 2.0, egui::Color32::BLACK);
-    painter.circle_filled(at, 1.1, egui::Color32::WHITE);
+    painter.circle_filled(at, 2.5, CURSOR_EDGE);
+    painter.circle_filled(at, 1.8, CURSOR_FACE);
 }
 
 #[derive(Debug, Clone, Default)]

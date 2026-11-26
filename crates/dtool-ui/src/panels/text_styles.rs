@@ -349,7 +349,7 @@ impl TextStylesPanel {
                     }
                 });
                 let mut by_type = self.sort == SortMode::ByType;
-                if ui.checkbox(&mut by_type, text("styles.sort_by_type")).changed() {
+                if dtool_design::toggle(ui, &mut by_type, text("styles.sort_by_type")).changed() {
                     self.sort = if by_type { SortMode::ByType } else { SortMode::ByName };
                 }
             });

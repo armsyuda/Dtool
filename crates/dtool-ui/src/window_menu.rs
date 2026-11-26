@@ -527,7 +527,7 @@ pub fn view_zoom_around(cursor_over_canvas: Option<[f32; 2]>, view_size: [f32; 2
 
 pub fn menu_view_zoom_set(session: &mut Session, zoom: f32, around: [f32; 2]) -> Result<serde_json::Value, String> {
     session
-        .run_named("view.zoom.set", serde_json::json!({ "zoom": clamp_zoom(zoom), "around": around }))
+        .run_named("view.zoom.set", serde_json::json!({ "zoom": session.zoom_limits().clamp(zoom), "around": around }))
         .map_err(|e| text(&e.message_key).to_string())
 }
 

@@ -324,7 +324,6 @@ pub fn numeric_field(ui: &mut Ui, id: Id, value: NumericValue, spec: &NumericSpe
         NumericValue::Value(v) if v.is_finite() => Some(spec.clamp(v)),
         _ => None,
     };
-    let shown = current.map(|v| spec.format(v)).unwrap_or_default();
     let scrub_origin = current.or(spec.mixed_origin).map_or_else(|| spec.clamp(0.0), |value| spec.clamp(value));
     let (shift, ctrl, escape, wheel) = ui.input(|input| {
         (input.modifiers.shift, input.modifiers.ctrl || input.modifiers.command, input.key_pressed(Key::Escape), wheel_notches(&input.events))
@@ -359,7 +358,8 @@ pub fn numeric_field(ui: &mut Ui, id: Id, value: NumericValue, spec: &NumericSpe
             let area = area.on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
             let started = !was_editing && spec.enabled && (area.clicked() || area.gained_focus() || requested);
             if was_editing || started {
-                let mut buffer = state.buffer.clone().unwrap_or_else(|| shown.clone());
+                let mut buffer = state.buffer.clone()
+                    .unwrap_or_else(|| current.map(|value| spec.format(value)).unwrap_or_default());
                 if select_now {
                     select_all(ui.ctx(), text_id, &buffer);
                 }
@@ -370,8 +370,6 @@ pub fn numeric_field(ui: &mut Ui, id: Id, value: NumericValue, spec: &NumericSpe
                 }
                 (label, area, Some(field), buffer, started)
             } else {
-                let text = if current.is_some() { shown.as_str() } else { hint };
-                paint_value(ui, rect, &area, text, current.is_none());
                 (label, area, None, String::new(), false)
             }
         })
@@ -464,6 +462,16 @@ pub fn numeric_field(ui: &mut Ui, id: Id, value: NumericValue, spec: &NumericSpe
         }
     } else {
         state.scrub_press = None;
+    }
+
+    if field.is_none() {
+        let display = match event {
+            NumericEvent::Preview(value) | NumericEvent::Commit(value) => Some(value),
+            _ if state.scrubbing => Some(state.scrub),
+            _ => current,
+        };
+        let text = display.map_or_else(|| hint.to_owned(), |value| spec.format(value));
+        paint_value(ui, area.rect, &area, &text, display.is_none());
     }
 
     ui.data_mut(|data| {

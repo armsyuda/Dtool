@@ -70,13 +70,35 @@ fn direction_dial(ui: &mut egui::Ui, caption: egui::Id, degrees: &mut f64) {
 
 fn number(ui: &mut egui::Ui, key: &str, value: &mut f32, range: std::ops::RangeInclusive<f64>) -> bool {
     let rail = match key {
-        "fx.radius" | "fx.soften" | "fx.width" => Some(0.0..=200.0),
+        "fx.radius" | "fx.radius_x" | "fx.radius_y" | "fx.soften" | "fx.width" => Some(0.0..=200.0),
         "fx.offset" | "fx.depth" => Some(-200.0..=200.0),
         _ => None,
     };
     let mut next = f64::from(*value);
     if scalar_with_rail(ui, key, &mut next, range, rail) { *value = next as f32; true } else { false }
 }
+fn blur_radii(ui: &mut egui::Ui, radius: &mut f32, radius_y: &mut Option<f32>, angle: &mut Option<f32>) -> bool {
+    let mut changed = false;
+    let mut independent = radius_y.is_some();
+    if dtool_design::toggle(ui, &mut independent, text("fx.independent_radii")).changed() {
+        *radius_y = independent.then_some(*radius);
+        if !independent { *angle = None; }
+        changed = true;
+    }
+    if let Some(y) = radius_y {
+        changed |= number(ui, "fx.radius_x", radius, 0.0..=100000.0);
+        changed |= number(ui, "fx.radius_y", y, 0.0..=100000.0);
+        let mut direction = angle.unwrap_or(0.0);
+        if number(ui, "fx.blur_angle", &mut direction, 0.0..=180.0) {
+            *angle = (direction != 0.0).then_some(direction);
+            changed = true;
+        }
+    } else {
+        changed |= number(ui, "fx.radius", radius, 0.0..=100000.0);
+    }
+    changed
+}
+
 fn percent(ui: &mut egui::Ui, key: &str, value: &mut f32) -> bool {
     let mut next = f64::from(*value) * 100.0;
     if scalar_with_rail(ui, key, &mut next, 0.0..=100.0, Some(0.0..=100.0)) { *value = (next / 100.0) as f32; true } else { false }
@@ -144,9 +166,13 @@ pub fn show_effect(ui: &mut egui::Ui, effect: &mut LayerEffect, size: [f32; 2]) 
         }).response.labelled_by(caption);
     });
     match &mut effect.params {
-        EffectParams::Blur { radius, preserve_alpha } => { changed |= number(ui, "fx.radius", radius, 0.0..=100000.0); changed |= dtool_design::toggle(ui, preserve_alpha, text("fx.preserve_alpha")).changed(); }
-        EffectParams::Shadow { radius, offset, angle, intensity, colour: value, knock_out } => {
-            changed |= number(ui, "fx.radius", radius, 0.0..=100000.0); changed |= number(ui, "fx.offset", offset, -100000.0..=100000.0);
+        EffectParams::Blur { radius, radius_y, angle, preserve_alpha } => {
+            changed |= blur_radii(ui, radius, radius_y, angle);
+            changed |= dtool_design::toggle(ui, preserve_alpha, text("fx.preserve_alpha")).changed();
+        }
+        EffectParams::Shadow { radius, radius_y, blur_angle, offset, angle, intensity, colour: value, knock_out } => {
+            changed |= blur_radii(ui, radius, radius_y, blur_angle);
+            changed |= number(ui, "fx.offset", offset, -100000.0..=100000.0);
             changed |= number(ui, "fx.light_direction", angle, 0.0..=360.0); changed |= percent(ui, "fx.intensity", intensity); changed |= colour(ui, "fx.colour", value);
             changed |= dtool_design::toggle(ui, knock_out, text("fx.knock_out")).changed();
         }

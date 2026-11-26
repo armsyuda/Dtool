@@ -69,8 +69,8 @@ fn svg_emits_gradient_paint() {
     let output = svg_for(linear_gradient(), "gradient");
     assert!(output.contains("<linearGradient id=\"dtool-paint-1\""));
     assert!(output.contains("fill=\"url(#dtool-paint-1)\""));
-    assert!(output.contains("stop-color=\"#0000ff\""));
-    assert!(output.contains("stop-color=\"#ffff00\""));
+    assert!(output.contains("stop-color=\"rgb(0,0,255)\""));
+    assert!(output.contains("stop-color=\"rgb(255,255,0)\""));
 }
 
 #[test]

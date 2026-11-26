@@ -134,8 +134,9 @@ fn apply_mask(document: &mut Document, id: ObjectId, selection: &PixelSelection)
             }
         }
         existing.coverage = coverage;
+        existing.vector_outline = None;
     } else {
-        document.layer_masks.push(LayerMask { object: id, coverage });
+        document.layer_masks.push(LayerMask::new(id, coverage));
     }
     Ok(())
 }
@@ -156,7 +157,7 @@ fn create_layer(document: &mut Document, mask: PixelSelection, mut rgba: Vec<u8>
     if settings.output == RefineOutput::NewLayerWithMask {
         let mut coverage = mask;
         coverage.page_id = None;
-        document.layer_masks.push(LayerMask { object: id, coverage });
+        document.layer_masks.push(LayerMask::new(id, coverage));
     }
     id
 }

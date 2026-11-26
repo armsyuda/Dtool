@@ -267,6 +267,21 @@ pub fn rasterize_fill_with_transparency(
     bounds: [f32; 4],
     size: [usize; 2],
 ) -> Option<Vec<u8>> {
+    rasterize_fill_mapped(paint, transparency, opacity, contours, bounds, size, |[x, y]| {
+        [f64::from(x - origin[0]), f64::from(y - origin[1])]
+    })
+}
+
+/// Rasterize coverage in the coordinates of the contours and sample paint in its local coordinates.
+pub fn rasterize_fill_mapped(
+    paint: &Paint,
+    transparency: &Transparency,
+    opacity: f32,
+    contours: &[Vec<[f32; 2]>],
+    bounds: [f32; 4],
+    size: [usize; 2],
+    paint_point: impl Fn([f32; 2]) -> [f64; 2],
+) -> Option<Vec<u8>> {
     if !paint_supported(paint) || size[0] == 0 || size[1] == 0 {
         return None;
     }
@@ -339,7 +354,7 @@ pub fn rasterize_fill_with_transparency(
                 continue;
             }
             let y = y0 + (py as f32 + 0.5) * sy;
-            let local = [f64::from(x - origin[0]), f64::from(y - origin[1])];
+            let local = paint_point([x, y]);
             if let Some(c) = sample(paint, local) {
                 let alpha = (f32::from(c.a) * transparency.alpha_at(local) * opacity * covered)
                     .round()
@@ -430,7 +445,7 @@ mod tests {
         let paint = Paint::Gradient {
             kind: dtool_core::paint::GradientKind::Linear,
             stops: vec![stop(0.0, 0), stop(1.0, 255)],
-            geom: dtool_core::paint::GradientGeom { start: [0.0, 0.0], end: [10.0, 0.0], ratio: 1.0 },
+            geom: dtool_core::paint::GradientGeom { start: [0.0, 0.0], end: [10.0, 0.0], ..Default::default() },
         };
         let tri = vec![vec![[0.0, 0.0], [10.0, 0.0], [0.0, 10.0]]];
         let rgba = rasterize_fill(&paint, &tri, [0.0, 0.0], [0.0, 0.0, 10.0, 10.0], [10, 10]).unwrap();
@@ -448,7 +463,7 @@ mod tests {
                 dtool_core::paint::GradientStop { offset: 0.0, colour: Colour::new(255, 255, 255, 0) },
                 dtool_core::paint::GradientStop { offset: 1.0, colour: Colour::new(255, 255, 255, 255) },
             ],
-            geom: dtool_core::paint::GradientGeom { start: [0.0, 0.0], end: [10.0, 0.0], ratio: 1.0 },
+            geom: dtool_core::paint::GradientGeom { start: [0.0, 0.0], end: [10.0, 0.0], ..Default::default() },
         };
         let rect = vec![vec![[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]]];
         let rgba = rasterize_fill_with_transparency(&fill, &transparency, 1.0, &rect, [0.0, 0.0], [0.0, 0.0, 10.0, 10.0], [10, 10]).unwrap();

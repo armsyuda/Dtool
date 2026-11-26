@@ -18,10 +18,9 @@ pub fn nudge_distances() -> [f32; 2] {
 }
 
 pub fn arrow_key(input: &egui::InputState, tool: &MoveTool) -> Option<(NudgeDirection, bool)> {
-    let shift = input.modifiers.shift;
-    let (_, direction) = crate::shell::NUDGE_KEYS.iter().find(|(key, _)| input.key_pressed(*key))?;
-    tool.on_arrow(*direction, shift)?;
-    Some((*direction, shift))
+    let (direction, shift) = crate::shell::nudge_key(input)?;
+    tool.on_arrow(direction, shift)?;
+    Some((direction, shift))
 }
 
 pub fn arrow_delta(direction: NudgeDirection, shift: bool, distances: [f32; 2]) -> [f32; 2] {
@@ -416,13 +415,7 @@ pub fn diamond(centre: egui::Pos2, half: f32) -> Vec<egui::Pos2> {
 }
 
 pub fn gradient_kind(active_tool: &str) -> Option<GradientKind> {
-    match active_tool.rsplit('.').next()? {
-        "linear" => Some(GradientKind::Linear),
-        "radial" => Some(GradientKind::Radial),
-        "elliptical" => Some(GradientKind::Elliptical),
-        "conical" => Some(GradientKind::Conical),
-        _ => None,
-    }
+    dtool_core::commands::context_toolbar::gradient::parse_kind(active_tool.rsplit('.').next()?)
 }
 
 fn drag_rect(start: [f32; 2], end: [f32; 2]) -> [f32; 4] {
@@ -452,7 +445,7 @@ pub fn gradient_command_for_tool(
     session: &Session, target: ObjectId, kind: Option<GradientKind>, transparency: bool, start: [f32; 2], end: [f32; 2],
 ) -> Option<Command> {
     use dtool_core::geometry::{apply_matrix, invert_matrix, object_matrix};
-    use dtool_core::paint::Transparency;
+    use dtool_core::commands::context_toolbar::gradient::{Target, TYPE};
     let object = session.document.get_object(target).filter(|object| !object.locked)?;
     if (end[0] - start[0]).hypot(end[1] - start[1]) < crate::canvas_input::MIN_DRAG_DOC {
         return None;
@@ -463,57 +456,36 @@ pub fn gradient_command_for_tool(
         [f64::from(x - object.pos[0]), f64::from(y - object.pos[1])]
     };
     let tool = if transparency { "tool.transparency" } else { &session.active_tool };
-    let choice = session.tool_options.choice(tool, "gradient.type");
+    let role = Target::for_object(session, tool, object)
+        .or_else(|| (!tool.starts_with("tool.gradient") && !transparency).then_some(Target::Fill))?;
+    if match role {
+        Target::Stroke => object.stroke.width <= 0.0,
+        Target::Appearance(slot) => slot.stroke(object).is_some_and(|stroke| stroke.width <= 0.0),
+        _ => false,
+    } {
+        return None;
+    }
+    let choice = session.tool_options.choice(tool, TYPE);
     let chosen = choice.as_deref().and_then(gradient_kind);
-    let geometry = |ratio| GradientGeom { start: local(start), end: local(end), ratio };
-    if transparency {
-        let (current, stops, ratio) = match &object.transparency {
-            Transparency::Gradient { kind, stops, geom } => (Some(*kind), stops.clone(), geom.ratio),
-            Transparency::None => (None, vec![
+    let (kind, stops, previous) = if let Some((current, stops, geom)) = role.gradient(object) {
+        (current, stops.to_vec(), *geom)
+    } else {
+        let stops = if transparency {
+            vec![
                 GradientStop { offset: 0.0, colour: Colour::new(0, 0, 0, 255) },
                 GradientStop { offset: 1.0, colour: Colour::new(0, 0, 0, 0) },
-            ], 1.0),
-        };
-        let value = Transparency::Gradient { kind: chosen.or(current).unwrap_or(GradientKind::Linear), stops, geom: geometry(ratio) };
-        return Some(Command::with_params("object.update", json!({"id": target, "transparency": value})));
-    }
-
-    let focus = session.appearance_focus.filter(|focus| focus.node == target);
-    if focus.is_some_and(|focus| !focus.active(session)) {
-        return None;
-    }
-    let slot = focus.map(|focus| focus.slot);
-    let stroke = session.tool_options.choice(tool, "gradient.target").as_deref() == Some("stroke");
-    let paint = if let Some(slot) = slot {
-        if slot.stroke(object).is_some_and(|stroke| stroke.width <= 0.0) { return None; }
-        slot.paint(object)?
-    } else if stroke && object.stroke.width > 0.0 {
-        &object.stroke.paint
-    } else if stroke {
-        return None;
-    } else {
-        &object.fill
-    };
-    let (current, stops, ratio) = match paint {
-        Paint::Gradient { kind, stops, geom } => (Some(*kind), stops.clone(), geom.ratio),
-        paint => {
-            let colour = match paint { Paint::Solid { colour } => *colour, _ => Colour::new(0, 0, 0, 255) };
-            (None, vec![
+            ]
+        } else {
+            let colour = match role.paint(object)? { Paint::Solid { colour } => *colour, _ => Colour::new(0, 0, 0, 255) };
+            vec![
                 GradientStop { offset: 0.0, colour },
                 GradientStop { offset: 1.0, colour: Colour::new(255, 255, 255, 255) },
-            ], 1.0)
-        }
+            ]
+        };
+        (chosen.or(kind).unwrap_or(GradientKind::Linear), stops, GradientGeom::default())
     };
-    let paint = Paint::Gradient { kind: kind.or(chosen).or(current).unwrap_or(GradientKind::Linear), stops, geom: geometry(ratio) };
-    if let Some(slot) = slot {
-        Some(slot.paint_command(target, paint))
-    } else if stroke {
-        let mut style = object.stroke.clone();
-        style.paint = paint;
-        Some(Command::with_params("object.update", json!({"id": target, "stroke": style})))
-    } else {
-        Some(Command::with_params("object.update", json!({"id": target, "fill": paint})))
-    }
+    let geometry = GradientGeom { start: local(start), end: local(end), ..previous };
+    Some(role.command(object, kind, stops, geometry))
 }
 
 #[cfg(test)]

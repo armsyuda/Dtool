@@ -214,7 +214,7 @@ impl Editor {
             });
         }
         let mut custom = self.tip.wet_edges.curve.is_some();
-        if ui.checkbox(&mut custom, text("brush_editor.wet_edges.custom")).changed() {
+        if dtool_design::toggle(ui, &mut custom, text("brush_editor.wet_edges.custom")).changed() {
             self.dragged = None;
             self.tip.wet_edges.curve = if custom {
                 Some(self.inactive_wet_curve.take().unwrap_or_default())
@@ -328,8 +328,8 @@ impl Editor {
             for (index, sub) in self.tip.sub_brushes.iter_mut().enumerate() {
                 ui.horizontal(|ui| {
                     let toggle = text("brush_editor.sub_brush.enabled").replace("{number}", &(index + 1).to_string());
-                    ui.checkbox(&mut sub.enabled, "").on_hover_text(&toggle)
-                        .widget_info(|| egui::WidgetInfo::selected(egui::Role::CheckBox, true, sub.enabled, &toggle));
+                    dtool_design::toggle(ui, &mut sub.enabled, "").on_hover_text(&toggle)
+                        .widget_info(|| egui::WidgetInfo::selected(egui::Role::Switch, ui.is_enabled(), sub.enabled, &toggle));
                     let name = crate::panels::pixel_brushes::tip_label(&sub.tip);
                     ui.selectable_value(&mut self.sub_index, index, format!("{}. {name}", index + 1));
                 });
@@ -356,8 +356,8 @@ impl Editor {
                     text("brush_editor.sub_brush.erase")).labelled_by(label.id);
             });
             ui.horizontal_wrapped(|ui| {
-                ui.checkbox(&mut sub.sync_size, text("brush_editor.sub_brush.sync_size"));
-                ui.checkbox(&mut sub.sync_spacing, text("brush_editor.sub_brush.sync_spacing"));
+                dtool_design::toggle(ui, &mut sub.sync_size, text("brush_editor.sub_brush.sync_size"));
+                dtool_design::toggle(ui, &mut sub.sync_spacing, text("brush_editor.sub_brush.sync_spacing"));
             });
             let tip = &mut sub.tip;
             ui.add_enabled(!sub.sync_size, egui::Slider::new(&mut tip.size_px, 1.0..=2048.0)
@@ -507,17 +507,17 @@ fn show_tip_motion(ui: &mut Ui, dynamics: &mut BrushDynamics) {
     ui.collapsing(text("brush_editor.path_scatter"), |ui| {
         let scatter = &mut dynamics.path_scatter;
         sub_brush_percent(ui, &mut scatter.amount, 0.0..=100.0 * ScatterAxis::MAX_AMOUNT, "brush_editor.path_scatter_amount");
-        ui.checkbox(&mut scatter.both_axes, text("brush_editor.path_scatter_both_axes"));
-        ui.checkbox(&mut scatter.pressure, text("brush_editor.path_scatter_pressure"));
+        dtool_design::toggle(ui, &mut scatter.both_axes, text("brush_editor.path_scatter_both_axes"));
+        dtool_design::toggle(ui, &mut scatter.pressure, text("brush_editor.path_scatter_pressure"));
         ui.add(egui::Slider::new(&mut scatter.count, 1..=dtool_core::brush::PathScatter::MAX_COUNT)
             .text(text("brush_editor.path_scatter_count")));
         sub_brush_percent(ui, &mut scatter.count_jitter, 0.0..=100.0, "brush_editor.path_scatter_count_jitter");
-        ui.checkbox(&mut scatter.count_pressure, text("brush_editor.path_scatter_count_pressure"));
+        dtool_design::toggle(ui, &mut scatter.count_pressure, text("brush_editor.path_scatter_count_pressure"));
     });
 }
 
 fn show_texture_controls(ui: &mut Ui, texture: &mut BrushTexture) {
-    ui.checkbox(&mut texture.enabled, text("brush_editor.texture.enabled"));
+    dtool_design::toggle(ui, &mut texture.enabled, text("brush_editor.texture.enabled"));
     ui.add_enabled_ui(texture.enabled, |ui| {
         ui.horizontal_wrapped(|ui| {
             let label = ui.label(text("brush_editor.texture.mode"));
@@ -526,7 +526,7 @@ fn show_texture_controls(ui: &mut Ui, texture: &mut BrushTexture) {
             ui.selectable_value(&mut texture.mode, BrushTextureMode::Final,
                 text("brush_editor.texture.final")).labelled_by(label.id);
         });
-        ui.checkbox(&mut texture.inverted, text("brush_editor.texture.invert"));
+        dtool_design::toggle(ui, &mut texture.inverted, text("brush_editor.texture.invert"));
         let mut percent = texture.scale * 100.0;
         if ui.add(egui::Slider::new(&mut percent, 1.0..=1000.0)
             .logarithmic(true).suffix("%").text(text("brush_editor.texture.scale"))).changed()

@@ -95,13 +95,13 @@ mod gradient_display_contracts {
     }
     #[test]
     fn all_gradient_kinds_use_the_same_source_points() {
-        let geom=GradientGeom{start:[10.0,10.0],end:[10.0,30.0],ratio:0.5};
+        let geom=GradientGeom{start:[10.0,10.0],end:[10.0,30.0],ratio:0.5, ..GradientGeom::default() };
         assert_eq!(gradient_parameter(GradientKind::Radial,10.0,20.0,&geom),0.5);
         assert_eq!(gradient_parameter(GradientKind::Elliptical,0.0,10.0,&geom),1.0);
         assert_eq!(gradient_parameter(GradientKind::Conical,-10.0,10.0,&geom),0.25);
-        let seam=GradientGeom{start:[0.0,0.0],end:[-1.0,-0.0],ratio:1.0};
+        let seam=GradientGeom{start:[0.0,0.0],end:[-1.0,-0.0],ratio:1.0, ..GradientGeom::default() };
         assert_eq!(gradient_parameter(GradientKind::Conical,-2.0,0.0,&seam),0.0);
-        let collapsed=GradientGeom{start:[2.0,3.0],end:[2.0,3.0],ratio:1.0};
+        let collapsed=GradientGeom{start:[2.0,3.0],end:[2.0,3.0],ratio:1.0, ..GradientGeom::default() };
         for kind in [GradientKind::Linear,GradientKind::Elliptical,GradientKind::Radial,GradientKind::Conical] {assert_eq!(gradient_parameter(kind,5.0,9.0,&collapsed),0.0);}
     }
     #[test]

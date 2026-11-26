@@ -22,10 +22,7 @@ fn tile_history_undo_restores_layer_masks_and_bumps_version() {
         ..Object::default()
     });
     session.document.pixel_layers.insert(id, PixelLayer::from_rgba(4, 4, &pixels));
-    session.document.layer_masks.push(LayerMask {
-        object: id,
-        coverage: coverage(4, 4, 255),
-    });
+    session.document.layer_masks.push(LayerMask::new(id, coverage(4, 4, 255)));
     let version = session.document.version;
     paint_region(&mut session, id, [0, 0, 1, 1], &[255, 0, 0, 255]).unwrap();
     assert!(session.document.version > version);

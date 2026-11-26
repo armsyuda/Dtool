@@ -331,7 +331,7 @@ pub const VIEW_OPTIONS: &[ToolOptionSpec] = &[
 
 pub const ZOOM_OPTIONS: &[ToolOptionSpec] = &[
     choice("zoom.mode", "context.zoom.mode", &["in", "out"], "in"),
-    number("zoom.level", "context.zoom.level", 1.0, 100000.0, 1.0, 100.0),
+    number("zoom.level", "context.zoom.level", 1.0, crate::ZOOM_MAX as f64 * 100.0, 1.0, 100.0),
     action("zoom.in", "context.zoom.in", "view.zoom.in"),
     action("zoom.out", "context.zoom.out", "view.zoom.out"),
     action("zoom.fit", "context.zoom.fit", "view.zoom.fit"),
@@ -390,11 +390,13 @@ const CURVE_ENERGY_TOGGLE: ToolOptionSpec = toggle(CURVE_ENERGY, "context.curve_
 const PEN_WIDTH: ToolOptionSpec = number(PEN_STROKE_WIDTH, STROKE_WIDTH_LABEL, 0.0, 1000.0, 0.1, 1.0);
 const PEN_PREVIEW: ToolOptionSpec = toggle("pen.rubber_band", "context.pen.rubber_band", false);
 const PEN_CLOSE: ToolOptionSpec = action("pen.close_curve", "context.pen.close_curve", "path.close");
+pub const PEN_CONSTRUCTION_SNAP: &str = "pen.snap_handle_construction";
 
 pub const PEN_OPTIONS: &[ToolOptionSpec] = &[
     PEN_WIDTH,
     choice("pen.mode", "context.pen.mode", &["pen", "smart", "polygon", "line", "spline", "b_spline"], "pen"),
     PEN_PREVIEW,
+    toggle(PEN_CONSTRUCTION_SNAP, "ctx.node.snap_handle_construction", false),
     PEN_CLOSE,
     CURVE_ENERGY_TOGGLE,
 ];
@@ -420,12 +422,35 @@ pub const STROKE_WIDTH_OPTIONS: &[ToolOptionSpec] = &[
     action("stroke_width.reset", "context.stroke_width.reset", "stroke.profile.reset"),
 ];
 
-pub const NODE_OPTIONS: &[ToolOptionSpec] = &[
+const NODE_CORNER_OPTIONS: [ToolOptionSpec; 4] = [
     choice("node.convert", "context.node.convert", &["sharp", "smooth", "smart"], "smooth"),
     toggle("node.transform_mode", "context.node.transform_mode", false),
     action("node.close_curve", "context.node.close_curve", "path.close"),
     CURVE_ENERGY_TOGGLE,
 ];
+
+pub const NODE_HIDE_TRANSFORM_BOX: &str = "node.hide_transform_box";
+pub const NODE_SHOW_ALIGNMENT_HANDLES: &str = "node.show_alignment_handles";
+pub const NODE_BOX_FROM_CURVES: &str = "node.box_from_curves";
+pub const NODE_TRANSFORM_SEPARATELY: &str = "node.transform_separately";
+
+pub const NODE_OPTIONS: &[ToolOptionSpec] = &{
+    let [convert, transform, close, energy] = NODE_CORNER_OPTIONS;
+    [
+        convert, transform, close, energy,
+        toggle("node.show_transform_origin", "context.move.show_transform_origin", false),
+        toggle(NODE_HIDE_TRANSFORM_BOX, "context.node.hide_transform_box", false),
+        toggle(NODE_SHOW_ALIGNMENT_HANDLES, "context.node.show_alignment_handles", false),
+        toggle(NODE_TRANSFORM_SEPARATELY, "context.move.transform_separately", false),
+        toggle(NODE_BOX_FROM_CURVES, "context.node.box_from_curves", false),
+        toggle("node.show_orientation", "ctx.node.show_orientation", false),
+        toggle("node.align_to_nodes", "ctx.node.align_to_nodes", false),
+        toggle("node.snap_to_geometry", "ctx.node.snap_to_geometry", false),
+        toggle("node.snap_all_selected", "ctx.node.snap_all_selected", false),
+        toggle("node.snap_handle_global", "ctx.node.snap_handle_global", true),
+        toggle("node.snap_handle_construction", "ctx.node.snap_handle_construction", false),
+    ]
+};
 
 pub const POINT_TRANSFORM_OPTIONS: &[ToolOptionSpec] = &[
     toggle("point_transform.snap_to_points", "context.point_transform.snap_to_points", true),
@@ -666,7 +691,8 @@ pub fn options_for(tool: &str) -> &'static [ToolOptionSpec] {
         "tool.view" => VIEW_OPTIONS,
         "tool.table" => TABLE_OPTIONS,
         "tool.zoom" => ZOOM_OPTIONS,
-        "tool.node" | "tool.corner" => NODE_OPTIONS,
+        "tool.node" => NODE_OPTIONS,
+        "tool.corner" => &NODE_CORNER_OPTIONS,
         "tool.stroke_width" => STROKE_WIDTH_OPTIONS,
         "tool.point_transform" => POINT_TRANSFORM_OPTIONS,
         "tool.pen.pencil" => PENCIL_OPTIONS,

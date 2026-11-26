@@ -25,7 +25,7 @@ fn shadow(offset: f32, radius: f32, colour: Colour, blend: BlendMode) -> LayerEf
     let mut effect = default_effect(EffectKind::OuterShadow);
     effect.opacity = 1.0;
     effect.blend = blend;
-    effect.params = EffectParams::Shadow { radius, offset, angle: 135.0, intensity: 0.0, colour, knock_out: true };
+    effect.params = EffectParams::Shadow { radius, radius_y: None, blur_angle: None, offset, angle: 135.0, intensity: 0.0, colour, knock_out: true };
     effect
 }
 
@@ -186,7 +186,7 @@ fn applied_document_effect_is_picked() {
     assert_eq!(live_effects(&doc, id, &[]).len(), 1);
     assert_eq!(rgba(pick(&doc, 55.0, 55.0, PickMode::Point, None).unwrap()), [0, 0, 255, 255]);
     let mut green = blue_shadow();
-    green.params = EffectParams::Shadow { radius: 0.0, offset: 10.0, angle: 135.0, intensity: 0.0, colour: Colour::new(0, 120, 0, 255), knock_out: true };
+    green.params = EffectParams::Shadow { radius_y: None, blur_angle: None, radius: 0.0, offset: 10.0, angle: 135.0, intensity: 0.0, colour: Colour::new(0, 120, 0, 255), knock_out: true };
     assert_eq!(at(&doc, 55.0, 55.0, &[StagedEffect { object: id, index: Some(0), effect: green }]), [0, 120, 0, 255]);
 }
 
@@ -199,7 +199,7 @@ fn pick_matches_shared_render_for_new_effect_kinds() {
     glow.params = EffectParams::Glow { radius: 3.0, intensity: 0.3, colour: Colour::new(0, 255, 0, 255), from_centre: false };
     let bevel = default_effect(EffectKind::BevelEmboss);
     let mut blur = default_effect(EffectKind::GaussianBlur);
-    blur.params = EffectParams::Blur { radius: 2.0, preserve_alpha: false };
+    blur.params = EffectParams::Blur { radius: 2.0, radius_y: None, angle: None, preserve_alpha: false };
     doc.objects.iter_mut().find(|o| o.id == id).unwrap().effects = vec![shadow(8.0, 3.0, Colour::new(0, 0, 0, 255), BlendMode::Multiply), inner, glow, bevel, blur];
     let flags = Default::default();
     for (x, y) in [(11.0f32, 30.0f32), (30.0, 11.5), (49.0, 49.0), (30.0, 30.0), (52.0, 52.0), (56.0, 40.0)] {

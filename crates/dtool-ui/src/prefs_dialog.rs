@@ -357,6 +357,8 @@ pub struct PrefsDialog {
     entry: String,
     entry_with: String,
     selected: Option<usize>,
+    window_size: Option<egui::Vec2>,
+    resize_start: Option<(egui::Pos2, egui::Vec2)>,
 }
 
 impl Default for PrefsDialog {
@@ -373,6 +375,8 @@ impl Default for PrefsDialog {
             entry: String::new(),
             entry_with: String::new(),
             selected: None,
+            window_size: None,
+            resize_start: None,
         }
     }
 }
@@ -422,57 +426,72 @@ impl PrefsDialog {
         let before_prefs = prefs.clone();
         let before_settings = serde_json::to_value(&*settings).ok();
         let mut open = self.open;
+        let mut dismiss = false;
         let viewport = ui.ctx().content_rect();
-        let size = egui::vec2((viewport.width() - 48.0).clamp(620.0, 800.0),
-            (viewport.height() - 92.0).clamp(360.0, 600.0));
+        let maximum = (viewport.size() - egui::vec2(32.0, 64.0)).max(egui::vec2(300.0, 220.0));
+        let initial = egui::vec2(820.0, 630.0).min(maximum);
+        let minimum = egui::vec2(460.0, 300.0).min(maximum);
+        let size = self.window_size.unwrap_or(initial).clamp(minimum, maximum);
         egui::Window::new(text("pref.dialog.title"))
             .collapsible(false)
-            .resizable(true)
-            .default_size(size)
-            .default_pos(viewport.center() - size * 0.5)
-            .min_width(620.0)
+            .fixed_size(size)
+            .default_pos(viewport.center() - initial * 0.5)
             .open(&mut open)
             .show(ui.ctx(), |ui| {
-                let body_height = ui.available_height().clamp(260.0, 650.0);
-                ui.horizontal_top(|ui| {
-                    ui.vertical(|ui| {
-                        ui.set_width(166.0);
-                        ui.add(egui::TextEdit::singleline(&mut self.search)
-                            .hint_text(text("pref.search")).desired_width(166.0));
-                        ui.add_space(space("sm"));
-                        let query = self.search.trim().to_lowercase();
-                        egui::ScrollArea::vertical().id_salt("pref.navigation")
-                            .max_height(body_height - 28.0).auto_shrink([false, false]).show(ui, |ui| {
-                            for page in PrefsTab::ALL {
-                                if !query.is_empty() && !page.title().to_lowercase().contains(&query) {
-                                    continue;
-                                }
-                                let selected = self.tab == page;
-                                let mut label = egui::RichText::new(page.title());
-                                if selected { label = label.color(ui.visuals().selection.stroke.color); }
-                                let row = egui::Button::selectable(selected, label)
-                                    .min_size(egui::vec2(ui.available_width(), 24.0));
-                                if ui.add(row).clicked() && self.tab != page {
-                                    self.tab = page;
-                                    self.selected = None;
-                                }
-                            }
+                let content = ui.available_rect_before_wrap();
+                let body_height = (content.height() - 48.0).max(140.0);
+                if ui.available_width() >= 560.0 {
+                    let navigation_width = (ui.available_width() * 0.25).clamp(168.0, 208.0);
+                    ui.horizontal_top(|ui| {
+                        ui.vertical(|ui| {
+                            ui.set_width(navigation_width);
+                            dtool_design::dialog_section(ui, |ui| {
+                                let search_width = ui.available_width();
+                                self.search_field(ui, search_width);
+                                egui::ScrollArea::vertical().id_salt("pref.navigation")
+                                    .max_height(body_height - 38.0).auto_shrink([false, false])
+                                    .show(ui, |ui| {
+                                        for page in self.filtered_tabs() {
+                                            let selected = self.tab == page;
+                                            let width = ui.available_width();
+                                            let row = dtool_design::with_icon_selection(ui, |ui| {
+                                                ui.add(egui::Button::selectable(selected, page.title())
+                                                    .truncate().min_size(egui::vec2(width, 25.0)))
+                                            });
+                                            if row.on_hover_text(page.title()).clicked() {
+                                                self.select_page(page);
+                                            }
+                                        }
+                                    });
+                            });
                         });
+                        ui.vertical(|ui| self.settings_panel(ui, body_height, prefs, settings));
                     });
-                    ui.add_space(space("lg"));
-                    ui.vertical(|ui| {
-                        ui.set_width(ui.available_width());
-                        ui.heading(self.tab.title());
-                        ui.add_space(space("sm"));
-                        egui::ScrollArea::vertical()
-                            .id_salt("pref.body")
-                            .max_height(body_height - 28.0)
-                            .auto_shrink([false, false])
-                            .show(ui, |ui| self.show_body(ui, prefs, settings));
+                } else {
+                    ui.horizontal(|ui| {
+                        let search_width = (ui.available_width() * 0.42).max(94.0);
+                        self.search_field(ui, search_width);
+                        egui::ComboBox::from_id_salt("pref.category").selected_text(self.tab.title())
+                            .width(ui.available_width()).truncate().show_ui(ui, |ui| {
+                                for page in self.filtered_tabs() {
+                                    if ui.selectable_label(self.tab == page, page.title()).clicked() {
+                                        self.select_page(page);
+                                    }
+                                }
+                            });
                     });
-                });
+                    self.settings_panel(ui, body_height - 30.0, prefs, settings);
+                }
+                ui.separator();
+                ui.allocate_ui_with_layout(egui::vec2(content.width() - 20.0, 26.0),
+                    egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        dismiss = button(ui, text("common.close")).clicked();
+                    });
+                ui.expand_to_include_rect(content);
+                self.resize_window(ui, content.right_bottom(), size, minimum, maximum);
             });
-        self.open = open;
+        self.open = open && !dismiss && (egui::Popup::is_any_open(ui.ctx())
+            || dtool_design::dialog_keys(ui) != Some(dtool_design::DialogKey::Cancel));
         if *prefs != before_prefs {
             settings.text_contrast = prefs.text_contrast;
             let _ = prefs.save(&self.prefs_path);
@@ -481,6 +500,60 @@ impl PrefsDialog {
         if serde_json::to_value(&*settings).ok() != before_settings {
             let _ = settings.save(&self.ui_path);
         }
+    }
+
+    fn resize_window(&mut self, ui: &mut Ui, corner: egui::Pos2, size: egui::Vec2, minimum: egui::Vec2, maximum: egui::Vec2) {
+        let rect = egui::Rect::from_min_max(corner - egui::Vec2::splat(18.0), corner);
+        let handle = ui.interact(rect, ui.id().with("pref.resize"), egui::Sense::DRAG)
+            .on_hover_and_drag_cursor(egui::CursorIcon::ResizeNwSe);
+        handle.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Splitter, true, "Resize window"));
+        let anchor = corner - egui::Vec2::splat(2.0);
+        let stroke = ui.style().interact(&handle).fg_stroke;
+        for length in [4.0, 8.0, 12.0] {
+            ui.painter().line_segment([anchor - egui::vec2(length, 0.0), anchor - egui::vec2(0.0, length)], stroke);
+        }
+        if let Some(origin) = ui.input(|input| input.events.iter().rev().find_map(|event| match event {
+            egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, .. }
+                if rect.contains(*pos) => Some(*pos),
+            _ => None,
+        })) && ui.ctx().layer_id_at(origin) == Some(ui.layer_id()) {
+            self.resize_start = Some((origin, size));
+        }
+        let (pointer, down) = ui.input(|input| (input.pointer.interact_pos(), input.pointer.primary_down()));
+        if let Some((origin, initial)) = self.resize_start && let Some(pointer) = pointer {
+            self.window_size = Some((initial + (pointer - origin)).clamp(minimum, maximum));
+            ui.ctx().request_repaint();
+        }
+        if !down {
+            self.resize_start = None;
+        }
+    }
+
+    fn search_field(&mut self, ui: &mut Ui, width: f32) {
+        ui.add(egui::TextEdit::singleline(&mut self.search).id_salt("pref.category_filter")
+            .hint_text(text("pref.search")).desired_width(width));
+    }
+
+    fn filtered_tabs(&self) -> impl Iterator<Item = PrefsTab> + use<> {
+        let query = self.search.trim().to_lowercase();
+        PrefsTab::ALL.into_iter().filter(move |page| page.title().to_lowercase().contains(&query))
+    }
+
+    fn select_page(&mut self, page: PrefsTab) {
+        if self.tab != page {
+            self.tab = page;
+            self.selected = None;
+        }
+    }
+
+    fn settings_panel(&mut self, ui: &mut Ui, height: f32, prefs: &mut Prefs, settings: &mut UiSettings) {
+        dtool_design::dialog_section(ui, |ui| {
+            ui.set_width(ui.available_width());
+            panel_header(ui, self.tab.title());
+            egui::ScrollArea::vertical().id_salt(("pref.body", self.tab.key()))
+                .max_height((height - 28.0).max(96.0)).auto_shrink([false, false])
+                .show(ui, |ui| self.show_body(ui, prefs, settings));
+        });
     }
 
     fn show_body(&mut self, ui: &mut Ui, prefs: &mut Prefs, settings: &mut UiSettings) {

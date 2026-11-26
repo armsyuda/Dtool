@@ -55,7 +55,7 @@ impl Default for Options {
 }
 
 impl Options {
-    pub(super) fn write_params(&self, params: &mut Value) {
+    pub(super) fn write_params(&self, params: &mut Value, units: Units) {
         if let Some(kind) = self.kind {
             params["document_kind"] = json!(kind);
         }
@@ -63,16 +63,26 @@ impl Options {
         if let Some(profile) = &self.profile {
             params["colour_profile"] = json!(profile);
         }
+        let to_setup_units = |mut sides: Margins| {
+            if units == Units::Cm {
+                // Document setup stores metric geometry in millimetres.
+                sides.left *= 10.0;
+                sides.right *= 10.0;
+                sides.top *= 10.0;
+                sides.bottom *= 10.0;
+            }
+            sides
+        };
         let mut setup = json!({
             "transparent_background": self.transparent,
-            "margins": self.margins,
+            "margins": to_setup_units(self.margins),
             "facing_pages": self.facing_pages,
             "start_on_right": self.start_on_right,
             "drawing_scale": self.drawing_scale,
             "measurement_unit": self.measurement_unit,
         });
         if let Some(bleed) = &self.bleed {
-            setup["bleed"] = json!(bleed);
+            setup["bleed"] = json!(to_setup_units(*bleed));
         }
         params["setup"] = setup;
     }
@@ -87,16 +97,20 @@ impl Options {
         };
     }
 
-    pub(super) fn show_kind(&mut self, ui: &mut Ui) -> bool {
+    pub(super) fn show_kind(&mut self, ui: &mut Ui, icons: &mut crate::icon_cache::IconCache) -> bool {
         ui.horizontal(|ui| {
             let previous = self.kind;
-            for (kind, label) in [
-                (DocumentKind::VectorArtboard, "dialog.new_document.kind.vector_artboard"),
-                (DocumentKind::LayoutPages, "dialog.new_document.kind.layout_pages"),
-            ] {
-                if dtool_design::tab(ui, self.kind == Some(kind), text(label)).clicked() {
+            let choices = [
+                (DocumentKind::VectorArtboard, "tool-artboard", "dialog.new_document.kind.vector_artboard"),
+                (DocumentKind::LayoutPages, "persona-layout", "dialog.new_document.kind.layout_pages"),
+            ];
+            for (kind, icon, label) in choices {
+                if icons.studio_button(ui, icon, text(label), self.kind == Some(kind)).clicked() {
                     self.kind = Some(kind);
                 }
+            }
+            if let Some((_, _, label)) = choices.into_iter().find(|(kind, _, _)| self.kind == Some(*kind)) {
+                ui.label(text(label));
             }
             self.kind != previous
         }).inner
@@ -120,6 +134,7 @@ impl Options {
     }
 
     pub(super) fn show_layout(&mut self, ui: &mut Ui) -> bool {
+        super::options_group(ui, text("dialog.new_document.page_layout"));
         let mut changed = toggle(ui, &mut self.facing_pages, text("doc_setup.facing_pages")).changed();
         changed |= ui.add_enabled_ui(self.facing_pages, |ui| {
             arrangement(ui, text("doc_setup.start_on"), &mut self.start_on_right,
@@ -130,24 +145,21 @@ impl Options {
 
     pub(super) fn show(&mut self, ui: &mut Ui, units: Units, dpi: f32, reset: bool, invalid: &mut bool) -> bool {
         let mut changed = false;
-        ui.separator();
-        ui.strong(text("doc_setup.colour"));
+        super::options_group(ui, text("doc_setup.colour"));
         ui.label(text("doc_setup.colour_format"));
-        egui::ComboBox::from_id_salt("new_document.format")
-            .selected_text(self.format.to_string())
-            .show_ui(ui, |ui| {
+        dtool_design::with_icon_selection(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
                 for &format in ColourFormat::colour_format_list() {
-                    if ui
-                        .selectable_label(format == self.format, format.to_string())
-                        .clicked()
-                        && format != self.format
-                    {
+                    let button = egui::Button::selectable(format == self.format, format.to_string())
+                        .wrap_mode(egui::TextWrapMode::Extend);
+                    if ui.add(button).clicked() && format != self.format {
                         self.format = format;
                         self.profile = None;
                         changed = true;
                     }
                 }
             });
+        });
         if let Ok(services) = colour::services().read() {
             let default =
                 dtool_core::commands::document_colour::default_profile(self.format, &services);
@@ -165,7 +177,7 @@ impl Options {
             );
             let selected_label = self.profile.as_deref().unwrap_or(&default_label);
             egui::ComboBox::from_id_salt("new_document.profile")
-                .width(196.0)
+                .width(ui.available_width().min(280.0)).truncate()
                 .selected_text(selected_label)
                 .show_ui(ui, |ui| {
                     if ui
@@ -191,9 +203,10 @@ impl Options {
             text("menu.document.setup.transparent_background"),
         )
         .changed();
-        ui.separator();
+        crate::dialog_chrome::options_divider(ui);
         let margins_edit = sides_editor(ui, &mut self.margins, units, "doc_setup.margins", reset);
         changed |= margins_edit.changed;
+        crate::dialog_chrome::options_divider(ui);
         let amount = dtool_core::command::new_document_bleed(units, dpi);
         let mut bleed = self.bleed.unwrap_or(Margins {
             enabled: true,
@@ -208,7 +221,7 @@ impl Options {
             self.bleed = Some(bleed);
             changed = true;
         }
-        ui.separator();
+        crate::dialog_chrome::options_divider(ui);
         let (scale_changed, invalid_scale) = drawing_scale_section(
             ui, &mut self.drawing_scale, &mut self.measurement_unit,
             egui::Id::unique("new_document_scale_input"), reset,

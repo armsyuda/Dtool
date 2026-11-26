@@ -10,8 +10,7 @@ pub(crate) fn import(
     destination: &mut Document,
     objects: &HashMap<ObjectId, ObjectId>,
     pages: &HashMap<PageId, PageId>,
-    directory: &Path,
-    factor: f32,
+    directory: Option<&Path>,
 ) -> Result<usize, CommandError> {
     let mut count = 0;
     for definition in &source.symbols.definitions {
@@ -21,20 +20,20 @@ pub(crate) fn import(
         }).collect();
         let Some(&(_, first_root)) = instances.first() else { continue; };
         let origin = destination.get_object(first_root).ok_or_else(CommandError::not_found)?.pos;
-        let shift = std::array::from_fn(|axis| origin[axis] - definition.origin[axis] * factor);
+        let shift: [f32; 2] = std::array::from_fn(|axis| origin[axis] - definition.origin[axis]);
         let names: Vec<_> = destination.symbols.definitions.iter().map(|entry| entry.name.clone()).collect();
         let mut copy = definition.clone();
-        copy.id = destination.symbols.definitions.iter().map(|entry| entry.id).max().unwrap_or(0)
-            .checked_add(1).ok_or_else(CommandError::invalid_params)?;
+        copy.id = destination.symbols.next_definition_id()?;
         copy.name = crate::longdoc::helpers::unique_name(&names, &definition.name);
         copy.origin = origin;
-        copy.size = copy.size.map(|value| value * factor);
 
         let (nodes, stories) = remap_definition(&mut copy, destination, objects, pages)?;
-        crate::longdoc::page_import::resolve_bundle_links(&mut copy.bundle, directory);
-        crate::longdoc::page_import::import_swatches(destination, &copy.bundle);
-        crate::doc_setup::transform_object_dimensions(&mut copy.bundle.objects, factor, [factor; 2], |pos, size, axis| {
-            (pos * factor + shift[axis], size * factor)
+        if let Some(directory) = directory {
+            crate::longdoc::page_import::resolve_bundle_links(&mut copy.bundle, directory);
+            crate::longdoc::page_import::import_swatches(destination, &copy.bundle);
+        }
+        crate::doc_setup::transform_object_dimensions(&mut copy.bundle.objects, 1.0, [1.0; 2], |pos, size, axis| {
+            (pos + shift[axis], size)
         })?;
 
         for (instance, root) in instances {
@@ -60,7 +59,7 @@ pub(crate) fn import(
             new.curve_overrides.retain_mut(|entry| {
                 let Some(&node) = nodes.get(&entry.node) else { return false; };
                 entry.node = node;
-                entry.relocate(factor, shift, instance_shift);
+                entry.relocate(1.0, shift, instance_shift);
                 true
             });
             if placed.name == definition.name {

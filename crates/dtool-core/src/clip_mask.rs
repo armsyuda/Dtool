@@ -1,6 +1,6 @@
 use crate::command::Session;
 use crate::geometry::{object_matrix, object_world_quad};
-use crate::object::{ClipRole, Object, ObjectId};
+use crate::object::{ClipRole, Object, ObjectId, ObjectKind};
 use crate::paint::{Colour, Paint};
 use crate::scene::{doc_contours, Prim, Scene};
 use crate::view_state::CanvasFlags;
@@ -43,8 +43,11 @@ fn mask_rings(doc: &Document, object: &Object) -> Vec<Ring> {
 
 fn world_rings(doc: &Document, object: &Object) -> Vec<Ring> {
     let rings = mask_rings(doc, object);
-    if !rings.is_empty() || (object.is_group() && object.expanded_stroke_effects && object.clip_role == ClipRole::Mask) {
-        return rings;
+    // A closed mask with no filled region hides the entire target.
+    let closed_mask = object.clip_role == ClipRole::Mask && matches!(&object.kind, ObjectKind::Curve(curve)
+        if curve.contour.closed || curve.holes.iter().any(|contour| contour.closed));
+    if !rings.is_empty() || closed_mask || (object.is_group() && object.expanded_stroke_effects && object.clip_role == ClipRole::Mask) {
+        return crate::boolean::parity_rings(rings, object.fill_rule);
     }
     vec![object_world_quad(object).iter().map(|p| [f64::from(p[0]), f64::from(p[1])]).collect()]
 }
@@ -97,6 +100,17 @@ pub fn has_roles(doc: &Document) -> bool {
 }
 
 pub fn clip_region(doc: &Document, id: ObjectId) -> Option<Vec<Ring>> {
+    let masks = layer_clip_region(doc, id);
+    let Some(quad) = doc.get_object(id).and_then(crate::scene::oriented_vector_crop) else { return masks };
+    let crop = vec![quad_ring(quad)];
+    Some(match masks {
+        Some(rings) => intersect(&rings, &crop, FillRule::EvenOdd),
+        None => crop,
+    })
+}
+
+/// Clipping and mask layers, excluding the object's own crop.
+pub fn layer_clip_region(doc: &Document, id: ObjectId) -> Option<Vec<Ring>> {
     let mut shapes: Vec<Vec<Ring>> = Vec::new();
     let mut current = doc.get_object(id)?;
     for _ in 0..64 {
@@ -136,6 +150,32 @@ fn prim_object(prim: &Prim) -> Option<ObjectId> {
 
 pub(crate) fn clip_fill_contours(contours: &[Vec<[f32; 2]>], region: &[Ring]) -> Vec<Vec<[f32; 2]>> {
     to_contours(&intersect(&to_rings(contours), region, FillRule::EvenOdd))
+}
+
+/// Intersect even-odd vector ink with a document-space rectangle.
+pub fn clip_fill_rect(contours: &[Vec<[f32; 2]>], [x, y, width, height]: [f32; 4]) -> Vec<Vec<[f32; 2]>> {
+    if width <= 0.0 || height <= 0.0 {
+        return Vec::new();
+    }
+    let [left, top, right, bottom] = [x, y, x + width, y + height].map(f64::from);
+    let region = [vec![[left, top], [right, top], [right, bottom], [left, bottom]]];
+    clip_fill_contours(contours, &region)
+}
+
+fn quad_ring(quad: crate::scene::Quad) -> Ring {
+    quad.into_iter().map(|point| point.map(f64::from)).collect()
+}
+
+/// Trim vector ink geometrically. Raster and glyph ink use the clip region when drawn.
+pub(crate) fn clip_crop_ink(object: &Object, quad: crate::scene::Quad, start: usize, prims: &mut Vec<Prim>) {
+    let region = [quad_ring(quad)];
+    for prim in prims.split_off(start) {
+        if matches!(prim, Prim::Fill { .. } | Prim::Appearance { .. } | Prim::Stroke { .. }) {
+            clip_prim(prim, object, &region, prims);
+        } else {
+            prims.push(prim);
+        }
+    }
 }
 
 fn clip_prim(prim: Prim, object: &Object, region: &[Ring], out: &mut Vec<Prim>) {
@@ -198,7 +238,7 @@ pub fn apply(doc: &Document, flags: &CanvasFlags, scene: &mut Scene) {
             }
             continue;
         }
-        match regions.entry(object.id).or_insert_with(|| clip_region(doc, object.id)) {
+        match regions.entry(object.id).or_insert_with(|| layer_clip_region(doc, object.id)) {
             Some(region) => clip_prim(prim, object, region, &mut out),
             None => out.push(prim),
         }

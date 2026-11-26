@@ -138,7 +138,7 @@ impl RefineDialog {
         ];
         ui.label(text("refine.preview"));
         self.dirty |= dtool_design::dropdown_value(ui, "refine.preview", &mut self.preview, &previews, &Default::default()).changed();
-        self.dirty |= ui.checkbox(&mut self.matte, text("refine.matte_edges")).changed();
+        self.dirty |= dtool_design::toggle(ui, &mut self.matte, text("refine.matte_edges")).changed();
         self.dirty |= ui.add_enabled_ui(self.matte, |ui| {
             slider(ui, "refine.border_width", &mut self.border, 0.0..=100.0, " px")
         }).inner;
@@ -170,7 +170,7 @@ impl RefineDialog {
         ui.label(text("refine.output"));
         dtool_design::dropdown_value(ui, "refine.output", &mut self.output, &outputs, &Default::default());
         let pixels = matches!(self.output, RefineOutput::NewLayer | RefineOutput::NewLayerWithMask);
-        ui.add_enabled(pixels, egui::Checkbox::new(&mut self.decontaminate, text("refine.decontaminate")));
+        dtool_design::toggle_with(ui, &mut self.decontaminate, text("refine.decontaminate"), &dtool_design::ControlState::enabled(pixels));
     }
 
     fn show_preview(&mut self, ui: &mut Ui, size: egui::Vec2) {

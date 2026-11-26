@@ -330,7 +330,7 @@ fn active_edge(edge: &Option<EdgeStyle>) -> Option<&EdgeStyle> {
 }
 
 fn insets(ui: &mut Ui, insets: &mut Insets, units: &str) {
-    ui.checkbox(&mut insets.linked, text("table.panel.link_insets"));
+    dtool_design::toggle(ui, &mut insets.linked, text("table.panel.link_insets"));
     let mut linked_value = None;
     for (key, target) in [("table.inset.left", &mut insets.left), ("table.inset.top", &mut insets.top),
         ("table.inset.right", &mut insets.right), ("table.inset.bottom", &mut insets.bottom)] {

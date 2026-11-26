@@ -151,7 +151,7 @@ fn fields(ui: &mut egui::Ui, content: &mut QrContent) -> bool {
             } else {
                 password.clear();
             }
-            changed | ui.checkbox(hidden, text("qr.hidden")).changed()
+            changed | dtool_design::toggle(ui, hidden, text("qr.hidden")).changed()
         }
         QrContent::Vcard { given, family, number, address, organization } => {
             single(ui, "qr.given", given) | single(ui, "qr.family", family)

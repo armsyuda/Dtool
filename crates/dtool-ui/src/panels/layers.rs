@@ -11,6 +11,7 @@ use serde_json::{json, Value};
 
 pub const LAYER_THUMB_PX: f64 = 48.0;
 const TEXT_THUMBNAIL_DELAY: std::time::Duration = std::time::Duration::from_millis(150);
+const LAYER_ROW_GAP: f32 = 1.0;
 type ThumbnailStamp = (ContextId, u64, u64);
 type LayerThumbnailJob = super::ThumbnailJob<ThumbnailStamp, Vec<(u64, Option<egui::ColorImage>)>>;
 
@@ -26,7 +27,7 @@ fn render_layer_thumbnail(document: &Document, id: u64) -> Option<egui::ColorIma
     root.clip_role = dtool_core::object::ClipRole::None;
     let contents: Vec<_> = doc.objects.iter().filter(|object| object.pickable).map(|object| object.id).collect();
     let (x, y, width, height) = dtool_export::selection_region(&doc, &contents)?;
-    let scale = LAYER_THUMB_PX as f32 / width.max(height).max(1.0);
+    let scale = (dtool_design::size("layers.row.height") * 2.0) / width.max(height).max(1.0);
     let opts = dtool_export::raster::ExportOptions {
         area: dtool_export::ExportArea::Rect([x, y, width.max(1.0), height.max(1.0)]),
         width: Some((width * scale).round().max(1.0) as u32),
@@ -105,6 +106,8 @@ pub struct LayersPanel {
     background_thumbnails: bool,
     stale_thumbnails: BTreeSet<u64>,
     thumbnail_job: Option<LayerThumbnailJob>,
+    symbol_stamp: Option<ThumbnailStamp>,
+    symbol_links: HashMap<ObjectId, dtool_core::commands::symbols::LayerLink>,
     pub last_error: Option<String>,
     pub filter: String,
     pub tags: BTreeMap<u64, String>,
@@ -403,6 +406,36 @@ fn layer_kind_icon(document: &Document, object: &dtool_core::object::Object) -> 
     }
 }
 
+fn layer_kind_label(icon: &str) -> String {
+    let key = match icon {
+        "tool-paint-pixel" => "layers.kind.pixel",
+        "tool-flood-fill" => "layers.kind.fill",
+        "tool-artboard" => "tool.artboard",
+        "layer-folder" => "layers.folder",
+        "cmd-group" => "menu.layer.group",
+        "tool-place-image" => "layers.kind.image",
+        "tool-picture-frame-ellipse" => "tool.picture_frame.ellipse",
+        "tool-picture-frame-rect" => "tool.picture_frame.rect",
+        "tool-artistic-text" => "tool.text.artistic",
+        "tool-frame-text" => "tool.text.frame",
+        "tool-text-path" => "tool.text.path",
+        "tool-measure" => "layers.kind.dimension",
+        "tool-table" => "layers.kind.table",
+        "cmd-bool-add" => "layers.kind.compound",
+        "tool-rectangle" => "tool.shape.rectangle",
+        "tool-ellipse" => "tool.shape.ellipse",
+        "tool-polygon" => "tool.shape.polygon",
+        _ => {
+            if let Some(shape) = icon.strip_prefix("tool-shape-") {
+                let key = format!("tool.shape.{}", shape.replace('-', "_"));
+                if dtool_strings::has(&key) { return text(&key).to_owned(); }
+            }
+            "layers.kind.shape"
+        }
+    };
+    text(key).to_owned()
+}
+
 pub fn thumbnail_command(id: u64) -> Command {
     Command::with_params("render.node_preview", json!({ "id": id, "max_px": LAYER_THUMB_PX }))
 }
@@ -528,35 +561,38 @@ impl LayersPanel {
         Ok(json!({"collapsed": ids.len()}))
     }
 
-    pub fn rows(&self, workspace: &mut CoreWorkspace) -> Vec<LayerRow> {
+    pub fn rows(&self, workspace: &CoreWorkspace) -> Vec<LayerRow> {
         let Some(session) = workspace.session() else { return Vec::new(); };
-        let selected = session.selection.ids.clone();
-        let command = Self::tree_command(session);
-        let (_, result) = workspace.run(Scope::active(), command);
-        match result {
-            Ok(value) => {
-                let mut nodes = query_nodes(&value);
-                if let Some(session) = workspace.session() {
-                    let document = &session.document;
-                    for node in nodes.iter_mut().filter(|node| node.name.is_empty()) {
-                        if let Some(name) = document.get_object(ObjectId(node.id))
-                            .and_then(|object| dtool_core::commands::layer_meta::text_layer_name(document, object))
-                        {
-                            node.name = name;
-                        }
-                    }
-                }
-                let query = self.filter.trim().to_lowercase();
-                let collapsed = if query.is_empty() {
-                    self.collapsed.iter().copied().filter(|id| !self.revealed(workspace, *id)).collect()
-                } else {
-                    retain_matching_branches(&mut nodes, &query, &self.tags);
-                    BTreeSet::new()
-                };
-                tree_rows(&nodes, &selected, &collapsed)
+        let Ok((wrapper, objects)) = dtool_core::commands::arrange::layer_panel_objects(session) else {
+            return Vec::new();
+        };
+        let document = &session.document;
+        let mut kind_labels = HashMap::new();
+        let mut nodes: Vec<_> = objects.into_iter().map(|object| {
+            let name = if object.name.is_empty() {
+                dtool_core::commands::layer_meta::text_layer_name(document, object).unwrap_or_else(|| {
+                    let icon = layer_kind_icon(document, object);
+                    kind_labels.entry(icon).or_insert_with(|| layer_kind_label(icon)).clone()
+                })
+            } else {
+                object.name.clone()
+            };
+            TreeNode {
+                id: object.id.0,
+                name,
+                parent: object.parent_id.filter(|parent| Some(*parent) != wrapper).map(|id| id.0),
+                visible: object.pickable,
+                locked: object.locked,
             }
-            Err(_) => Vec::new(),
-        }
+        }).collect();
+        let query = self.filter.trim().to_lowercase();
+        let collapsed = if query.is_empty() {
+            self.collapsed.iter().copied().filter(|id| !self.revealed(workspace, *id)).collect()
+        } else {
+            retain_matching_branches(&mut nodes, &query, &self.tags);
+            BTreeSet::new()
+        };
+        tree_rows(&nodes, &session.selection.ids, &collapsed)
     }
 
     pub fn select(&mut self, workspace: &mut CoreWorkspace, id: u64, op: &str) {
@@ -959,7 +995,6 @@ impl LayersPanel {
             let mut row_command = None;
             let mut visibility = None;
             let mut locked = None;
-            let thumb = 22.0;
             let footer_width = ui.available_width().min(ui.clip_rect().width());
             let button_width = dtool_design::size("icon.size.md") + ui.spacing().button_padding.x * 2.0;
             let split_footer = footer_width < (button_width + ui.spacing().item_spacing.x) * 7.0 + 8.0;
@@ -981,11 +1016,12 @@ impl LayersPanel {
             };
             let thumbnails_deferred = self.prepare_thumbnails(ui.ctx(), workspace);
             let mut thumbnail_requests = Vec::new();
-            let row_height = 28.0;
+            let row_height = dtool_design::size("layers.row.height");
+            let thumb = row_height;
             let mut scroll = egui::ScrollArea::vertical().id_salt("layers.rows").max_height(rows_height)
                 .auto_shrink([false, !rows_height.is_finite()]);
             if let Some(index) = reveal.and_then(|id| rows.iter().position(|row| row.id == id)) {
-                let step = row_height + ui.spacing().item_spacing.y;
+                let step = row_height + LAYER_ROW_GAP;
                 scroll = scroll.vertical_scroll_offset(index as f32 * step);
             } else if filter_changed {
                 scroll = scroll.vertical_scroll_offset(0.0);
@@ -993,7 +1029,17 @@ impl LayersPanel {
             let tag_colours = workspace.session().map(|session| {
                 dtool_core::commands::layer_meta::effective_tag_colours(&session.document)
             }).unwrap_or_default();
-            scroll.show_rows(ui, row_height, rows.len(), |ui, visible| {
+            let active = workspace.active().zip(workspace.session());
+            let stamp = active.map(|(context, session)| (context, session.generation, session.document.version));
+            if self.symbol_stamp != stamp {
+                self.symbol_links = active.map(|(_, session)| {
+                    dtool_core::commands::symbols::layer_links(&session.document)
+                }).unwrap_or_default();
+                self.symbol_stamp = stamp;
+            }
+            ui.scope(|ui| {
+                ui.spacing_mut().item_spacing.y = LAYER_ROW_GAP;
+                scroll.show_rows(ui, row_height, rows.len(), |ui, visible| {
                 self.thumbnails.retain(|id,_| rows[visible.clone()].iter().any(|row| row.id == *id));
                 self.stale_thumbnails.retain(|id| self.thumbnails.contains_key(id));
                 for index in visible {
@@ -1007,31 +1053,40 @@ impl LayersPanel {
                         || searching && document.is_some_and(|doc| doc.objects.iter().any(|child| child.parent_id == Some(id)));
                     let page_number = document.filter(|doc| is_artboard && doc.pages.len() > 1)
                         .map(|doc| dtool_core::data_merge::layout::object_page_index(doc, id) + 1);
-                    let is_folder = object.is_some_and(dtool_core::object::Object::is_layer_folder);
-                    let kind = document.zip(object).map(|(doc, object)| layer_kind_icon(doc, object));
+                    let symbol = self.symbol_links.get(&id).copied();
+                    let symbol_label = symbol.map(|link| text(if link.modified { "layers.symbol.modified" } else { "layers.symbol.linked" }));
+                    let kind = if symbol.is_some_and(|link| link.is_root) {
+                        Some("panel-aspect-linked")
+                    } else {
+                        document.zip(object).map(|(doc, object)| layer_kind_icon(doc, object))
+                    };
                     let kind_icon = kind.and_then(|icon| self.mask_icons.themed_texture(ui.ctx(), icon, dtool_design::icon_texture_px(ui)));
                     let has_pixel_mask = document.is_some_and(|doc| doc.layer_masks.iter().any(|mask| mask.object == id));
-                    let texture = document.filter(|_| !is_folder && !is_artboard).and_then(|doc| {
+                    let texture = document.filter(|_| !is_artboard || row.has_children).and_then(|doc| {
                         self.thumbnail(ui.ctx(), doc, row.id, thumbnails_deferred, &mut thumbnail_requests)
                     });
                     let surface = dtool_design::theme::surface(ui.ctx(), "panel.bg");
                     let accent = ui.visuals().selection.bg_fill;
-                    let tile = surface.lerp_to_gamma(ui.visuals().text_color(), 0.11);
+                    let tile = dtool_design::color("layers.thumbnail");
                     let mut indicator = None;
                     let mut guide_left = None;
-                    let fill = if row.selected { surface.lerp_to_gamma(accent, 0.22) } else if index % 2 == 0 { surface } else { surface.gamma_multiply(0.93) };
-                    let painted = egui::Frame::new().fill(fill).inner_margin(egui::Margin { left: 8, ..egui::Margin::symmetric(3, 1) }).show(ui, |ui| { ui.horizontal(|ui| {
+                    let fill = if row.selected { dtool_design::color("layers.selected") } else { surface };
+                    let painted = egui::Frame::new().fill(fill).inner_margin(egui::Margin::symmetric(4, 0)).show(ui, |ui| {
+                        let size = egui::vec2(ui.available_width(), row_height);
+                        ui.allocate_ui_with_layout(size, egui::Layout::left_to_right(egui::Align::Center), |ui| {
                         let gap = 2.0;
                         ui.spacing_mut().item_spacing.x = gap;
-                        let disclosure_width = 16.0;
-                        let kind_width = 12.0;
+                        let disclosure_width = 10.0;
+                        let kind_width = dtool_design::size("layers.kind.size");
                         let state_width = 16.0;
-                        let effect_width = dtool_design::size("icon.size.md") + ui.spacing().button_padding.x * 2.0;
-                        let trailing_width = effect_width + state_width * 2.0 + gap * 3.0;
-                        let leading_width = disclosure_width + kind_width + thumb + gap * 3.0;
+                        let has_effects = object.is_some_and(|object| !object.effects.is_empty());
+                        let effect_width = if has_effects { button_width + gap } else { 0.0 };
+                        let trailing_width = effect_width + state_width * 2.0 + gap * 2.0;
+                        let leading_width = if row.has_children { disclosure_width + gap } else { 0.0 }
+                            + kind_width + thumb + gap * 2.0;
                         let preferred_name_width = 72.0;
                         let indent_budget = (ui.available_width() - leading_width - trailing_width - preferred_name_width).max(0.0);
-                        let indent_step = (indent_budget / 5.0).min(dtool_design::space("md"));
+                        let indent_step = indent_budget.min(16.0);
                         let indent = (row.depth as f32 * indent_step).min(indent_budget);
                         if indent > 0.0 {
                             ui.add_space(indent);
@@ -1065,8 +1120,6 @@ impl LayersPanel {
                             if button.on_hover_text(caption).clicked() && !searching {
                                 toggled = Some(row.id);
                             }
-                        } else {
-                            ui.allocate_space(egui::vec2(disclosure_width, 16.0));
                         }
                         let clip_role = object.map(|object| object.clip_role);
                         let clip_marker = match clip_role {
@@ -1074,36 +1127,54 @@ impl LayersPanel {
                             Some(dtool_core::object::ClipRole::Mask) => Some(("layer-mask", text("layers.thumbnail.mask"))),
                             _ => None,
                         };
-                        let (kind_rect, _) = ui.allocate_exact_size(egui::vec2(kind_width, 16.0), egui::Sense::hover());
+                        let kind_label = if kind == Some("panel-aspect-linked") {
+                            symbol_label.unwrap_or_else(|| text("layers.symbol.linked")).to_owned()
+                        } else {
+                            kind.map_or_else(|| text("layers.thumbnail").to_owned(), layer_kind_label)
+                        };
+                        let (kind_rect, kind_response) = ui.allocate_exact_size(egui::vec2(kind_width, kind_width), egui::Sense::hover());
+                        kind_response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, &kind_label));
+                        kind_response.on_hover_text(&kind_label);
                         if let Some(icon) = &kind_icon {
                             let ink = if row.visible { egui::Color32::WHITE } else { egui::Color32::WHITE.gamma_multiply(0.55) };
-                            ui.painter().image(icon.id(), egui::Rect::from_center_size(kind_rect.center(), egui::vec2(12.0, 12.0)),
+                            ui.painter().image(icon.id(), kind_rect,
                                 egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)), ink);
                         }
-                        let thumb_sense = egui::Sense::click_and_drag();
-                        let thumb_response = match texture.as_ref().or(kind_icon.as_ref()) {
-                            Some(texture) => {
-                                let size = thumb - 4.0;
-                                ui.add_sized(egui::vec2(thumb, thumb), egui::Button::image(egui::Image::new(texture)
-                                    .fit_to_exact_size(texture.size_vec2() * (size / texture.size_vec2().max_elem()))).fill(tile).sense(thumb_sense))
+                        let (thumb_rect, thumb_response) = ui.allocate_exact_size(egui::Vec2::splat(thumb), egui::Sense::click_and_drag());
+                        let painter = ui.painter().with_clip_rect(thumb_rect);
+                        painter.rect_filled(thumb_rect, 1.0, tile);
+                        if let Some(image) = &texture {
+                            let size = image.size_vec2();
+                            painter.image(image.id(), egui::Rect::from_center_size(thumb_rect.center(), size * ((thumb - 2.0) / size.max_elem())),
+                                egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
+                        } else if let Some(icon) = kind.and_then(|key| self.mask_icons.texture(ui.ctx(), key,
+                            dtool_design::tokens::color_in("dark", "icon"), dtool_design::icon_texture_px(ui)))
+                        {
+                            painter.image(icon.id(), egui::Rect::from_center_size(thumb_rect.center(), egui::Vec2::splat(kind_width + 2.0)),
+                                egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)), egui::Color32::WHITE.gamma_multiply(0.72));
+                        }
+                        if let Some(link) = symbol {
+                            let center = thumb_rect.left_bottom() + egui::vec2(6.0, -6.0);
+                            let ink = egui::Color32::from_rgb(246, 155, 81);
+                            painter.circle_filled(center, 5.5, tile);
+                            if link.modified {
+                                painter.circle_stroke(center, 3.5, egui::Stroke::new(1.5, ink));
+                            } else {
+                                painter.circle_filled(center, 3.5, ink);
                             }
-                            None => ui.add_sized(egui::vec2(thumb, thumb), egui::Button::new("").fill(tile).sense(thumb_sense)),
-                        };
+                        }
                         let thumbnail_kind = if let Some(page) = page_number {
                             text("layers.artboard_page").replace("{n}", &page.to_string())
                         } else if let Some((_, label)) = clip_marker {
                             label.to_owned()
                         } else {
-                            text(match kind {
-                                Some("tool-picture-frame-ellipse") => "tool.picture_frame.ellipse",
-                                Some("tool-picture-frame-rect") => "tool.picture_frame.rect",
-                                Some("cmd-group") => "menu.layer.group",
-                                _ if is_folder => "layers.folder",
-                                _ if is_artboard => "tool.artboard",
-                                _ => "layers.thumbnail",
-                            }).to_owned()
+                            kind_label
                         };
                         let mut thumbnail_label = format!("{} · {thumbnail_kind}", display_name(row.id, &row.name));
+                        if let Some(status) = symbol_label.filter(|status| *status != thumbnail_kind) {
+                            thumbnail_label.push_str(" · ");
+                            thumbnail_label.push_str(status);
+                        }
                         if has_pixel_mask {
                             thumbnail_label.push_str(" · ");
                             thumbnail_label.push_str(text("layers.thumbnail.pixel_mask"));
@@ -1155,9 +1226,11 @@ impl LayersPanel {
                                 thumb_dropped = Some((*payload, id));
                             }
                         }
-                        let name_size = egui::vec2((ui.available_width() - trailing_width).max(0.0), 23.0);
+                        let name_size = egui::vec2((ui.available_width() - trailing_width).max(0.0), row_height);
+                        let name_font = dtool_design::font_size("layer_name");
                         let label = if let Some(edit) = self.renaming.as_mut().filter(|edit| edit.id == id) {
                             let response = ui.add_sized(name_size, egui::TextEdit::singleline(&mut edit.name)
+                                .font(egui::FontId::proportional(name_font))
                                 .id_salt(("layers.rename", edit.owner, id)));
                             if std::mem::take(&mut edit.focus) {
                                 response.request_focus();
@@ -1185,7 +1258,7 @@ impl LayersPanel {
                                 let ink = if row.visible { ui.visuals().text_color() } else { ui.visuals().weak_text_color() };
                                 let (rect, response) = ui.allocate_exact_size(name_size, egui::Sense::click_and_drag());
                                 response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, ui.is_enabled(), &name));
-                                let label = egui::WidgetText::from(egui::RichText::new(&name).color(ink))
+                                let label = egui::WidgetText::from(egui::RichText::new(&name).size(name_font).color(ink))
                                     .into_galley(ui, Some(egui::TextWrapMode::Truncate), rect.width(), egui::TextStyle::Body);
                                 ui.painter().with_clip_rect(rect).galley(
                                     egui::pos2(rect.left(), rect.center().y - label.size().y * 0.5),
@@ -1219,6 +1292,12 @@ impl LayersPanel {
                             let Some(session) = workspace.session() else { return };
                             let ids = if row.selected { session.selection.ids.as_slice() } else { std::slice::from_ref(&id) };
                             let selected = || ids.iter().filter_map(|&id| session.document.get_object(id));
+                            if symbol.is_some_and(|link| link.is_root) && ids.len() == 1
+                                && command_menu_item(ui, text("layers.symbol.detach"), !row.locked).clicked()
+                            {
+                                row_command = Some(Command::with_params("symbol.detach", json!({"instance": id})));
+                                ui.close();
+                            }
                             let source = document.and_then(|doc| doc.master_pages.source_of(id)
                                 .and_then(|source| doc.get_object(source)));
                             if source.is_some() && command_menu_item(ui, text("panel.master.reset"), true).clicked() {
@@ -1289,6 +1368,8 @@ impl LayersPanel {
                             }
                             let editable = selected().all(|object| !object.locked);
                             let groups = selected().all(|object| object.kind == dtool_core::ObjectKind::Group);
+                            let promote = Command::with_params("node.folder.promote", json!({"ids": ids}));
+                            let can_promote = session.can_execute(&promote);
                             for (name, key, enabled) in [
                                 ("edit.duplicate", "menu.edit.duplicate", editable),
                                 ("node.group", "menu.layer.group", editable && ids.len() > 1),
@@ -1299,6 +1380,10 @@ impl LayersPanel {
                                     row_command = Some(Command::new(name));
                                     ui.close();
                                 }
+                            }
+                            if command_menu_item(ui, text("menu.vector.promote_group_to_layer"), can_promote).clicked() {
+                                row_command = Some(promote);
+                                ui.close();
                             }
                             ui.separator();
                             if command_menu_item(ui, text("menu.layer.layer_effects"), !row.locked).clicked() {
@@ -1334,13 +1419,11 @@ impl LayersPanel {
                                 ));
                             }
                         }));
-                        if workspace.session().is_some_and(|s| s.document.get_object(id).is_some_and(|o| !o.effects.is_empty())) {
+                        if has_effects {
                             if self.action_icon(ui, "layer-effects", text("menu.layer.layer_effects"), !row.locked)
                             {
                                 requested_effects = Some(row.id);
                             }
-                        } else {
-                            ui.allocate_space(egui::vec2(effect_width, 16.0));
                         }
                         if let Some(label) = label.as_ref()
                             && let Some(payload) = label.dnd_hover_payload::<ObjectId>()
@@ -1359,16 +1442,22 @@ impl LayersPanel {
                         if dtool_design::lock_toggle(ui, &mut is_locked).on_hover_text(text(if row.locked { "menu.layer.unlock" } else { "menu.layer.lock" })).changed() { locked = Some((row.id, is_locked)); }
                         let mut is_visible = row.visible;
                         if dtool_design::visibility_toggle(ui, &mut is_visible).on_hover_text(text(if row.visible { "menu.layer.hide" } else { "menu.layer.show" })).changed() { visibility = Some((row.id, is_visible)); }
-                    }); });
+                        });
+                    });
                     let row_rect = painted.response.rect;
+                    let divider = surface.lerp_to_gamma(ui.visuals().text_color(), 0.14);
+                    if row.depth > 0 && let Some(left) = guide_left.filter(|left| *left > row_rect.left() + 8.0) {
+                        let x = left - 6.0;
+                        ui.painter().vline(x, row_rect.y_range(), egui::Stroke::new(1.0, divider));
+                        ui.painter().hline(x..=left - 2.0, row_rect.center().y, egui::Stroke::new(1.0, divider));
+                    }
                     if let Some(colour) = tag_colours.get(&id).and_then(|hex| dtool_design::tokens::parse_hex(hex)) {
                         let stripe = egui::Rect::from_min_max(
-                            row_rect.left_top() + egui::vec2(4.0, 2.0),
-                            row_rect.left_bottom() + egui::vec2(7.0, -2.0),
+                            row_rect.left_top() + egui::vec2(1.0, 2.0),
+                            row_rect.left_bottom() + egui::vec2(3.0, -2.0),
                         );
                         ui.painter().rect_filled(stripe, 1.0, colour);
                     }
-                    let divider = surface.lerp_to_gamma(ui.visuals().text_color(), 0.17);
                     ui.painter().hline(row_rect.x_range(), row_rect.bottom(), egui::Stroke::new(1.0, divider));
                     if let Some(zone) = indicator {
                         let left = guide_left.unwrap_or(row_rect.left()).clamp(row_rect.left(), row_rect.right());
@@ -1388,6 +1477,7 @@ impl LayersPanel {
                         ui.painter().rect_filled(marker, 0.0, accent);
                     }
                 }
+                });
             });
             self.start_thumbnails(ui.ctx(), workspace, thumbnail_requests);
             // A fast drag can press and release in the same UI frame, before egui

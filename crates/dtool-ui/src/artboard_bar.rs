@@ -76,7 +76,7 @@ pub fn show(ui: &mut egui::Ui, session: &Session, viewport: Option<[f32; 2]>) ->
         };
         let editable = board.map_or(source == "custom", |board| !board.locked);
         size_fields(ui, &mut size, unit_suffix(doc.units), editable, aspect);
-        ui.add_enabled(editable, egui::Checkbox::new(&mut aspect, text("artboard.aspect")));
+        dtool_design::toggle_with(ui, &mut aspect, text("artboard.aspect"), &dtool_design::ControlState::enabled(editable));
         let switch = text("artboard.swap_size");
         let swapped = ui.add_enabled(editable, egui::Button::new("↔").frame(false)).on_hover_text(switch);
         swapped.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, editable, switch));
@@ -154,7 +154,7 @@ pub(crate) fn custom_dialog(ctx: &egui::Context, session: &Session) -> Option<Co
     let (result, (ok, cancel)) = show_modal(ctx, "dtool.artboard.custom.dialog",
         text("artboard.custom_dialog"), ClosePolicy::CancelOnly, false, |ui| {
             ui.horizontal(|ui| size_fields(ui, &mut draft.size, unit_suffix(session.document.units), true, draft.aspect));
-            ui.checkbox(&mut draft.aspect, text("artboard.aspect"));
+            dtool_design::toggle(ui, &mut draft.aspect, text("artboard.aspect"));
             ui.horizontal(|ui| {
                 let ok = ui.button(text("button.ok")).clicked();
                 let cancel = ui.button(text("button.cancel")).clicked();
@@ -259,7 +259,7 @@ pub(crate) fn show_setup(ctx: &egui::Context, session: &Session) -> (bool, Optio
                 });
                 for (axis, label) in ["artboard.setup_width", "artboard.setup_height"].into_iter().enumerate() {
                     ui.horizontal(|ui| {
-                        ui.checkbox(&mut draft.apply_axis[axis], text(label));
+                        dtool_design::toggle(ui, &mut draft.apply_axis[axis], text(label));
                         ui.add_enabled(draft.apply_axis[axis], dimension(&mut draft.size[axis], unit_suffix(session.document.units), 0.001));
                     });
                 }

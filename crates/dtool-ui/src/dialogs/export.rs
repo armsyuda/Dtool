@@ -7,6 +7,7 @@ use dtool_export::{ExportFormat, ExportReceipt};
 use dtool_strings::text;
 use serde_json::{json, Value};
 use std::sync::mpsc;
+use crate::dialog_chrome::{options_group, options_scroll};
 
 pub const UI_EXPORT_OPEN: &str = "ui.export.open";
 pub const UI_EXPORT_SET: &str = "ui.export.set";
@@ -37,6 +38,21 @@ pub fn format_choices() -> &'static [ExportFormat] {
 
 pub fn format_label(format: ExportFormat) -> &'static str {
     dtool_export::batch::e06_format_label(format)
+}
+
+fn format_colour(format: ExportFormat) -> egui::Color32 {
+    let [red, green, blue] = match format {
+        ExportFormat::Png => [59, 182, 205],
+        ExportFormat::Jpeg => [105, 185, 130],
+        ExportFormat::Pdf => [224, 100, 110],
+        ExportFormat::Svg => [234, 165, 72],
+        ExportFormat::Webp => [112, 152, 226],
+        ExportFormat::Eps => [86, 189, 170],
+        ExportFormat::Tiff => [197, 122, 174],
+        ExportFormat::Gif => [154, 129, 213],
+        ExportFormat::Wmf => [153, 160, 170],
+    };
+    egui::Color32::from_rgb(red, green, blue)
 }
 
 const PREVIEW_TEXTURE: &str = "dtool.export.preview";
@@ -125,6 +141,7 @@ pub struct ExportDialog {
     pub show_in_explorer: bool,
     pub ask_for_location: bool,
     texture: Option<egui::TextureHandle>,
+    preview_checker: Option<egui::TextureHandle>,
     texture_generation: u64,
     texture_reduction: u32,
     preview_index: u32,
@@ -144,6 +161,7 @@ pub struct ExportDialog {
     pending_overwrite: Option<(u64, std::path::PathBuf)>,
     single_overwrite: Option<String>,
     owner: Option<ContextId>,
+    option_icons: crate::icon_cache::IconCache,
 }
 
 impl std::fmt::Debug for ExportDialog {
@@ -281,11 +299,14 @@ impl ExportDialog {
         self.fit_preview = false;
         let before = clamp_zoom(self.zoom);
         let after = clamp_zoom(zoom);
-        let ax = if anchor[0].is_finite() { anchor[0] } else { 0.0 };
-        let ay = if anchor[1].is_finite() { anchor[1] } else { 0.0 };
+        let anchor = anchor.map(|value| if value.is_finite() { value } else { 0.0 });
+        let old_inset = self.preview_inset();
         let ratio = after / before;
         self.zoom = after;
-        self.pan = self.clamp_pan([ax - (ax - self.pan[0]) * ratio, ay - (ay - self.pan[1]) * ratio]);
+        let new_inset = self.preview_inset();
+        self.pan = self.clamp_pan(std::array::from_fn(|i| {
+            anchor[i] - (anchor[i] - self.pan[i] - old_inset[i]) * ratio - new_inset[i]
+        }));
         after
     }
 
@@ -294,7 +315,14 @@ impl ExportDialog {
     }
 
     pub fn preview_pixel(&self, view: [f32; 2]) -> Option<(u32, u32)> {
-        self.preview.as_ref().and_then(|p| raster::preview_pixel(p, view, self.pan, self.zoom))
+        let inset = self.preview_inset();
+        let origin = std::array::from_fn(|i| self.pan[i] + inset[i]);
+        self.preview.as_ref().and_then(|p| raster::preview_pixel(p, view, origin, self.zoom))
+    }
+
+    fn preview_inset(&self) -> [f32; 2] {
+        let display = self.display_size().unwrap_or([0.0; 2]);
+        std::array::from_fn(|i| ((self.viewport[i] - display[i]).max(0.0) * 0.5).round())
     }
 
     pub fn verify_export(&self, path: &str) -> Result<bool, ExportError> {
@@ -856,18 +884,24 @@ impl ExportDialog {
         let formats = self.filtered_formats();
         for (_index, format, label, offered) in &formats {
             let selected = *format == self.options.format;
+            let colour = format_colour(*format).gamma_multiply(if *offered { 1.0 } else { 0.55 });
+            let marker = egui::Atom::paint(egui::vec2(5.0, 14.0), move |ui, args| {
+                ui.painter().rect_filled(args.rect, 2.0, colour);
+            });
             let mut label = egui::RichText::new(label.as_str());
             if selected {
                 label = label.color(ui.visuals().selection.stroke.color);
             }
-            let row = egui::Button::selectable(selected, label)
-                .min_size(egui::vec2(ui.available_width(), 24.0));
+            let row = egui::Button::selectable(selected, (marker, label))
+                .right_text(())
+                .truncate()
+                .min_size(egui::vec2(ui.available_width(), 26.0));
             if ui.add_enabled(*offered, row).clicked() && !selected {
                 let keep = self.options.clone();
                 self.page_range_input = None;
                 self.page_range_invalid = false;
                 self.preview_index = 0;
-                self.options = ExportOptions { area: keep.area, pages: keep.pages, width: keep.width, height: keep.height, scale: keep.scale, dpi: keep.dpi, ..ExportOptions::for_format(*format) };
+                self.options = ExportOptions { area: keep.area, pages: keep.pages, width: keep.width, height: keep.height, scale: keep.scale, dpi: keep.dpi, svg: keep.svg, ..ExportOptions::for_format(*format) };
                 changed = true;
             }
         }
@@ -904,8 +938,7 @@ impl ExportDialog {
         }
         let mut percent = clamp_zoom(self.zoom) * 100.0;
         if dtool_design::slider(ui, &mut percent, ZOOM_MIN * 100.0..=ZOOM_MAX * 100.0, text("dialog.export.preview.zoom.label")).changed() {
-            self.fit_preview = false;
-            self.zoom = clamp_zoom(percent / 100.0);
+            self.zoom_at(percent / 100.0, self.viewport.map(|side| side * 0.5));
         }
         self.ensure_texture(ui.ctx());
         if self.texture.is_none() || self.tiles.is_empty() {
@@ -916,7 +949,16 @@ impl ExportDialog {
             }
             return;
         }
-        let tiles = self.tiles.clone();
+        let checker = self.preview_checker.get_or_insert_with(|| {
+            let light = egui::Color32::from_gray(234);
+            let dark = egui::Color32::from_gray(199);
+            ui.ctx().load_texture(
+                "dtool.export.checker",
+                egui::ColorImage::new([2, 2], vec![light, dark, dark, light]),
+                egui::TextureOptions::NEAREST_REPEAT,
+            )
+        }).id();
+        let tiles = &self.tiles;
         let zoom = clamp_zoom(self.zoom);
         let display = self.display_size().unwrap_or([0.0, 0.0]);
         let size = egui::vec2(display[0] / pixels_per_point, display[1] / pixels_per_point);
@@ -926,12 +968,16 @@ impl ExportDialog {
             .max_height(preview_height)
             .auto_shrink([false, false])
             .scroll_offset(egui::vec2(-self.pan[0] / pixels_per_point, -self.pan[1] / pixels_per_point))
-            .show(ui, |ui| {
-                let (rect, response) = ui.allocate_exact_size(size, egui::Sense::drag());
-                let origin = rect.min.round_to_pixels(pixels_per_point);
+            .show_viewport(ui, |ui, viewport| {
+                let (surface, response) = ui.allocate_exact_size(size.max(viewport.size()), egui::Sense::drag());
+                let image = egui::Rect::from_center_size(surface.center(), size);
+                let origin = image.min.round_to_pixels(pixels_per_point);
+                let image = egui::Rect::from_min_size(origin, size.round_to_pixels(pixels_per_point));
                 let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
-                let painter = ui.painter_at(rect);
-                for (handle, tile) in &tiles {
+                let painter = ui.painter_at(image);
+                let checker_uv = egui::Rect::from_min_max(egui::Pos2::ZERO, (image.size() / 16.0).to_pos2());
+                painter.image(checker, image, checker_uv, egui::Color32::WHITE);
+                for (handle, tile) in tiles {
                     let min = origin + egui::vec2((tile[0] as f32 * zoom).round() / pixels_per_point, (tile[1] as f32 * zoom).round() / pixels_per_point);
                     let max = origin + egui::vec2(((tile[0] + tile[2]) as f32 * zoom).round() / pixels_per_point, ((tile[1] + tile[3]) as f32 * zoom).round() / pixels_per_point);
                     painter.image(handle.id(), egui::Rect::from_min_max(min, max), uv, egui::Color32::WHITE);
@@ -994,7 +1040,12 @@ impl ExportDialog {
     fn right_settings(&mut self, ui: &mut egui::Ui, doc: &Document) -> (bool, bool) {
         let mut changed = false;
         let mut editing = false;
-        dtool_design::panel_header(ui, text("dialog.export.settings"));
+        ui.horizontal(|ui| {
+            let (marker, _) = ui.allocate_exact_size(egui::vec2(5.0, 14.0), egui::Sense::hover());
+            ui.painter().rect_filled(marker, 2.0, format_colour(self.options.format));
+            dtool_design::panel_header(ui, format!("{} · {}", text("dialog.export.settings"), format_label(self.options.format)));
+        });
+        options_group(ui, text("dialog.export.range_section"));
         let standard_areas = [
             (dtool_export::ExportArea::WholeDocument, "dialog.export.area.document"),
             (dtool_export::ExportArea::CurrentPage, "dialog.export.area.current_page"),
@@ -1020,7 +1071,7 @@ impl ExportDialog {
             }
         }
         let current = areas.iter().find(|(area, _)| *area == self.options.area).unwrap_or(&areas[0]);
-        egui::ComboBox::from_id_salt("export.area").selected_text(&current.1).show_ui(ui, |ui| {
+        egui::ComboBox::from_id_salt("export.area").width(ui.available_width()).truncate().selected_text(&current.1).show_ui(ui, |ui| {
             for (area, label) in &areas {
                 if ui.selectable_label(*area == self.options.area, label).clicked() && *area != self.options.area {
                     self.options.area = area.clone();
@@ -1043,12 +1094,21 @@ impl ExportDialog {
         } else {
             self.page_range_invalid = false;
         }
+        options_group(ui, text("dialog.export.size_section"));
+        let current = self.options.width.or_else(|| self.preview_size().map(|s| s.0)).unwrap_or(0);
+        let mut width = f64::from(current);
+        let width_edited = dtool_design::number_field(ui, &mut width, text("dialog.export.width.label")).changed();
+        let next = width.round().clamp(1.0, f64::from(raster::MAX_EXPORT_SIDE)) as u32;
+        if width_edited && width.is_finite() && next != current {
+            self.options.width = Some(next);
+            self.options.height = None;
+            changed = true;
+        }
+        if matches!(self.options.format, ExportFormat::Jpeg | ExportFormat::Webp) {
+            options_group(ui, text("dialog.export.compression_section"));
+        }
         if self.options.format == ExportFormat::Webp {
-            let mut lossless = self.options.lossless;
-            if ui.checkbox(&mut lossless, text("dialog.export.lossless")).changed() {
-                self.options.lossless = lossless;
-                changed = true;
-            }
+            changed |= dtool_design::toggle(ui, &mut self.options.lossless, text("dialog.export.lossless")).changed();
         }
         if matches!(self.options.format, ExportFormat::Jpeg) || (self.options.format == ExportFormat::Webp && !self.options.lossless) {
             let mut quality = f32::from(self.options.effective_quality());
@@ -1059,37 +1119,36 @@ impl ExportDialog {
                 changed = true;
             }
         }
-        let current = self.options.width.or_else(|| self.preview_size().map(|s| s.0)).unwrap_or(0);
-        let mut width = f64::from(current);
-        let width_edited = dtool_design::number_field(ui, &mut width, text("dialog.export.width.label")).changed();
-        let next = width.round().clamp(1.0, f64::from(raster::MAX_EXPORT_SIDE)) as u32;
-        if width_edited && width.is_finite() && next != current {
-            self.options.width = Some(next);
-            self.options.height = None;
-            changed = true;
-        }
         if !is_vector(self.options.format) && self.options.format != ExportFormat::Jpeg {
+            options_group(ui, text("dialog.export.background_section"));
             changed |= dtool_design::toggle(ui, &mut self.options.transparent,
                 text("menu.document.setup.transparent_background")).changed();
         }
+        if self.options.format == ExportFormat::Svg {
+            let (svg_changed, svg_editing) = self.svg_options(ui);
+            changed |= svg_changed;
+            editing |= svg_editing;
+        }
         if self.options.format == ExportFormat::Pdf {
-            ui.separator();
-            dtool_design::panel_header(ui, text("dialog.export.pdf.vector_options"));
+            options_group(ui, text("dialog.export.pdf.vector_options"));
             changed |= dtool_design::toggle(ui, &mut self.options.pdf_outline_text,
                 text("dialog.export.pdf.outline_text")).changed();
             changed |= dtool_design::toggle(ui, &mut self.options.pdf_outline_strokes,
                 text("dialog.export.pdf.outline_strokes")).changed();
+            options_group(ui, text("print.rasterization"));
             let (raster_changed, raster_editing) = self.pdf_raster_resolution(ui, doc);
             changed |= raster_changed;
             editing |= raster_editing;
-            ui.separator();
+            options_group(ui, text("doc_setup.colour"));
             changed |= self.pdf_colour_options(ui, doc);
+            options_group(ui, text("dialog.export.pdf.navigation_section"));
             changed |= dtool_design::toggle(ui, &mut self.options.pdf_include_hyperlinks,
                 text("dialog.export.pdf.include_hyperlinks")).changed();
             changed |= dtool_design::toggle(ui, &mut self.options.pdf_include_bookmarks,
                 text("dialog.export.pdf.include_bookmarks")).changed();
         }
         if matches!(self.options.format, ExportFormat::Pdf | ExportFormat::Png | ExportFormat::Jpeg | ExportFormat::Webp) {
+            options_group(ui, text(if self.options.format == ExportFormat::Pdf { "print.bleed_marks" } else { "doc_setup.bleed" }));
             changed |= ui.add_enabled_ui(self.options.area.is_page_based(), |ui| {
                 dtool_design::toggle(ui, &mut self.options.include_bleed, text("doc_setup.bleed")).changed()
             }).inner;
@@ -1105,6 +1164,7 @@ impl ExportDialog {
                 dtool_design::toggle(ui, &mut self.options.pdf_fold_marks, text("print.fold_marks")).changed()
             }).inner;
         }
+        crate::dialog_chrome::options_divider(ui);
         ui.horizontal(|ui| {
             ui.label(text("dialog.export.estimated_size"));
             ui.label(self.estimated_size_label());
@@ -1113,6 +1173,84 @@ impl ExportDialog {
             ui.label(text(error.message_key()));
         }
         (changed, editing)
+    }
+
+    fn svg_options(&mut self, ui: &mut egui::Ui) -> (bool, bool) {
+        use dtool_core::effect_raster::{MAX_DPI, MIN_DPI};
+        use dtool_design::{NumericEvent, NumericSpec, NumericValue, numeric_field};
+        use dtool_export::svg::{MAX_COORDINATE_PRECISION, RasterizeMode, SvgOptions, SvgPreset};
+
+        options_group(ui, text("export.svg.preset"));
+        let options = &mut self.options.svg;
+        let presets = [
+            (SvgPreset::ForExport, "cmd-export", "export.svg.preset_export"),
+            (SvgPreset::DigitalSmall, "ctx-zoom-fit", "export.svg.preset_small"),
+            (SvgPreset::DigitalHigh, "ctx-zoom-actual", "export.svg.preset_high"),
+            (SvgPreset::Flatten, "tool-artistic-text", "export.svg.preset_outline"),
+        ];
+        let mut changed = false;
+        ui.horizontal_wrapped(|ui| {
+            for (preset, icon, label) in presets {
+                let settings = SvgOptions::preset(preset);
+                let selected = settings == *options;
+                if self.option_icons.studio_button(ui, icon, text(label), selected).clicked() && !selected {
+                    *options = settings;
+                    changed = true;
+                }
+            }
+        });
+        let selected = presets.iter().find(|(preset, _, _)| SvgOptions::preset(*preset) == *options);
+        ui.label(text(selected.map_or("export.svg.preset_custom", |(_, _, label)| label)));
+        options_group(ui, text("export.svg.rasterize"));
+        let modes = [
+            (RasterizeMode::Nothing, "persona-vector", "export.svg.rasterize_nothing"),
+            (RasterizeMode::Unsupported, "tool-filter-brush", "export.svg.rasterize_unsupported"),
+            (RasterizeMode::Everything, "persona-pixel", "export.svg.rasterize_everything"),
+        ];
+        let previous = options.rasterize;
+        ui.horizontal_wrapped(|ui| {
+            for (mode, icon, label) in modes {
+                if self.option_icons.studio_button(ui, icon, text(label), options.rasterize == mode).clicked() {
+                    options.rasterize = mode;
+                }
+            }
+            if let Some((_, _, label)) = modes.iter().find(|(mode, _, _)| *mode == options.rasterize) {
+                ui.label(text(label)).on_hover_text(text("export.svg.rasterize_hint"));
+            }
+        });
+        changed |= options.rasterize != previous;
+        let spec = NumericSpec::new(text("export.svg.raster_dpi"))
+            .width(52.0).range(f64::from(MIN_DPI)..=f64::from(MAX_DPI)).decimals(0);
+        let id = ui.make_persistent_id("export.svg.raster_dpi");
+        let (response, event) = ui.add_enabled_ui(options.rasterize != RasterizeMode::Nothing, |ui| {
+            numeric_field(ui, id, NumericValue::Value(f64::from(options.raster_dpi)), &spec)
+        }).inner;
+        if let NumericEvent::Commit(dpi) = event {
+            let dpi = dpi as u32;
+            changed |= options.raster_dpi != dpi;
+            options.raster_dpi = dpi;
+        }
+        options_group(ui, text("export.svg.source_section"));
+        changed |= ui.add_enabled_ui(options.rasterize != RasterizeMode::Everything, |ui| {
+            let outline = dtool_design::toggle(ui, &mut options.text_as_curves,
+                text("export.svg.text_as_curves")).changed();
+            let hex = dtool_design::toggle(ui, &mut options.hex_colours, text("export.svg.hex_colours")).changed();
+            outline || hex
+        }).inner;
+        changed |= dtool_design::toggle(ui, &mut options.set_viewbox, text("export.svg.set_viewbox")).changed();
+        changed |= dtool_design::toggle(ui, &mut options.line_breaks, text("export.svg.line_breaks"))
+            .on_hover_text(text("export.svg.line_breaks_hint")).changed();
+        let precision = NumericSpec::new(text("export.svg.precision"))
+            .width(52.0).range(0.0..=f64::from(MAX_COORDINATE_PRECISION)).decimals(0);
+        let id = ui.make_persistent_id("export.svg.precision");
+        let (precision_response, precision_event) = numeric_field(ui, id, NumericValue::Value(f64::from(options.precision)), &precision);
+        if let NumericEvent::Commit(places) = precision_event {
+            let places = places as u8;
+            changed |= options.precision != places;
+            options.precision = places;
+        }
+        (changed, response.has_focus() || response.lost_focus()
+            || precision_response.has_focus() || precision_response.lost_focus())
     }
 
     fn pdf_raster_resolution(&mut self, ui: &mut egui::Ui, doc: &Document) -> (bool, bool) {
@@ -1140,15 +1278,16 @@ impl ExportDialog {
         use dtool_core::colour::{ColourModel, ProfileStore};
         let previous = self.options.pdf_colour_space.unwrap_or_default();
         let mut space = previous;
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label(text("dialog.export.pdf.vector_colour_space"));
-            egui::ComboBox::from_id_salt("export.pdf.colour_space")
-                .selected_text(space.label())
-                .show_ui(ui, |ui| {
-                    for choice in [PdfColourSpace::Rgb, PdfColourSpace::Cmyk] {
-                        ui.selectable_value(&mut space, choice, choice.label());
-                    }
+            for choice in [PdfColourSpace::Rgb, PdfColourSpace::Cmyk] {
+                let response = dtool_design::with_icon_selection(ui, |ui| {
+                    ui.add(egui::Button::selectable(space == choice, choice.label()))
                 });
+                if response.clicked() {
+                    space = choice;
+                }
+            }
         });
         let mut changed = space != previous;
         if changed {
@@ -1164,25 +1303,21 @@ impl ExportDialog {
         if !self.options.embed_icc {
             return changed;
         }
-
-        let profiles: Vec<String> = match space {
-            PdfColourSpace::Rgb => vec![ProfileStore::SRGB.to_string()],
-            PdfColourSpace::Cmyk => dtool_core::colour::services().read()
-                .map(|services| services.profiles.list(ColourModel::Cmyk).into_iter().map(str::to_owned).collect())
-                .unwrap_or_default(),
-        };
-        let current = self.options.icc.clone();
-        let default = match space {
-            PdfColourSpace::Rgb => ProfileStore::SRGB.to_string(),
-            PdfColourSpace::Cmyk => dtool_core::paint::DisplayColourCtx::for_document(doc).cmyk,
-        };
         ui.label(text("dialog.export.pdf.icc_profile"));
+        if space == PdfColourSpace::Rgb {
+            ui.label(ProfileStore::SRGB);
+            return changed;
+        }
+        let profiles: Vec<String> = dtool_core::colour::services().read()
+            .map(|services| services.profiles.list(ColourModel::Cmyk).into_iter().map(str::to_owned).collect())
+            .unwrap_or_default();
+        let current = self.options.icc.clone();
+        let default = dtool_core::paint::DisplayColourCtx::for_document(doc).cmyk;
         egui::ComboBox::from_id_salt("export.pdf.icc")
+            .width(ui.available_width()).truncate()
             .selected_text(current.as_deref().unwrap_or(&default))
             .show_ui(ui, |ui| {
-                if space == PdfColourSpace::Cmyk {
-                    ui.selectable_value(&mut self.options.icc, None, format!("{} ({default})", text("dialog.export.pdf.default_profile")));
-                }
+                ui.selectable_value(&mut self.options.icc, None, format!("{} ({default})", text("dialog.export.pdf.default_profile")));
                 for profile in profiles {
                     ui.selectable_value(&mut self.options.icc, Some(profile.clone()), profile);
                 }
@@ -1209,7 +1344,8 @@ impl ExportDialog {
         ui.add_space(dtool_design::space("md"));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui.add_enabled_ui(!self.page_range_invalid, |ui| {
-                dtool_design::primary_button(ui, text("menu.file.export.label"), egui::vec2(88.0, 22.0))
+                dtool_design::primary_button(ui, text("menu.file.export.label"),
+                    egui::vec2(88.0, dtool_design::size("button.height")))
             }).inner.clicked() {
                 export = true;
             }
@@ -1246,33 +1382,36 @@ impl ExportDialog {
             .max_size(bounds)
             .show(ui.ctx(), |ui| {
                 let width = ui.available_width().min(bounds.x);
-                let height = (ui.available_height().min(bounds.y) - 158.0).max(150.0);
-                let left = (width * 0.17).clamp(106.0, 156.0);
-                let right = (width * 0.26).clamp(180.0, 256.0);
-                let centre = (width - left - right - 2.0 * ui.spacing().item_spacing.x).max(100.0);
+                let footer = if cfg!(windows) && self.ask_for_location { 104.0 } else { 126.0 };
+                let height = (ui.available_height().min(bounds.y) - footer).max(150.0);
+                let left = (width * 0.17).clamp(104.0, 164.0);
+                let right = (width * 0.29).clamp(180.0, 288.0);
+                let gap = ui.spacing().item_spacing.x;
+                let centre = (width - left - right - 2.0 * gap).max(100.0);
                 let mut editing = false;
-                ui.horizontal_top(|ui| {
-                    ui.vertical(|ui| {
-                        ui.set_width(left);
-                        let (picked_format, search_editing) = egui::ScrollArea::vertical()
-                            .id_salt("export.formats").max_height(height).auto_shrink([false, false])
-                            .show(ui, |ui| self.left_panel(ui)).inner;
-                        changed |= picked_format;
-                        editing |= search_editing;
-                    });
-                    ui.vertical(|ui| {
-                        ui.set_width(centre);
-                        self.centre_preview(ui, doc, centre, height);
-                    });
-                    ui.vertical(|ui| {
-                        ui.set_width(right);
-                        let (settings_changed, settings_editing) = egui::ScrollArea::vertical().id_salt("export.settings")
-                            .max_height(height).auto_shrink([false, false])
-                            .show(ui, |ui| self.right_settings(ui, doc)).inner;
-                        changed |= settings_changed;
-                        editing |= settings_editing;
-                    });
-                });
+                let frame_inset = 2.0 * (dtool_design::space("sm") + dtool_design::stroke_width("thin"));
+                let (body, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
+                let mut column = |id, offset, width| {
+                    let rect = egui::Rect::from_min_size(body.min + egui::vec2(offset, 0.0), egui::vec2(width, height));
+                    let mut child = ui.new_child(egui::UiBuilder::new().id_salt(id).max_rect(rect));
+                    child.set_clip_rect(child.clip_rect().intersect(rect));
+                    child
+                };
+                let (picked_format, search_editing) = dtool_design::dialog_section(&mut column("export.formats_panel", 0.0, left), |ui| {
+                    ui.set_width(left - frame_inset);
+                    egui::ScrollArea::vertical()
+                        .id_salt("export.formats").max_height(height - frame_inset).auto_shrink([false, false])
+                        .show(ui, |ui| self.left_panel(ui)).inner
+                }).inner;
+                changed |= picked_format;
+                editing |= search_editing;
+                self.centre_preview(&mut column("export.preview_panel", left + gap, centre), doc, centre, height);
+                let (settings_changed, settings_editing) = dtool_design::dialog_section(&mut column("export.settings_panel", left + centre + 2.0 * gap, right), |ui| {
+                    ui.set_width(right - frame_inset);
+                    options_scroll(ui, "export.settings", height - frame_inset, |ui| self.right_settings(ui, doc))
+                }).inner;
+                changed |= settings_changed;
+                editing |= settings_editing;
                 ui.separator();
                 let (export_clicked, cancel_clicked, path_editing, path_changed) = self.bottom_bar(ui);
                 changed |= path_changed && self.options.format == ExportFormat::Eps;

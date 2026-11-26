@@ -1,6 +1,6 @@
 pub mod align;
 mod node;
-pub(crate) use node::show as show_node_controls;
+pub(crate) use node::{show as show_node_controls, show_paint_wells};
 
 use dtool_core::workspace::ContextId;
 use dtool_core::Session;
@@ -194,6 +194,14 @@ pub fn action_params(command: &str, view_size: [f32; 2]) -> Value {
 impl ContextBarModel {
     pub fn with_view_size(mut self, session: &Session, view_size: [f32; 2]) -> Self {
         for item in &mut self.items {
+            if item.id == dtool_core::context_toolbar::PEN_CONSTRUCTION_SNAP {
+                use crate::canvas_curves::PenMode;
+                let tool = &session.active_tool;
+                let mode = session.tool_options.choice(tool, "pen.mode");
+                if PenMode::for_tool(tool, mode.as_deref()) != PenMode::Pen {
+                    item.state = ControlState::Disabled;
+                }
+            }
             if let ContextControl::Action { command } = &item.control {
                 if command == VIEW_ZOOM_FIT {
                     let ok = session.can_execute(&Command::with_params(command, action_params(command, view_size)));
@@ -284,6 +292,16 @@ fn show_item(ui: &mut egui::Ui, item: &ContextItem) -> Option<ContextEdit> {
 
 fn show_item_with_icons(ui: &mut egui::Ui, item: &ContextItem, icons: &mut IconCache) -> Option<ContextEdit> {
     use dtool_core::context_toolbar::{MOVE_SHOW_ORIGIN, MOVE_SHOW_SELECTION_BOX, MOVE_TRANSFORM_SEPARATELY};
+    if item.id == dtool_core::context_toolbar::PEN_CONSTRUCTION_SNAP
+        && let ContextControl::Toggle(active) = item.control
+        && let Some(texture) = icons.themed_texture(ui.ctx(), "ctx-node-handle-construction", dtool_design::icon_texture_px(ui))
+    {
+        let label = text(&item.key);
+        let state = dtool_design::ControlState::enabled(item.state.editable()).tooltip(label);
+        let button = dtool_design::icon_image_button_selected(ui, &texture, active, &state);
+        button.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, button.enabled(), active, label));
+        return button.clicked().then(|| ContextEdit { id: item.id.clone(), value: json!(!active) });
+    }
     let move_icon = match item.id.as_str() {
         MOVE_TRANSFORM_SEPARATELY => Some("ctx-transform-separately"),
         MOVE_SHOW_SELECTION_BOX => Some("cmd-transform-box"),
@@ -379,6 +397,39 @@ pub(crate) fn remember_alignment_origin(ui: &egui::Ui, response: &egui::Response
     }
 }
 
+fn show_zoom_level(ui: &mut egui::Ui, item: &ContextItem, current: f64, range: std::ops::RangeInclusive<f64>, step: f64) -> Option<ContextEdit> {
+    let label = text(&item.key);
+    let caption = ui.label(label);
+    let mut value = current;
+    let field = egui::DragValue::new(&mut value).range(range.clone()).speed(step)
+        .suffix("%").max_decimals(2).clamp_existing_to_range(false).update_while_editing(false);
+    let entry = ui.add_sized([70.0, ui.spacing().interact_size.y], field).labelled_by(caption.id);
+    let mut picked = entry.changed().then_some(value);
+    let presets_label = text("context.zoom.presets");
+    let presets = ui.menu_button("⌄", |ui| {
+        for preset in [12.5, 25.0, 50.0, 100.0, 200.0, 400.0, 800.0, 1600.0] {
+            if range.contains(&preset)
+                && ui.selectable_label((current - preset).abs() < 0.01, format!("{preset}%")).clicked()
+            {
+                picked = Some(preset);
+                ui.close();
+            }
+        }
+    }).response.on_hover_text(presets_label);
+    presets.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, presets.enabled(), presets_label));
+
+    // The rail covers working magnifications; the field can still enter the full range.
+    let min = range.start().max(5.0) as f32;
+    let max = range.end().min(3200.0) as f32;
+    if min < max {
+        let mut rail = (current as f32).clamp(min, max);
+        if dtool_design::logarithmic_slider_rail(ui, &mut rail, min..=max, 112.0, label, ui.is_enabled(), f64::from(min)).changed() {
+            picked = Some(f64::from(rail));
+        }
+    }
+    picked.map(|value| ContextEdit { id: item.id.clone(), value: json!(value) })
+}
+
 fn show_control(ui: &mut egui::Ui, item: &ContextItem) -> Option<ContextEdit> {
     let label = text(&item.key);
     let edit = |value: Value| Some(ContextEdit { id: item.id.clone(), value });
@@ -390,6 +441,9 @@ fn show_control(ui: &mut egui::Ui, item: &ContextItem) -> Option<ContextEdit> {
             }
         }
         ContextControl::Number { value, min, max, step } => {
+            if item.id == "zoom.level" {
+                return show_zoom_level(ui, item, *value, *min..=*max, *step);
+            }
             let mut value = *value;
             let caption = ui.label(label).id;
             if item.id == dtool_core::context_toolbar::SHAPE_CORNER_RADIUS {
@@ -406,9 +460,7 @@ fn show_control(ui: &mut egui::Ui, item: &ContextItem) -> Option<ContextEdit> {
                 };
             }
             let field = egui::DragValue::new(&mut value).range(*min..=*max).speed(*step);
-            let field = if item.id == "zoom.level" {
-                field.suffix("%").max_decimals(2).clamp_existing_to_range(false).update_while_editing(false)
-            } else if item.id == "wand.tolerance" {
+            let field = if item.id == "wand.tolerance" {
                 field.suffix("%")
             } else if matches!(item.id.as_str(), "shape.stroke_width" | "pen.stroke_width")
                 || (item.id == "brush.width" && item.key == "context.vector_brush.width")
@@ -502,7 +554,7 @@ pub(crate) fn show_bound_with_icons(ui: &mut egui::Ui, model: &ContextBarModel, 
 }
 
 fn starts_option_group(item: &ContextItem) -> bool {
-    matches!(item.id.as_str(), "move.align" | "move.convert_to_curves" | "shape.convert_to_curves" | "zoom.in")
+    matches!(item.id.as_str(), "move.align" | "move.convert_to_curves" | "shape.convert_to_curves" | "zoom.level" | "zoom.in")
 }
 
 pub(crate) fn show_vector_brush_tip(ui: &mut egui::Ui, session: &Session) -> Option<Command> {

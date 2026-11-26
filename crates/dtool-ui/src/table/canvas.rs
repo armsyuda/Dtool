@@ -131,8 +131,9 @@ fn caret_at(session: &Session, hit: &CellHit) -> usize {
     frame::caret_at_point(&lines, [x - text_box.rect[0], y])
 }
 
-pub fn caret(session: &Session) -> Option<[[f32; 2]; 2]> {
-    let (object, table, cell, index, _) = active_text(session)?;
+
+pub(crate) fn caret_line_at(session: &Session, index: usize) -> Option<[[f32; 2]; 2]> {
+    let (object, table, cell, _, _) = active_text(session)?;
     let library = FontLibrary::shared();
     let (bounds, lines) = table_layout::cell_text_layout(&library, &session.document, table, cell)?;
     let line = lines.iter().rfind(|line| line.range.start <= index && index <= line.range.end);
@@ -142,13 +143,13 @@ pub fn caret(session: &Session) -> Option<[[f32; 2]; 2]> {
     }))
 }
 
-pub fn paint_text_selection(ui: &Ui, response: &Response, session: &Session, view: &ViewState) {
+pub(crate) fn paint_text_range(
+    ui: &Ui, rect: Rect, session: &Session, view: &ViewState, mark: text_input::TextRangeMark,
+) {
     let Some((object, table, cell, caret, anchor)) = active_text(session) else { return; };
-    if caret == anchor || text_input::is_composing() { return; }
     let library = FontLibrary::shared();
     let Some((bounds, lines)) = table_layout::cell_text_layout(&library, &session.document, table, cell) else { return; };
-    let painter = ui.painter_at(response.rect);
-    let fill = ui.visuals().selection.bg_fill.gamma_multiply(0.45);
+    let painter = ui.painter_at(rect);
     for line in lines {
         let start = line.range.start.max(anchor.min(caret));
         let end = line.range.end.min(anchor.max(caret));
@@ -158,8 +159,8 @@ pub fn paint_text_selection(ui: &Ui, response: &Response, session: &Session, vie
         let y0 = line.baseline - bounds.size * 0.8;
         let y1 = line.baseline + bounds.size * 0.2;
         let points = [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]
-            .map(|point| screen(response.rect, view, object_point(object, bounds.to_cell(point))));
-        painter.add(egui::Shape::convex_polygon(points.to_vec(), fill, egui::Stroke::NONE));
+            .map(|point| screen(rect, view, object_point(object, bounds.to_cell(point))));
+        mark.paint(&painter, points);
     }
 }
 

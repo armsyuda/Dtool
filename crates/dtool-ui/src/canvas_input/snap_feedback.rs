@@ -21,7 +21,9 @@ fn distance_text(distance: f32, units: Units) -> String {
 impl CanvasInput {
     pub(super) fn paint_snap_feedback(&self, rect: Rect, session: &Session, painter: &Painter) {
         let prefs = session.snap_prefs.query();
-        if !self.move_tool.dragging || !prefs.enabled || !prefs.dynamic_guides {
+        let object_drag = prefs.enabled && (self.move_tool.dragging || self.dragging_artboard());
+        let node_alignment = self.nodes.grab.is_some() && self.snap_axes.iter().any(Option::is_some);
+        if !(object_drag || node_alignment) || !prefs.dynamic_guides {
             return;
         }
         let width = 1.0 / painter.ctx().pixels_per_point();

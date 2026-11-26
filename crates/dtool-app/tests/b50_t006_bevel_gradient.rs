@@ -68,7 +68,7 @@ fn bevel(kind: BevelType) -> LayerEffect {
 fn gradient(kind: GradientKind, start: [f64; 2], end: [f64; 2]) -> LayerEffect {
     let mut effect = default_effect(EffectKind::GradientOverlay);
     let stops = vec![GradientStop { offset: 0.0, colour: Colour::new(255, 0, 0, 255) }, GradientStop { offset: 1.0, colour: Colour::new(0, 0, 255, 255) }];
-    effect.params = EffectParams::Overlay { fill: Paint::Gradient { kind, stops, geom: GradientGeom { start, end, ratio: 1.0 } } };
+    effect.params = EffectParams::Overlay { fill: Paint::Gradient { kind, stops, geom: GradientGeom { start, end, ratio: 1.0, ..GradientGeom::default() } } };
     effect
 }
 

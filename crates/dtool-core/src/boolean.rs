@@ -17,7 +17,9 @@ use dtool_protocol::{Command, CommandResult};
 use serde_json::{json, Value};
 use serde::{Deserialize, Serialize};
 
+mod bezier_edges;
 mod builder_cleanup;
+mod key_cut;
 mod knife_open;
 use builder_cleanup::BuilderCleanup;
 
@@ -48,6 +50,10 @@ pub enum FillRule {
 }
 
 impl FillRule {
+    pub fn is_even_odd(&self) -> bool {
+        *self == Self::EvenOdd
+    }
+
     fn overlay(self) -> OverlayFillRule {
         match self {
             FillRule::EvenOdd => OverlayFillRule::EvenOdd,
@@ -130,6 +136,14 @@ fn normalize(rings: &[Ring], fill: FillRule) -> Vec<Shape> {
     FloatOverlay::with_subj(&rings.to_vec()).overlay(OverlayRule::Subject, fill.overlay())
 }
 
+/// Resolve winding into disjoint outer and inner rings for the parity renderer.
+pub(crate) fn parity_rings(rings: Vec<Ring>, fill: FillRule) -> Vec<Ring> {
+    if rings.is_empty() || fill.is_even_odd() {
+        return rings;
+    }
+    normalize(&rings, fill).into_iter().flatten().collect()
+}
+
 fn combine(a: &[Shape], b: &[Shape], rule: OverlayRule) -> Vec<Shape> {
     if a.is_empty() {
         return match rule {
@@ -184,6 +198,108 @@ fn shapes_to_curve(shapes: &[Shape]) -> Option<Curve> {
     Some(Curve::from_contour_and_holes(contour, holes))
 }
 
+/// Resolve a closed filled outline, including self-intersections and zero-area subpaths.
+pub fn normalize_filled_path(path: &BezPath, fill: FillRule, tolerance: f64) -> Result<Option<Curve>, CommandError> {
+    check_tolerance(tolerance)?;
+    if !path_is_finite(path) {
+        return Err(CommandError::invalid_params());
+    }
+    let mut count = 0;
+    let mut rings = Vec::new();
+    for (points, closed) in crate::outline::flatten_subpaths(path, tolerance) {
+        if !closed {
+            return Err(CommandError::invalid_params());
+        }
+        let ring = clean_points(points);
+        count += ring.len();
+        if count > MAX_BOOLEAN_POINTS {
+            return Err(request_too_large());
+        }
+        if ring.len() >= 3 {
+            rings.push(ring);
+        }
+    }
+    if rings.is_empty() {
+        return Ok(None);
+    }
+    Ok(shapes_to_curve(&normalize(&rings, fill)))
+}
+
+/// Keep fill boundaries, optionally filling all enclosed holes. Reuse original
+/// contours when the boolean result traces the same vertices.
+pub(crate) fn clean_curve_boundaries(curve: &Curve, fill: FillRule, fill_holes: bool) -> Result<Option<Curve>, CommandError> {
+    let mut inputs = Vec::new();
+    let mut budget = 0;
+    for contour in curve.contours().filter(|contour| contour.closed) {
+        let path = crate::outline::cornered_contour(contour).to_kurbo();
+        if !path_is_finite(&path) {
+            return Err(CommandError::invalid_params());
+        }
+        for (points, _) in crate::outline::flatten_subpaths(&path, DEFAULT_TOLERANCE) {
+            let ring = clean_points(points);
+            budget += ring.len();
+            if budget > MAX_BOOLEAN_POINTS {
+                return Err(request_too_large());
+            }
+            if ring.len() >= 3 {
+                inputs.push((contour, ring));
+            }
+        }
+    }
+    if inputs.is_empty() {
+        return Ok(None);
+    }
+    let rings: Vec<_> = inputs.iter().map(|(_, ring)| ring.clone()).collect();
+    let mut shapes = normalize(&rings, fill);
+    if fill_holes && !shapes.is_empty() {
+        // The outer boundary of each region has the same winding. Joining
+        // those boundaries also absorbs islands inside newly filled holes.
+        let exteriors: Vec<_> = shapes.into_iter().filter_map(|shape| shape.into_iter().next()).collect();
+        shapes = normalize(&exteriors, FillRule::NonZero);
+    }
+    let mut boundaries = Vec::new();
+    let max_id = curve.contours().flat_map(|contour| &contour.points)
+        .map(|point| point.id.0).max().unwrap_or(0);
+    let mut next_id = max_id.saturating_add(1);
+    for ring in shapes.iter().flatten() {
+        if let Some((order, (source, _))) = inputs.iter().enumerate().find(|(_, (_, input))| same_ring(input, ring)) {
+            boundaries.push((order, (*source).clone()));
+        } else {
+            next_id.checked_add(ring.len() as u64).ok_or_else(CommandError::invalid_params)?;
+            boundaries.push((usize::MAX, ring_to_contour(ring, &mut next_id)));
+        }
+    }
+    if boundaries.is_empty() {
+        return Ok(None);
+    }
+    // Preserve subpath and start-node order where the topology still permits it.
+    boundaries.sort_by_key(|(order, _)| *order);
+    let mut boundaries = boundaries.into_iter().map(|(_, contour)| contour);
+    Ok(boundaries.next().map(|contour| Curve {
+        contour,
+        holes: boundaries.collect(),
+        source_object: curve.source_object,
+    }))
+}
+
+fn same_ring(input: &Ring, result: &Ring) -> bool {
+    rings_match(input, result, 1e-5)
+}
+
+fn rings_match(input: &Ring, result: &Ring, epsilon: f64) -> bool {
+    if input.len() != result.len() || input.is_empty() {
+        return false;
+    }
+    let near = |a: &[f64; 2], b: &[f64; 2]| {
+        (a[0] - b[0]).abs() <= epsilon && (a[1] - b[1]).abs() <= epsilon
+    };
+    let count = input.len();
+    input.iter().enumerate().filter(|(_, point)| near(point, &result[0])).any(|(start, _)| {
+        result.iter().enumerate().all(|(i, point)| near(point, &input[(start + i) % count]))
+            || result.iter().enumerate().all(|(i, point)| near(point, &input[(start + count - i) % count]))
+    })
+}
+
 fn divide(operands: &[Vec<Shape>]) -> Vec<Vec<Shape>> {
     let mut pieces: Vec<Vec<Shape>> = Vec::new();
     let mut covered: Vec<Shape> = Vec::new();
@@ -210,13 +326,19 @@ fn divide(operands: &[Vec<Shape>]) -> Vec<Vec<Shape>> {
 }
 
 pub fn boolean_operands(operands: &[Vec<BezPath>], op: BoolOp, fill: FillRule, tolerance: f64) -> Result<Vec<Curve>, CommandError> {
+    boolean_with_rules(operands, op, std::iter::repeat(fill), tolerance)
+}
+
+fn boolean_with_rules(
+    operands: &[Vec<BezPath>], op: BoolOp, rules: impl Iterator<Item = FillRule>, tolerance: f64,
+) -> Result<Vec<Curve>, CommandError> {
     check_tolerance(tolerance)?;
     if operands.len() < 2 {
         return Err(CommandError::invalid_params());
     }
     let mut budget = 0;
     let mut normalized = Vec::with_capacity(operands.len());
-    for paths in operands {
+    for (paths, fill) in operands.iter().zip(rules) {
         let rings = flatten_closed(paths, tolerance, &mut budget)?;
         normalized.push(normalize(&rings, fill));
     }
@@ -249,12 +371,9 @@ fn overlay_stroke(style: &StrokeStyle) -> Result<OverlayStroke<[f64; 2]>, Comman
     if !width.is_finite() || width <= 0.0 {
         return Err(CommandError::invalid_params());
     }
-    if !style.dash.is_empty() || style.align != StrokeAlign::Centre || !style.pressure.is_empty() {
-        return Err(CommandError::not_implemented());
-    }
     let cap = match style.cap {
         Cap::Butt => LineCap::Butt,
-        Cap::Round => LineCap::Round(ROUND_STEP),
+        Cap::Round | Cap::RoundInset => LineCap::Round(ROUND_STEP),
         Cap::Square => LineCap::Square,
     };
     let join = match style.join {
@@ -273,6 +392,28 @@ fn overlay_stroke(style: &StrokeStyle) -> Result<OverlayStroke<[f64; 2]>, Comman
 
 pub fn expand_stroke(path: &BezPath, style: &StrokeStyle, tolerance: f64) -> Result<Vec<Curve>, CommandError> {
     check_tolerance(tolerance)?;
+    if style.cap == Cap::RoundInset || style.align != StrokeAlign::Centre || !style.dash.is_empty()
+        || !style.pressure.is_empty() || style.start_arrow.is_some() || style.end_arrow.is_some()
+    {
+        let (outline, even_odd) = crate::outline::styled_stroke_path(path, style).ok_or_else(CommandError::invalid_params)?;
+        let mut budget = 0;
+        let rule = if even_odd { FillRule::EvenOdd } else { FillRule::NonZero };
+        let mut shapes = if outline.elements().is_empty() {
+            Vec::new()
+        } else {
+            normalize(&flatten_closed(&[outline], tolerance, &mut budget)?, rule)
+        };
+        for (arrow, arrow_stroke) in crate::commands::stroke::arrow_paths(path, style) {
+            let arrow_outline = if let Some(arrow_style) = arrow_stroke {
+                crate::outline::styled_stroke_path(&arrow, &arrow_style).ok_or_else(CommandError::invalid_params)?.0
+            } else {
+                arrow
+            };
+            let rings = flatten_closed(&[arrow_outline], tolerance, &mut budget)?;
+            shapes = combine(&shapes, &normalize(&rings, FillRule::NonZero), OverlayRule::Union);
+        }
+        return Ok(shapes_to_curve(&shapes).into_iter().collect());
+    }
     let stroke = overlay_stroke(style)?;
     if !path_is_finite(path) {
         return Err(CommandError::invalid_params());
@@ -297,9 +438,9 @@ pub fn expand_stroke(path: &BezPath, style: &StrokeStyle, tolerance: f64) -> Res
     Ok(shapes_to_curve(&merged).into_iter().collect())
 }
 
-pub(crate) fn stroke_outline_contours(path: &BezPath) -> Option<Vec<Vec<[f32; 2]>>> {
+pub(crate) fn stroke_outline_contours(path: &BezPath, tolerance: f64) -> Option<Vec<Vec<[f32; 2]>>> {
     if path.elements().is_empty() { return Some(Vec::new()); }
-    let rings = flatten_closed(std::slice::from_ref(path), DEFAULT_TOLERANCE, &mut 0).ok()?;
+    let rings = flatten_closed(std::slice::from_ref(path), tolerance, &mut 0).ok()?;
     Some(normalize(&rings, FillRule::NonZero).into_iter().flatten()
         .map(|ring| ring.into_iter().map(|point| point.map(|coord| coord as f32)).collect())
         .collect())
@@ -320,6 +461,8 @@ pub struct CompoundSpec {
     pub op: BoolOp,
     #[serde(default)]
     pub fill_rule: FillRule,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub use_operand_rules: bool,
     #[serde(default)]
     pub origin: [f32; 2],
     #[serde(default)]
@@ -327,18 +470,42 @@ pub struct CompoundSpec {
 }
 
 pub fn compound_curves(spec: &CompoundSpec, tolerance: f64) -> Result<Vec<Curve>, CommandError> {
-    let paths = spec
-        .operands
+    let paths = compound_paths(spec, tolerance)?;
+    compound_curves_from_paths(spec, &paths, tolerance)
+}
+
+fn compound_paths(spec: &CompoundSpec, tolerance: f64) -> Result<Vec<Vec<BezPath>>, CommandError> {
+    let operand_tolerance = tolerance.min(DEFAULT_TOLERANCE);
+    spec.operands
         .iter()
-        .map(|operand| object_outline_world(operand).map(|path| vec![path]))
+        .map(|operand| crate::outline::object_outline_world_with_tolerance(operand, operand_tolerance).map(|path| vec![path]))
         .collect::<Option<Vec<_>>>()
-        .ok_or_else(|| CommandError::new("UNSUPPORTED_SHAPE"))?;
-    boolean_operands(&paths, spec.op, spec.fill_rule, tolerance)
+        .ok_or_else(|| CommandError::new("UNSUPPORTED_SHAPE"))
+}
+
+fn compound_curves_from_paths(
+    spec: &CompoundSpec, paths: &[Vec<BezPath>], tolerance: f64,
+) -> Result<Vec<Curve>, CommandError> {
+    let rules = spec.operands.iter().map(|operand| {
+        if spec.use_operand_rules { operand.fill_rule } else { spec.fill_rule }
+    });
+    boolean_with_rules(paths, spec.op, rules, tolerance)
 }
 
 pub fn compound_outline(spec: &CompoundSpec) -> Option<BezPath> {
+    compound_outline_with_tolerance(spec, DEFAULT_TOLERANCE)
+}
+
+pub(crate) fn compound_outline_with_tolerance(spec: &CompoundSpec, tolerance: f64) -> Option<BezPath> {
+    let tolerance = tolerance.min(DEFAULT_TOLERANCE);
+    let curves = match compound_curves(spec, tolerance) {
+        Err(error) if tolerance < DEFAULT_TOLERANCE && error.code == "REQUEST_TOO_LARGE" => {
+            compound_curves(spec, DEFAULT_TOLERANCE)
+        }
+        result => result,
+    }.ok()?;
     let mut path = BezPath::new();
-    for mut curve in compound_curves(spec, DEFAULT_TOLERANCE).ok()? {
+    for mut curve in curves {
         shift_curve(&mut curve, [f64::from(spec.origin[0]), f64::from(spec.origin[1])]);
         for element in curve.to_kurbo().elements() {
             path.push(*element);
@@ -369,7 +536,8 @@ pub fn can_execute(session: &Session, command: &Command) -> Option<bool> {
         COMPOUND_EXPAND | COMPOUND_EDIT => Some(compound_target(session, &command.params).is_ok()),
         SHAPE_BUILDER_APPLY => Some(plan_builder(session, &command.params).is_ok()),
         PATH_KNIFE => Some(plan_knife_request(session, &command.params).is_ok()),
-        STROKE_EXPAND => Some(plan_stroke(session, &command.params).is_ok()),
+        key_cut::CUT_WITH_KEY => Some(key_cut::operands(session, &command.params).is_ok()),
+        STROKE_EXPAND => Some(stroke_targets(session, &command.params).is_ok()),
         _ => None,
     }
 }
@@ -386,6 +554,7 @@ pub fn run(session: &mut Session, command: &Command) -> Option<CommandResult> {
         STROKE_EXPAND => Some(run_stroke(session, &command.params)),
         SHAPE_BUILDER_APPLY => Some(run_shape_builder(session, &command.params)),
         PATH_KNIFE => Some(run_knife(session, &command.params)),
+        key_cut::CUT_WITH_KEY => Some(key_cut::run(session, &command.params)),
         _ => None,
     }
 }
@@ -422,6 +591,7 @@ fn degenerate(error: CommandError) -> CommandError {
 struct OperandPlan {
     ids: Vec<ObjectId>,
     paths: Vec<Vec<BezPath>>,
+    fill_rules: Vec<FillRule>,
     bottom_index: usize,
     parent: Option<ObjectId>,
     page_id: Option<crate::document::PageId>,
@@ -447,6 +617,7 @@ fn plan_operands(session: &Session, params: &Value) -> Result<OperandPlan, Comma
     let page_id = doc.pages.get(page).map(|page| page.id);
     let mut ids = Vec::new();
     let mut paths = Vec::new();
+    let mut fill_rules = Vec::new();
     for index in &indexed {
         let object = &doc.objects[*index];
         if object.locked {
@@ -458,8 +629,9 @@ fn plan_operands(session: &Session, params: &Value) -> Result<OperandPlan, Comma
         let path = object_outline_world(object).ok_or_else(|| CommandError::new("UNSUPPORTED_SHAPE"))?;
         ids.push(object.id);
         paths.push(vec![path]);
+        fill_rules.push(object.fill_rule);
     }
-    Ok(OperandPlan { ids, paths, bottom_index: indexed[0], parent, page_id })
+    Ok(OperandPlan { ids, paths, fill_rules, bottom_index: indexed[0], parent, page_id })
 }
 
 fn plan_boolean(session: &Session, params: &Value) -> Result<OperandPlan, CommandError> {
@@ -525,6 +697,7 @@ fn styled(base: &Object, kind: ObjectKind, bounds: [f64; 4], parent: Option<Obje
     object.raster_size = None;
     object.frame = None;
     object.vector_crop = None;
+    object.fill_rule = FillRule::EvenOdd;
     object
 }
 
@@ -541,7 +714,9 @@ fn place(session: &mut Session, index: usize, object: Object) -> ObjectId {
 fn run_boolean(session: &mut Session, name: &str, op: BoolOp, params: &Value) -> CommandResult {
     let plan = plan_boolean(session, params)?;
     let fill = fill_rule_of(params);
-    let curves = boolean_operands(&plan.paths, op, fill, tolerance_of(params)).map_err(degenerate)?;
+    let use_operand_rules = params.get("fill_rule").is_none_or(Value::is_null);
+    let rules = plan.fill_rules.iter().map(|rule| if use_operand_rules { *rule } else { fill });
+    let curves = boolean_with_rules(&plan.paths, op, rules, tolerance_of(params)).map_err(degenerate)?;
     let bounds = curve_bounds(&curves).ok_or_else(|| CommandError::new("BOOLEAN_EMPTY"))?;
     let live = op != BoolOp::Divide && !is_fixed(params);
     let operands: Vec<Object> = plan.ids.iter().filter_map(|id| session.document.get_object(*id).cloned()).collect();
@@ -552,7 +727,7 @@ fn run_boolean(session: &mut Session, name: &str, op: BoolOp, params: &Value) ->
     let mut created = Vec::new();
     if live {
         let origin = [bounds[0] as f32, bounds[1] as f32];
-        let spec = CompoundSpec { op, fill_rule: fill, origin, operands };
+        let spec = CompoundSpec { op, fill_rule: fill, use_operand_rules, origin, operands };
         created.push(place(session, plan.bottom_index, styled(&base, ObjectKind::Compound(spec), bounds, plan.parent)));
     } else {
         for (offset, mut curve) in curves.into_iter().enumerate() {
@@ -616,8 +791,54 @@ fn release_supported(object: &Object) -> bool {
     object.rotation_deg.is_finite() && object.shear_deg == 0.0 && object.size.iter().all(|side| *side >= 0.0)
 }
 
-pub(crate) fn expanded_compound_curve(spec: &CompoundSpec, tolerance: f64) -> Result<Curve, CommandError> {
-    let mut curves = compound_curves(spec, tolerance).map_err(degenerate)?;
+pub(crate) fn compound_conversion_tolerance(document: &crate::document::Document) -> f64 {
+    // Use a physical error budget independent of the canvas zoom.
+    (0.02 * f64::from(crate::units::units_per_point(document.units, document.dpi))).min(DEFAULT_TOLERANCE)
+}
+
+// The overlay supplies the filled boundary. Find source curves in the same
+// coordinate space, including the operands of any retained child compounds.
+fn nested_compound_sources(spec: &CompoundSpec, tolerance: f64) -> Vec<BezPath> {
+    let mut sources = Vec::new();
+    let mut budget = MAX_BOOLEAN_POINTS;
+    let mut pending: Vec<_> = spec.operands.iter()
+        .filter(|operand| matches!(operand.kind, ObjectKind::Compound(_)))
+        .map(|operand| (operand, kurbo::Affine::IDENTITY))
+        .collect();
+    while let Some((object, parent)) = pending.pop() {
+        if let ObjectKind::Compound(child) = &object.kind {
+            let Some((transform, _)) = crate::outline::object_outline_transform(object) else {
+                continue;
+            };
+            let [x, y] = child.origin.map(f64::from);
+            let to_parent = parent * transform * kurbo::Affine::translate((-x, -y));
+            pending.extend(child.operands.iter().rev().map(|operand| (operand, to_parent)));
+        } else if let Some(path) = crate::outline::object_outline_world_with_tolerance(object, tolerance) {
+            let Some(left) = budget.checked_sub(path.elements().len()) else {
+                break;
+            };
+            budget = left;
+            sources.push(parent * path);
+        }
+    }
+    sources
+}
+
+pub(crate) fn expanded_compound_curve(
+    object: &Object, spec: &CompoundSpec, document_tolerance: f64, explicit_tolerance: Option<f64>,
+) -> Result<Curve, CommandError> {
+    let [a, b, c, d, _, _] = crate::geometry::object_matrix(object).map(f64::from);
+    let scale = ((a + d).hypot(b - c) + (a - d).hypot(b + c)) * 0.5;
+    let tolerance = explicit_tolerance.unwrap_or(document_tolerance / scale.max(1.0));
+    let mut paths = compound_paths(spec, tolerance)?;
+    let (curves, tolerance) = match compound_curves_from_paths(spec, &paths, tolerance) {
+        Err(error) if explicit_tolerance.is_none() && tolerance < DEFAULT_TOLERANCE && error.code == "REQUEST_TOO_LARGE" => {
+            paths = compound_paths(spec, DEFAULT_TOLERANCE)?;
+            (compound_curves_from_paths(spec, &paths, DEFAULT_TOLERANCE), DEFAULT_TOLERANCE)
+        }
+        result => (result, tolerance),
+    };
+    let mut curves = curves.map_err(degenerate)?;
     if curves.is_empty() {
         return Err(CommandError::new("BOOLEAN_EMPTY"));
     }
@@ -626,8 +847,44 @@ pub(crate) fn expanded_compound_curve(spec: &CompoundSpec, tolerance: f64) -> Re
         curve.holes.push(piece.contour);
         curve.holes.extend(piece.holes);
     }
+    // Keep the original Bézier handles on complete contours that survived the overlay.
+    let nested_sources = nested_compound_sources(spec, tolerance);
+    let source_paths = paths.iter().flatten().chain(&nested_sources);
+    let sources: Vec<_> = source_paths.clone().flat_map(BezPath::subpaths)
+        .filter(|subpath| subpath.iter().any(|el| matches!(el, PathEl::QuadTo(..) | PathEl::CurveTo(..))))
+        .filter_map(|elements| {
+            let path = BezPath::from_vec(elements.to_vec());
+            let ring = flatten_closed(std::slice::from_ref(&path), tolerance, &mut 0).ok()?.pop()?;
+            Some((ring, path))
+        })
+        .collect();
+    let epsilon = (tolerance * 0.1).min(1e-5);
+    // A child compound's polygon is only used for topology. Its straight
+    // approximations must not compete with the original Bézier segments.
+    let edges = bezier_edges::Edges::new(
+        spec.operands.iter().zip(&paths)
+            .filter(|(operand, _)| !matches!(operand.kind, ObjectKind::Compound(_)))
+            .flat_map(|(_, paths)| paths)
+            .chain(&nested_sources),
+        tolerance,
+    );
+    let mut curve_work = 1_000_000;
     let mut next_point = 0;
     for contour in std::iter::once(&mut curve.contour).chain(&mut curve.holes) {
+        if !sources.is_empty() {
+            let ring = contour.points.iter().map(|point| point.pos).collect();
+            if let Some((source, path)) = sources.iter().find(|(source, _)| rings_match(source, &ring, epsilon)) {
+                let path = if signed_area(source).signum() == signed_area(&ring).signum() {
+                    path.clone()
+                } else {
+                    path.reverse_subpaths()
+                };
+                *contour = Contour::from_kurbo(&path);
+            } else {
+                let path = edges.restore(std::slice::from_ref(&ring), &mut curve_work);
+                *contour = Contour::from_kurbo(&path);
+            }
+        }
         for point in &mut contour.points {
             next_point += 1;
             point.id = PointId(next_point);
@@ -639,7 +896,10 @@ pub(crate) fn expanded_compound_curve(spec: &CompoundSpec, tolerance: f64) -> Re
 
 fn run_expand(session: &mut Session, params: &Value) -> CommandResult {
     let (index, compound, spec) = compound_target(session, params)?;
-    let curve = expanded_compound_curve(&spec, tolerance_of(params))?;
+    let curve = expanded_compound_curve(
+        &compound, &spec, compound_conversion_tolerance(&session.document),
+        params.get("tolerance").and_then(Value::as_f64),
+    )?;
     let before = snapshot(session);
     session.document.objects[index].kind = ObjectKind::Curve(curve);
     commit_snapshot(session, COMPOUND_EXPAND, before, json!({ "id": compound.id.0 }))
@@ -728,7 +988,22 @@ fn reshape_compound(mut compound: Object, mut spec: CompoundSpec) -> Result<Obje
     Ok(compound)
 }
 
-struct StrokeExpansion {
+enum StrokeExpansion {
+    Single(SingleStrokeExpansion),
+    Layered { id: ObjectId, children: Vec<ExpandedStrokeLayer> },
+}
+
+#[derive(Clone)]
+struct ExpandedStrokeLayer {
+    object: Object,
+    children: Vec<ExpandedStrokeLayer>,
+}
+
+impl From<Object> for ExpandedStrokeLayer {
+    fn from(object: Object) -> Self { Self { object, children: Vec::new() } }
+}
+
+struct SingleStrokeExpansion {
     id: ObjectId,
     outline: Curve,
     texture: Option<crate::path_brush::Ink>,
@@ -736,7 +1011,8 @@ struct StrokeExpansion {
     keep_body: bool,
 }
 
-fn plan_stroke(session: &Session, params: &Value) -> Result<Vec<StrokeExpansion>, CommandError> {
+fn stroke_targets<'a>(session: &'a Session, params: &Value) -> Result<Vec<&'a Object>, CommandError> {
+    use crate::commands::appearance::visible_strokes;
     if !session.has_document {
         return Err(CommandError::no_document());
     }
@@ -744,19 +1020,51 @@ fn plan_stroke(session: &Session, params: &Value) -> Result<Vec<StrokeExpansion>
     if ids.is_empty() {
         return Err(CommandError::new("NOTHING_SELECTED"));
     }
-    let mut out = Vec::new();
-    for id in ids {
+    ids.into_iter().map(|id| {
         let object = session.document.get_object(id).ok_or_else(CommandError::not_found)?;
         if object.locked {
             return Err(CommandError::new("LOCKED"));
         }
-        if object.stroke.width <= 0.0 || matches!(object.stroke.paint, crate::paint::Paint::None) {
+        if !matches!(object.kind, ObjectKind::Shape | ObjectKind::Curve(_) | ObjectKind::Compound(_)) {
+            return Err(CommandError::new("UNSUPPORTED_SHAPE"));
+        }
+        let visible = if object.path_brush.is_some() {
+            object.stroke.width.is_finite() && object.stroke.width > 0.0 && object.stroke.paint != crate::paint::Paint::None
+        } else {
+            visible_strokes(object).any(|stroke| stroke.width.is_finite() && stroke.width > 0.0 && stroke.paint != crate::paint::Paint::None)
+        };
+        if !visible {
             return Err(CommandError::invalid_params());
+        }
+        Ok(object)
+    }).collect()
+}
+
+fn plan_stroke(session: &Session, params: &Value) -> Result<Vec<StrokeExpansion>, CommandError> {
+    use crate::commands::appearance::{Kind, PaintSlot};
+    let mut out = Vec::new();
+    for object in stroke_targets(session, params)? {
+        let id = object.id;
+        let has_arrows = object.stroke.start_arrow.is_some() || object.stroke.end_arrow.is_some();
+        let translucent_arrows = has_arrows && match &object.stroke.paint {
+            crate::paint::Paint::Solid { colour } => colour.a < 255,
+            crate::paint::Paint::Gradient { stops, .. } => stops.iter().any(|stop| stop.colour.a < 255),
+            _ => true,
+        };
+        if object.path_brush.is_none() && (crate::commands::appearance::has_layers(object) || translucent_arrows) {
+            out.push(StrokeExpansion::Layered {
+                id, children: expand_appearance(&session.document, object, tolerance_of(params))?,
+            });
+            continue;
         }
         let mut path = object_outline(object).ok_or_else(|| CommandError::new("UNSUPPORTED_SHAPE"))?;
         let mut style = object.stroke.clone();
         let mut baked_warps = Vec::new();
-        let mut keep_body = object.clip_role == crate::object::ClipRole::Mask && object.parent_id.is_some();
+        let mut keep_body = (object.clip_role == crate::object::ClipRole::Mask && object.parent_id.is_some())
+            || crate::commands::appearance::has_layers(object)
+            || (object.fill != crate::paint::Paint::None
+                && object.hidden_appearance.is_visible(PaintSlot { kind: Kind::Fill, index: 0 })
+                && path.elements().iter().any(|element| matches!(element, kurbo::PathEl::ClosePath)));
         let texture = if object.path_brush.is_some() {
             keep_body |= object.fill != crate::paint::Paint::None || crate::commands::appearance::has_layers(object);
             let transform = kurbo::Affine::new(crate::geometry::object_matrix(object).map(f64::from))
@@ -768,18 +1076,230 @@ fn plan_stroke(session: &Session, params: &Value) -> Result<Vec<StrokeExpansion>
             baked_warps = crate::commands::warp::ancestor_warps(&session.document, object)
                 .into_iter().map(|(group, _)| group.id).collect();
             style.join = Join::Round;
+            style.start_arrow = None;
+            style.end_arrow = None;
             Some(crate::path_brush::Ink::new(&session.document, object)
                 .ok_or_else(|| CommandError::new("UNSUPPORTED_SHAPE"))?)
         } else {
             None
         };
-        let mut curves = expand_stroke(&path, &style, tolerance_of(params))?;
-        if curves.is_empty() {
-            return Err(CommandError::new("BOOLEAN_EMPTY"));
+        // The canvas strokes a sheared centreline in document space.
+        let inverse = if texture.is_none() && object.shear_deg != 0.0 {
+            let [a, b, c, d, _, _] = crate::geometry::object_matrix(object).map(f64::from);
+            let linear = kurbo::Affine::new([a, b, c, d, 0.0, 0.0]);
+            if !linear.is_finite() || linear.determinant() == 0.0 { return Err(CommandError::invalid_params()); }
+            path = linear * path;
+            Some(linear.inverse())
+        } else {
+            None
+        };
+        let mut outline = expand_stroke(&path, &style, tolerance_of(params))?.into_iter().next()
+            .ok_or_else(|| CommandError::new("BOOLEAN_EMPTY"))?;
+        if let Some(inverse) = inverse {
+            transform_curve(&mut outline, inverse);
         }
-        out.push(StrokeExpansion { id, outline: curves.remove(0), texture, baked_warps, keep_body });
+        out.push(StrokeExpansion::Single(SingleStrokeExpansion { id, outline, texture, baked_warps, keep_body }));
     }
     Ok(out)
+}
+
+fn expand_appearance(doc: &crate::Document, source: &Object, tolerance: f64) -> Result<Vec<ExpandedStrokeLayer>, CommandError> {
+    use crate::commands::appearance::{self, Kind, RowBlend};
+    use crate::paint::{Paint, Transparency};
+    use kurbo::{Affine, Shape as _};
+
+    check_tolerance(tolerance)?;
+    let paths = appearance::vector_paths(doc, source, &source.fill, false)
+        .ok_or_else(|| CommandError::new("UNSUPPORTED_SHAPE"))?;
+    let [sx, sy] = source.pos.map(f64::from);
+    let world = Affine::new(crate::geometry::object_matrix(source).map(f64::from)) * Affine::translate((sx, sy));
+    let mut baked_warps = source.baked_warps.clone();
+    for (ancestor, _) in crate::commands::warp::ancestor_warps(doc, source) {
+        if !baked_warps.contains(&ancestor.id) { baked_warps.push(ancestor.id); }
+    }
+    let bounds = paths.iter().filter(|path| !path.path.elements().is_empty())
+        .map(|path| path.path.bounding_box()).reduce(|bounds, next| bounds.union(next))
+        .ok_or_else(|| CommandError::new("BOOLEAN_EMPTY"))?;
+    let mut children = Vec::new();
+    let mut budget = 0;
+    let mut expanded_stroke = false;
+    for path in paths {
+        if path.path.elements().is_empty() { continue; }
+        let blend_mode = match path.blend {
+            RowBlend::Standard(mode) => mode,
+            RowBlend::Operator(_) => {
+                if !children.is_empty() {
+                    let pos = [bounds.x0 as f32, bounds.y0 as f32];
+                    let fade = match path.paint {
+                        Paint::Solid { colour } => (1.0 - f32::from(colour.a) / 255.0, Transparency::None),
+                        Paint::Gradient { kind, mut stops, geom } => {
+                            let first_alpha = stops.first().map_or(255, |first| first.colour.a);
+                            if stops.iter().all(|stop| stop.colour.a == first_alpha) {
+                                (1.0 - f32::from(first_alpha) / 255.0, Transparency::None)
+                            } else {
+                                for stop in &mut stops {
+                                    stop.colour = crate::paint::Colour::new(255, 255, 255, 255 - stop.colour.a);
+                                }
+                                let geom = geom.transform(Affine::translate((-f64::from(pos[0]), -f64::from(pos[1]))).as_coeffs());
+                                (1.0, Transparency::Gradient { kind, stops, geom })
+                            }
+                        }
+                        Paint::Bitmap(mut bitmap) => {
+                            // Use the original embedded tile so editing and zoom keep its sampling.
+                            if doc.image_resource_by_ref(&bitmap.resource_id).is_none()
+                                || crate::scene::BitmapSampler::new(doc, &bitmap).is_none()
+                            {
+                                return Err(CommandError::new("UNSUPPORTED_SHAPE"));
+                            }
+                            let to_group = Affine::translate((-f64::from(pos[0]), -f64::from(pos[1])));
+                            bitmap.matrix = (to_group * Affine::new(bitmap.matrix)).as_coeffs();
+                            (1.0, Transparency::InverseBitmap(bitmap))
+                        }
+                        _ => return Err(CommandError::not_implemented()),
+                    };
+                    if fade.0 != 1.0 || fade.1 != Transparency::None {
+                        let rings = flatten_closed(&[path.path], tolerance, &mut budget)?;
+                        let rule = if path.even_odd { FillRule::EvenOdd } else { FillRule::NonZero };
+                        let eraser = normalize(&rings, rule);
+                        children = erase_stroke_layers(children, bounds, &eraser, fade, source.page_id, tolerance, &mut budget)?;
+                        expanded_stroke |= path.slot.kind == Kind::Stroke;
+                    }
+                }
+                continue;
+            }
+        };
+        let bounds = path.path.bounding_box();
+        let mut curve = if path.even_odd {
+            budget += path.path.elements().len();
+            if budget > MAX_BOOLEAN_POINTS { return Err(request_too_large()); }
+            Curve::from_kurbo(&path.path)
+        } else {
+            let rings = flatten_closed(&[path.path], tolerance, &mut budget)?;
+            let Some(curve) = shapes_to_curve(&normalize(&rings, FillRule::NonZero)) else { continue; };
+            curve
+        };
+        if curve.is_empty() { continue; }
+        let mut fill = path.paint;
+        // Keep the source frame for a crop, whose rectangle is local to the object.
+        let (pos, size, rotation_deg, shear_deg, to_local) = if source.vector_crop.is_some() {
+            if world.determinant() == 0.0 || !world.is_finite() { return Err(CommandError::invalid_params()); }
+            (source.pos, source.size, source.rotation_deg, source.shear_deg, world.inverse())
+        } else {
+            ([bounds.x0 as f32, bounds.y0 as f32], [bounds.width() as f32, bounds.height() as f32],
+                0.0, 0.0, Affine::translate((-bounds.x0, -bounds.y0)))
+        };
+        transform_curve(&mut curve, to_local);
+        let paint_frame = if matches!(fill, Paint::Gradient { .. } | Paint::Bitmap(_)) {
+            to_local
+        } else {
+            to_local * Affine::translate((sx, sy))
+        };
+        crate::paint::transform_paint_matrix(&mut fill, paint_frame.as_coeffs());
+        let is_stroke = path.slot.kind == Kind::Stroke;
+        expanded_stroke |= is_stroke;
+        children.push(Object {
+            name: if is_stroke { dtool_strings::text("layer.expanded_stroke").to_string() } else { source.name.clone() },
+            kind: ObjectKind::Curve(curve), fill, pos, size, rotation_deg, shear_deg, blend_mode,
+            parent_id: Some(source.id), page_id: source.page_id, pickable: source.pickable,
+            vector_crop: source.vector_crop, baked_warps: baked_warps.clone(),
+            ..Object::default()
+        }.into());
+    }
+    if !expanded_stroke { return Err(CommandError::new("BOOLEAN_EMPTY")); }
+    if source.clip_role == crate::object::ClipRole::Mask {
+        // Vector masking still uses the original silhouette, independent of visible paint.
+        children.push(Object {
+            kind: source.kind.clone(), shape: source.shape.clone(),
+            pos: source.pos, size: source.size, rotation_deg: source.rotation_deg, shear_deg: source.shear_deg,
+            parent_id: Some(source.id), page_id: source.page_id, pickable: false, stroke_mask_outline: true,
+            ..Object::default()
+        }.into());
+    }
+    Ok(children)
+}
+
+fn erase_stroke_layers(
+    mut layers: Vec<ExpandedStrokeLayer>, bounds: kurbo::Rect, eraser: &[Shape], fade: (f32, crate::paint::Transparency),
+    page_id: Option<crate::document::PageId>, tolerance: f64, budget: &mut usize,
+) -> Result<Vec<ExpandedStrokeLayer>, CommandError> {
+    // Apply destination-out to the already composited rows. The inside and outside
+    // pieces are disjoint, so later rows still blend against the correct backdrop.
+    let frame = vec![vec![vec![
+        [bounds.x0, bounds.y0], [bounds.x1, bounds.y0], [bounds.x1, bounds.y1], [bounds.x0, bounds.y1],
+    ]]];
+    let outside = combine(&frame, eraser, OverlayRule::Difference);
+    let inside = if fade.0 == 0.0 { Vec::new() } else { combine(&frame, eraser, OverlayRule::Intersect) };
+    let copies = usize::from(!outside.is_empty()) + usize::from(!inside.is_empty());
+    let mut work = 0;
+    let mut stack: Vec<_> = layers.iter().map(|layer| (layer, 1)).collect();
+    while let Some((layer, depth)) = stack.pop() {
+        let points = match &layer.object.kind {
+            ObjectKind::Curve(curve) => curve.contours().map(|contour| contour.points.len()).sum(),
+            _ => 0,
+        };
+        work += copies * (points + 1);
+        if work > MAX_BOOLEAN_POINTS || depth >= 60 { return Err(request_too_large()); }
+        stack.extend(layer.children.iter().map(|child| (child, depth + 1)));
+    }
+    let mut result = Vec::new();
+    for (region, (opacity, transparency), copy) in [
+        (outside, (1.0, crate::paint::Transparency::None), copies == 2),
+        (inside, fade, false),
+    ] {
+        if region.is_empty() { continue; }
+        let branch = if copy { layers.clone() } else { std::mem::take(&mut layers) };
+        let children = clip_expanded_layers(branch, &region, tolerance, budget)?;
+        if opacity == 1.0 && transparency == crate::paint::Transparency::None {
+            result.extend(children);
+        } else if !children.is_empty() {
+            result.push(ExpandedStrokeLayer {
+                object: Object {
+                    kind: ObjectKind::Group,
+                    pos: [bounds.x0 as f32, bounds.y0 as f32],
+                    size: [bounds.width() as f32, bounds.height() as f32],
+                    opacity, transparency, page_id, ..Object::default()
+                },
+                children,
+            });
+        }
+    }
+    Ok(result)
+}
+
+fn clip_expanded_layers(
+    layers: Vec<ExpandedStrokeLayer>, region: &[Shape], tolerance: f64, budget: &mut usize,
+) -> Result<Vec<ExpandedStrokeLayer>, CommandError> {
+    let mut kept = Vec::new();
+    for mut layer in layers {
+        if let ObjectKind::Curve(curve) = &layer.object.kind {
+            let matrix = kurbo::Affine::new(crate::geometry::object_matrix(&layer.object).map(f64::from))
+                * kurbo::Affine::translate((f64::from(layer.object.pos[0]), f64::from(layer.object.pos[1])));
+            if matrix.determinant() == 0.0 || !matrix.is_finite() { return Err(CommandError::invalid_params()); }
+            let rings = flatten_closed(&[matrix * curve.to_kurbo()], tolerance, budget)?;
+            let shapes = normalize(&rings, FillRule::EvenOdd);
+            let Some(mut clipped) = shapes_to_curve(&combine(&shapes, region, OverlayRule::Intersect)) else { continue; };
+            transform_curve(&mut clipped, matrix.inverse());
+            layer.object.kind = ObjectKind::Curve(clipped);
+        } else {
+            layer.children = clip_expanded_layers(layer.children, region, tolerance, budget)?;
+            if layer.children.is_empty() { continue; }
+        }
+        kept.push(layer);
+    }
+    Ok(kept)
+}
+
+fn insert_expanded_stroke_layers(
+    doc: &mut crate::Document, parent: ObjectId, index: &mut usize, layers: Vec<ExpandedStrokeLayer>,
+) {
+    for ExpandedStrokeLayer { mut object, children } in layers {
+        object.parent_id = Some(parent);
+        let id = doc.create_object(object);
+        let object = doc.objects.pop().expect("create_object appends");
+        doc.objects.insert(*index, object);
+        *index += 1;
+        insert_expanded_stroke_layers(doc, id, index, children);
+    }
 }
 
 fn run_stroke(session: &mut Session, params: &Value) -> CommandResult {
@@ -788,7 +1308,31 @@ fn run_stroke(session: &mut Session, params: &Value) -> CommandResult {
     let mut document = session.document.clone();
     let mut ids = Vec::new();
     let mut created_layer = false;
-    for StrokeExpansion { id, outline: mut curve, texture, baked_warps, keep_body } in plan {
+    for expansion in plan {
+        let SingleStrokeExpansion { id, outline: mut curve, texture, baked_warps, keep_body } = match expansion {
+            StrokeExpansion::Single(single) => single,
+            StrokeExpansion::Layered { id, children } => {
+                let index = document.objects.iter().position(|object| object.id == id).ok_or_else(CommandError::not_found)?;
+                let group = &mut document.objects[index];
+                group.kind = ObjectKind::Group;
+                group.shape = None;
+                group.fill = crate::paint::Paint::None;
+                group.stroke = StrokeStyle::default();
+                group.additional_fills.clear();
+                group.additional_strokes.clear();
+                group.hidden_appearance = Default::default();
+                group.appearance_stack.clear();
+                group.appearance_blends = Default::default();
+                group.vector_crop = None;
+                group.expanded_stroke_effects = true;
+                if group.blend_mode == crate::blend::BlendMode::PassThrough {
+                    group.blend_mode = crate::blend::BlendMode::Normal;
+                }
+                insert_expanded_stroke_layers(&mut document, id, &mut (index + 1), children);
+                ids.push(id.0);
+                continue;
+            }
+        };
         let texture = if let Some(ink) = texture {
             let [x, y, right, bottom] = curve_bounds(std::slice::from_ref(&curve)).ok_or_else(CommandError::invalid_params)?;
             let origin = [x as f32, y as f32];
@@ -853,35 +1397,43 @@ fn run_stroke(session: &mut Session, params: &Value) -> CommandResult {
             object.baked_warps.extend(baked_warps);
             object.fill = fill;
         } else {
-            if !has_pixel_mask && object.rotation_deg == 0.0 && object.shear_deg == 0.0
-                && let Some(b) = curve_bounds(std::slice::from_ref(&curve))
-            {
-                shift_curve(&mut curve, [b[0], b[1]]);
-                object.pos = [object.pos[0] + b[0] as f32, object.pos[1] + b[1] as f32];
-                object.size = [(b[2] - b[0]) as f32, (b[3] - b[1]) as f32];
-            }
             if !keep_body {
                 object.fill = object.stroke.paint.clone();
             }
+            if !has_pixel_mask && crate::geometry::object_matrix(object) == crate::geometry::IDENTITY
+                && let Some(b) = curve_bounds(std::slice::from_ref(&curve))
+            {
+                shift_curve(&mut curve, [b[0], b[1]]);
+                let translate = kurbo::Affine::translate((-b[0], -b[1])).as_coeffs();
+                crate::paint::transform_paint_matrix(&mut object.fill, translate);
+                if let crate::paint::Transparency::Gradient { geom, .. } = &mut object.transparency {
+                    *geom = geom.transform(translate);
+                }
+                if let Some(crop) = &mut object.vector_crop {
+                    crop.rect[0] -= b[0] as f32;
+                    crop.rect[1] -= b[1] as f32;
+                }
+                object.pos = [object.pos[0] + b[0] as f32, object.pos[1] + b[1] as f32];
+                object.size = [(b[2] - b[0]) as f32, (b[3] - b[1]) as f32];
+            }
         }
-        object.stroke.paint = crate::paint::Paint::None;
-        object.stroke.width = 0.0;
+        object.stroke = StrokeStyle::default();
         object.kind = ObjectKind::Curve(curve);
         object.shape = None;
         if let Some(mut sibling) = sibling {
             // The live texture paints around the entire base appearance.
             source.path_brush = None;
-            source.stroke.paint = crate::paint::Paint::None;
-            source.stroke.width = 0.0;
+            source.stroke = StrokeStyle::default();
             let masks: Vec<_> = crate::clip_mask::vector_masks(&document, id)
                 .into_iter().map(|mask| mask.id).collect();
             let body = &document.objects[index];
-            let grouped = has_pixel_mask || !masks.is_empty() || !body.blend_mode.is_normal() || body.blend_ranges.is_some()
+            let grouped = has_pixel_mask || !masks.is_empty() || body.opacity != 1.0 || !body.blend_mode.is_normal() || body.blend_ranges.is_some()
                 || body.clip_role == crate::object::ClipRole::Mask || !body.effects.is_empty()
                 || !matches!(body.transparency, crate::paint::Transparency::None);
             if grouped {
                 sibling.parent_id = Some(group_stroke_expansion(&mut document, index, &sibling, &masks));
                 sibling.clip_role = crate::object::ClipRole::None;
+                sibling.opacity = 1.0;
             }
             let expanded_id = document.create_object(sibling);
             let expanded = document.objects.pop().expect("create_object appends");
@@ -917,8 +1469,9 @@ fn group_stroke_expansion(
         parent_id: body.parent_id,
         page_id: body.page_id,
         pickable: body.pickable,
+        opacity: body.opacity,
         clip_role: body.clip_role,
-        blend_mode: if !keep_frame && body.blend_ranges.is_none() && body.blend_mode.is_normal() {
+        blend_mode: if body.opacity == 1.0 && !keep_frame && body.blend_ranges.is_none() && body.blend_mode.is_normal() {
             crate::blend::BlendMode::PassThrough
         } else {
             body.blend_mode
@@ -942,6 +1495,7 @@ fn group_stroke_expansion(
     doc.objects[index].clip_role = crate::object::ClipRole::None;
     doc.objects[index].stroke_mask_outline = mask_outline;
     doc.objects[index].blend_mode = crate::blend::BlendMode::Normal;
+    doc.objects[index].opacity = 1.0;
     doc.objects[index].blend_ranges = None;
     doc.objects[index].transparency = crate::paint::Transparency::None;
     doc.objects[index].effects.clear();
@@ -1036,13 +1590,31 @@ fn curve_piece(source: &Object, path: &BezPath, parent: Option<ObjectId>) -> Res
     Ok(styled(source, ObjectKind::Curve(curve), bounds, parent))
 }
 
-fn curve_in_original_frame(source: &Object, path: BezPath) -> Result<Object, CommandError> {
+fn curve_from_world(source: &Object, path: &BezPath) -> Result<Curve, CommandError> {
     let matrix = crate::geometry::object_matrix(source);
     let inverse = crate::geometry::invert_matrix(&matrix).ok_or_else(CommandError::invalid_params)?;
     let [x, y] = source.pos.map(f64::from);
     let local = kurbo::Affine::translate((-x, -y)) * kurbo::Affine::new(inverse.map(f64::from));
+    Ok(Curve::from_kurbo(&(local * path)))
+}
+
+fn cut_piece(source: &Object, path: &BezPath, fill_rule: FillRule) -> Result<Object, CommandError> {
+    // Preserve the original transform so shear and reflection still apply to
+    // paints in the same way. Reframing then shifts paint with the local path.
+    let curve = curve_from_world(source, path)?;
+    if curve.is_empty() {
+        return Err(CommandError::new("BOOLEAN_DEGENERATE"));
+    }
+    let mut piece = source.clone();
+    piece.shape = None;
+    piece.fill_rule = fill_rule;
+    crate::commands::path_nodes::reframe(&mut piece, curve)?;
+    Ok(piece)
+}
+
+fn curve_in_original_frame(source: &Object, path: BezPath) -> Result<Object, CommandError> {
     let mut replacement = source.clone();
-    replacement.kind = ObjectKind::Curve(Curve::from_kurbo(&(local * path)));
+    replacement.kind = ObjectKind::Curve(curve_from_world(source, &path)?);
     replacement.shape = None;
     Ok(replacement)
 }
@@ -1077,7 +1649,8 @@ fn builder_geometry(operands: &OperandPlan, params: &Value) -> Result<(Vec<Vec<S
     let mut budget = 0;
     let mut shapes = Vec::new();
     let mut open_paths = Vec::new();
-    for paths in &operands.paths {
+    for (paths, rule) in operands.paths.iter().zip(&operands.fill_rules) {
+        let fill = if params.get("fill_rule").is_none_or(Value::is_null) { *rule } else { fill };
         let mut rings = Vec::new();
         let mut open = Vec::new();
         for path in paths {
@@ -1270,19 +1843,19 @@ fn plan_knife(session: &Session, mut cut: Vec<[f64; 2]>, params: &Value) -> Resu
         let mut pieces = Vec::new();
         if let Some(outlines) = outlines {
             for outline in &outlines {
-                pieces.push(curve_piece(object, outline, object.parent_id)?);
+                pieces.push(cut_piece(object, outline, object.fill_rule)?);
             }
         } else if closed_split {
             for piece in &closed_pieces {
-                let object = piece_object(object, std::slice::from_ref(piece), object.parent_id)
+                let curve = shapes_to_curve(std::slice::from_ref(piece))
                     .ok_or_else(|| CommandError::new("BOOLEAN_DEGENERATE"))?;
-                pieces.push(object);
+                pieces.push(cut_piece(object, &curve.to_kurbo(), FillRule::EvenOdd)?);
             }
         } else if !closed.is_empty() {
-            pieces.push(curve_piece(object, &closed, object.parent_id)?);
+            pieces.push(cut_piece(object, &closed, object.fill_rule)?);
         }
         for path in &open_pieces {
-            pieces.push(curve_piece(object, path, object.parent_id)?);
+            pieces.push(cut_piece(object, path, object.fill_rule)?);
         }
         if vector_mask {
             let mut combined = BezPath::new();
@@ -1344,7 +1917,7 @@ fn plan_knife_request(session: &Session, params: &Value) -> Result<Vec<(ObjectId
             || crate::raster_source::compositing_mask(&session.document, source).is_some() {
             curve_in_original_frame(source, path)?
         } else {
-            curve_piece(source, &path, source.parent_id)?
+            cut_piece(source, &path, source.fill_rule)?
         };
         return Ok(vec![(source.id, vec![replacement])]);
     }
@@ -1536,7 +2109,7 @@ mod tests {
         let zero = StrokeStyle { width: 0.0, ..StrokeStyle::default() };
         assert_eq!(expand_stroke(&line, &zero, DEFAULT_TOLERANCE).unwrap_err().code, "INVALID_PARAMS");
         let dashed = StrokeStyle { width: 2.0, dash: vec![4.0, 2.0], ..StrokeStyle::default() };
-        assert_eq!(expand_stroke(&line, &dashed, DEFAULT_TOLERANCE).unwrap_err().code, "NOT_IMPLEMENTED");
+        assert!(expand_stroke(&line, &dashed, DEFAULT_TOLERANCE).unwrap()[0].contour.closed);
     }
 }
 

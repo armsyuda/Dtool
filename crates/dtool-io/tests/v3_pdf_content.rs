@@ -93,7 +93,7 @@ fn close(actual: &[f32], expected: &[f32]) {
 }
 
 fn assert_counts(doc: &dtool_core::Document, report: &dtool_io::ImportReport) {
-    let content = doc.objects.iter().filter(|o| !o.is_group()).count();
+    let content = doc.objects.iter().filter(|o| !o.is_group() && o.clip_role.is_none()).count();
     assert_eq!(
         content,
         (report.objects + report.texts + report.images) as usize
@@ -171,15 +171,12 @@ fn graphics_stack_transform_and_even_odd_contours_are_mapped() {
     close(&rect.pos, &[30.0, 60.0]);
     close(&rect.size, &[60.0, 80.0]);
     assert!(doc.objects.iter().any(|o| o.name == "rect_0_190"));
-    let curve = doc.objects.iter().find_map(|o| o.curve()).unwrap();
+    let compound = doc.objects.iter().find(|o| o.curve().is_some()).unwrap();
+    let curve = compound.curve().unwrap();
     assert_eq!(curve.holes.len(), 1);
     assert!(curve.contour.closed);
-    assert!(
-        report
-            .losses
-            .iter()
-            .any(|l| l.required && l.detail.contains("fill rule"))
-    );
+    assert_eq!(compound.fill_rule, dtool_core::boolean::FillRule::EvenOdd);
+    assert!(report.is_acceptable(), "{:?}", report.losses);
     assert_counts(&doc, &report);
 }
 
@@ -206,10 +203,11 @@ fn text_creates_story_and_style_ranges_not_font_inventory_counts() {
     assert_eq!(text.story_id(), Some(doc.stories[0].id));
     close(&text.pos, &[10.0, 40.4]);
     close(&text.size, &[64.8, 12.0]);
-    let Paint::Solid { colour } = text.fill else {
-        panic!("missing text fill")
-    };
-    assert_eq!([colour.r, colour.g, colour.b], [0, 0, 255]);
+    assert_eq!(text.fill, Paint::None);
+    assert_eq!(doc.stories[0].ranges[0]["fill"], dtool_core::serde_json::json!({
+        "type": "solid",
+        "colour": { "r": 0, "g": 0, "b": 255, "a": 255 }
+    }));
     assert_eq!(report.texts, 1);
     assert_counts(&doc, &report);
     assert!(
@@ -226,29 +224,32 @@ fn type0_to_unicode_decodes_actual_korean_text() {
     let (mut pdf, _, root) = pdf_with_pages(
         &[(
             [0, 0, 200, 200],
-            b"BT /F1 12 Tf 1 0 0 1 10 100 Tm <00010002> Tj ET",
+            b"BT /F1 12 Tf 1 0 0 1 10 100 Tm <000100020003> Tj ET",
         )],
         Dictionary::new(),
     );
-    let cmap = pdf.add_object(Stream::new(Dictionary::new(), b"/CIDInit /ProcSet findresource begin 12 dict begin begincmap /CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def /CMapName /Test def /CMapType 2 def 1 begincodespacerange <0000> <FFFF> endcodespacerange 2 beginbfchar <0001> <D55C> <0002> <AE00> endbfchar endcmap CMapName currentdict /CMap defineresource pop end end".to_vec()));
+    let cmap = pdf.add_object(Stream::new(Dictionary::new(), b"/CIDInit /ProcSet findresource begin 12 dict begin begincmap /CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def /CMapName /Test def /CMapType 2 def 1 begincodespacerange <0000> <FFFF> endcodespacerange 3 beginbfchar <0001> <D55C> <0002> <AE00> <0003> <0041> endbfchar endcmap CMapName currentdict /CMap defineresource pop end end".to_vec()));
+    let widths = vec![1.into(), Object::Array(vec![630.into()]), 2.into(), 2.into(), 870.into()];
     let font = pdf.add_object(dictionary! { "Type" => "Font", "Subtype" => "Type0", "BaseFont" => "KoreanTest",
         "Encoding" => "Identity-H", "ToUnicode" => cmap,
-        "DescendantFonts" => vec![Object::Dictionary(dictionary! { "Type" => "Font", "Subtype" => "CIDFontType2", "DW" => 1000 })] });
+        "DescendantFonts" => vec![Object::Dictionary(dictionary! { "Type" => "Font", "Subtype" => "CIDFontType2", "DW" => 930, "W" => widths })] });
     pdf.get_dictionary_mut(root).unwrap().set(
         "Resources",
         dictionary! { "Font" => dictionary! { "F1" => font } },
     );
     let file = Fixture::save(&mut pdf);
     let (doc, report) = import_pdf(&file.0, &ImportOptions::default()).unwrap();
-    assert_eq!(doc.stories[0].text, "한글");
-    assert_eq!(doc.stories[0].ranges[0]["end"], 2);
+    assert_eq!(doc.stories[0].text, "한글A");
+    assert_eq!(doc.stories[0].ranges[0]["end"], 3);
+    let object = doc.objects.iter().find(|o| o.story_id().is_some()).unwrap();
+    close(&object.size, &[29.16, 12.0]);
     assert_eq!(report.texts, 1);
     assert_counts(&doc, &report);
     assert!(
-        report
+        !report
             .losses
             .iter()
-            .any(|l| l.detail.contains("CID widths"))
+            .any(|l| l.detail.contains("fallback font metrics"))
     );
 }
 
@@ -449,11 +450,18 @@ fn rectangular_clip_and_normal_alpha_are_kept() {
     let file = Fixture::save(&mut pdf);
     let (doc, report) = import_pdf(&file.0, &ImportOptions::default()).unwrap();
     let clip = doc.objects.iter().find(|o| o.name == "clip").unwrap();
-    assert_eq!(clip.vector_crop.unwrap().rect, [10.0, 40.0, 30.0, 40.0]);
+    let mask = doc
+        .objects
+        .iter()
+        .find(|o| o.parent_id == Some(clip.id) && !o.clip_role.is_none())
+        .unwrap();
+    assert_eq!(mask.clip_role, dtool_core::object::ClipRole::Mask);
+    assert_eq!(mask.pos, [10.0, 40.0]);
+    assert_eq!(mask.size, [30.0, 40.0]);
     let clipped = doc
         .objects
         .iter()
-        .find(|o| o.parent_id == Some(clip.id))
+        .find(|o| o.parent_id == Some(clip.id) && o.clip_role.is_none())
         .unwrap();
     assert_eq!(clipped.opacity, 0.5);
     let restored = doc.objects.iter().find(|o| o.name == "rect_0_95").unwrap();
@@ -528,7 +536,7 @@ fn editable_line_grouping_preserves_each_run_style() {
 
 #[test]
 fn unsupported_paints_blends_masks_and_operators_are_required_losses() {
-    let resources = dictionary! { "ExtGState" => dictionary! { "GS1" => dictionary! { "BM" => "Multiply", "SMask" => dictionary! { "S" => "Luminosity" } } } };
+    let resources = dictionary! { "ExtGState" => dictionary! { "GS1" => dictionary! { "BM" => "UnrecognizedBlend", "SMask" => dictionary! { "S" => "Luminosity" } } } };
     let content = b"/GS1 gs 0 0 m 50 0 l 0 50 l h W n 0 0 20 20 re f /Sh1 sh /Pattern cs /P1 scn 30 30 20 20 re f 1 2 unsupported";
     let (mut pdf, _, _) = pdf_with_pages(&[([0, 0, 100, 100], content)], resources);
     let file = Fixture::save(&mut pdf);
@@ -767,7 +775,7 @@ fn missing_single_byte_glyph_is_not_silently_deleted() {
 }
 
 #[test]
-fn masks_and_inline_images_are_not_silent_and_no_pixels_are_invented() {
+fn colour_key_masks_are_applied_and_unsupported_inline_images_are_reported() {
     let mut content = b"q 10 0 0 10 0 0 cm /Im1 Do Q BI /W 1 /H 1 /BPC 8 /CS /RGB ID ".to_vec();
     content.extend([255, 0, 0]);
     content.extend(b" EI\n");
@@ -775,7 +783,7 @@ fn masks_and_inline_images_are_not_silent_and_no_pixels_are_invented() {
     let mut stream = image(vec![1, 2, 3], "DeviceRGB", 1, 1);
     stream.dict.set(
         "Mask",
-        vec![0.into(), 0.into(), 0.into(), 0.into(), 0.into(), 0.into()],
+        vec![1.into(), 1.into(), 2.into(), 2.into(), 3.into(), 3.into()],
     );
     let im = pdf.add_object(stream);
     pdf.get_dictionary_mut(root).unwrap().set(
@@ -785,12 +793,9 @@ fn masks_and_inline_images_are_not_silent_and_no_pixels_are_invented() {
     let file = Fixture::save(&mut pdf);
     let (doc, report) = import_pdf(&file.0, &ImportOptions::default()).unwrap();
     assert_eq!(report.images, 1);
-    assert!(
-        report
-            .losses
-            .iter()
-            .any(|l| l.kind == LossKind::Mask && l.required)
-    );
+    let rgba = doc.objects.iter().find_map(|o| o.raster_data.as_deref()).unwrap();
+    assert_eq!(rgba, &[1, 2, 3, 0]);
+    assert!(!report.losses.iter().any(|l| l.kind == LossKind::Mask));
     assert!(
         report
             .losses

@@ -286,13 +286,6 @@ pub fn snapshot(doc: &Document) -> Result<Value, CommandError> {
     serde_json::to_value(doc).map_err(|_| CommandError::new("INTERNAL"))
 }
 
-pub fn restore(doc: &mut Document, value: &Value) -> Result<(), CommandError> {
-    let mut next: Document = serde_json::from_value(value.clone()).map_err(|_| CommandError::invalid_params())?;
-    next.pixel_selection = doc.pixel_selection.take();
-    *doc = next;
-    Ok(())
-}
-
 fn restore_guides(session: &mut Session, params: &Value) -> Result<(), CommandError> {
     if let Some(value) = params.get("guides") {
         session.guides.replace_with(serde_json::from_value(value.clone()).map_err(|_| CommandError::invalid_params())?);
@@ -378,7 +371,7 @@ fn commit(session: &mut Session, name: &str, base: &Document, mut next: Document
     if let Some(token) = token {
         take_preview(token);
     }
-    session.document = next;
+    replace_document_preserving_view(session, next);
     session.undo.push(Change {
         name: name.to_string(),
         redo: Command::with_params(DOC_SETUP_RESTORE, redo),
@@ -430,6 +423,19 @@ fn replace_preview_document(session: &mut Session, next: Document) {
     if let Some(guides) = guides_for_document(session, &next) {
         session.guides.replace_with(guides);
     }
+    replace_document_preserving_view(session, next);
+}
+
+/// Keep the camera in screen space when the document's coordinate unit changes.
+pub fn replace_document_preserving_view(session: &mut Session, next: Document) {
+    let current = &session.document;
+    let factor = unit_factor(current.units, current.dpi, next.units, next.dpi);
+    if factor != 1.0 {
+        let zoom = session.view.zoom / factor;
+        if zoom.is_finite() && zoom > 0.0 {
+            session.view.zoom = zoom;
+        }
+    }
     session.document = next;
 }
 
@@ -448,10 +454,17 @@ fn run_transparent(session: &mut Session, command: &Command) -> CommandResult {
     commit(session, DOC_SETUP_TRANSPARENT, &base, next, None)
 }
 
+fn restore(session: &mut Session, params: &Value) -> Result<(), CommandError> {
+    let value = params.get("document").ok_or_else(CommandError::invalid_params)?;
+    let mut next: Document = serde_json::from_value(value.clone()).map_err(|_| CommandError::invalid_params())?;
+    restore_guides(session, params)?;
+    next.pixel_selection = session.document.pixel_selection.take();
+    replace_document_preserving_view(session, next);
+    Ok(())
+}
+
 fn run_restore(session: &mut Session, command: &Command) -> CommandResult {
-    let value = command.params.get("document").ok_or_else(CommandError::invalid_params)?;
-    restore_guides(session, &command.params)?;
-    restore(&mut session.document, value)?;
+    restore(session, &command.params)?;
     session.generation += 1;
     Ok(json!({ "doc_version": session.generation, "setup": setup_value(&session.document) }))
 }
@@ -522,10 +535,7 @@ pub fn run(session: &mut Session, command: &Command) -> Option<CommandResult> {
 
 pub fn apply(session: &mut Session, command: &Command) -> Option<Result<(), CommandError>> {
     match command.name.as_str() {
-        DOC_SETUP_RESTORE => Some(match command.params.get("document") {
-            Some(value) => restore_guides(session, &command.params).and_then(|_| restore(&mut session.document, value)),
-            None => Err(CommandError::invalid_params()),
-        }),
+        DOC_SETUP_RESTORE => Some(restore(session, &command.params)),
         DOC_SETUP_APPLY => Some(built(&session.document, &command.params).map(|mut next| {
             next.pixel_selection = session.document.pixel_selection.take();
             replace_preview_document(session, next);

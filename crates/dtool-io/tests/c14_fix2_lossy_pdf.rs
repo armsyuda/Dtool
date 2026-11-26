@@ -3,7 +3,8 @@ use dtool_core::paint::Paint;
 use dtool_io::{import_pdf, ImportOptions, IoErrorKind, LossKind};
 use std::path::PathBuf;
 
-const SHADING: &str = "/Shading << /Sh1 << /ShadingType 2 /ColorSpace /DeviceRGB /Coords [0 0 1 0] /Function << /FunctionType 2 /Domain [0 1] /C0 [1 0 0] /C1 [0 0 1] /N 1 >> >> >>";
+// Non-nested circles exercise the radial shading fallback.
+const SHADING: &str = "/Shading << /Sh1 << /ShadingType 3 /ColorSpace /DeviceRGB /Coords [0 0 1 3 0 2] /Function << /FunctionType 2 /Domain [0 1] /C0 [1 0 0] /C1 [0 0 1] /N 1 >> >> >>";
 
 fn build_pdf(resources: &str, body: &str, annots: bool) -> Vec<u8> {
     let page = format!(
@@ -43,7 +44,7 @@ fn write(name: &str, bytes: &[u8]) -> PathBuf {
 
 #[test]
 fn lossy_only_page_opens_with_reported_losses() {
-    let resources = format!("/ExtGState << /G1 << /BM /Multiply >> >> {}", SHADING);
+    let resources = format!("/ExtGState << /G1 << /BM /UnrecognizedBlend >> >> {}", SHADING);
     let path = write("lossy_only.pdf", &build_pdf(&resources, "/G1 gs /Sh1 sh", true));
     let (doc, report) = import_pdf(&path, &ImportOptions::default()).expect("lossy-only page opens");
     assert_eq!(report.objects, 1);
@@ -65,7 +66,7 @@ fn clipped_shading_fills_only_the_clip() {
     let path = write("clipped.pdf", &build_pdf(SHADING, "q 20 30 50 40 re W n /Sh1 sh Q", false));
     let (doc, report) = import_pdf(&path, &ImportOptions::default()).expect("clipped shading opens");
     assert_eq!(report.objects, 1);
-    let shape = doc.objects.iter().find(|o| !o.is_group()).expect("fallback shape");
+    let shape = doc.objects.iter().find(|o| !o.is_group() && o.clip_role.is_none()).expect("fallback shape");
     assert_eq!(shape.size, [50.0, 40.0]);
     assert_eq!(shape.pos[0], 20.0);
 }

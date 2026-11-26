@@ -149,7 +149,7 @@ impl EditTextStyleDialog {
                     ui.label(line);
                 }
             });
-            ui.checkbox(&mut self.apply_to_selection, text("styles.apply_to_selection"));
+            dtool_design::toggle(ui, &mut self.apply_to_selection, text("styles.apply_to_selection"));
             ui.horizontal(|ui| {
                 if ui.add_enabled(can, egui::Button::new(text("styles.ok"))).clicked() {
                     ui.ctx().memory_mut(|memory| memory.data.insert_temp(egui::Id::new("dtool.edit_text_style.ok"), true));

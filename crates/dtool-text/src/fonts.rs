@@ -87,7 +87,7 @@ type GlyphContours = Arc<[Vec<[f32; 2]>]>;
 
 #[derive(Default)]
 struct GlyphContourCache {
-    entries: HashMap<(FontId, u16, u32), GlyphContours>,
+    entries: HashMap<(FontId, u16, u32, Option<u64>), GlyphContours>,
     points: usize,
 }
 
@@ -441,6 +441,7 @@ struct ContourPen {
     contours: Vec<Vec<[f32; 2]>>,
     current: Vec<[f32; 2]>,
     last: [f32; 2],
+    tolerance: Option<f64>,
 }
 
 impl ContourPen {
@@ -450,6 +451,15 @@ impl ContourPen {
         } else {
             self.current.clear();
         }
+    }
+
+    fn flatten_curve(&mut self, segment: kurbo::PathEl, tolerance: f64) {
+        let [x, y] = self.last.map(f64::from);
+        kurbo::flatten([kurbo::PathEl::MoveTo(kurbo::Point::new(x, y)), segment], tolerance, |element| {
+            if let kurbo::PathEl::LineTo(point) = element {
+                self.current.push([point.x as f32, point.y as f32]);
+            }
+        });
     }
 }
 
@@ -468,6 +478,13 @@ impl skrifa::outline::OutlinePen for ContourPen {
     }
 
     fn quad_to(&mut self, cx0: f32, cy0: f32, x: f32, y: f32) {
+        if let Some(tolerance) = self.tolerance {
+            self.flatten_curve(kurbo::PathEl::QuadTo(
+                (f64::from(cx0), f64::from(cy0)).into(), (f64::from(x), f64::from(y)).into(),
+            ), tolerance);
+            self.last = [x, y];
+            return;
+        }
         let p0 = self.last;
         for step in 1..=CURVE_STEPS {
             let t = step as f32 / CURVE_STEPS as f32;
@@ -478,6 +495,14 @@ impl skrifa::outline::OutlinePen for ContourPen {
     }
 
     fn curve_to(&mut self, cx0: f32, cy0: f32, cx1: f32, cy1: f32, x: f32, y: f32) {
+        if let Some(tolerance) = self.tolerance {
+            self.flatten_curve(kurbo::PathEl::CurveTo(
+                (f64::from(cx0), f64::from(cy0)).into(), (f64::from(cx1), f64::from(cy1)).into(),
+                (f64::from(x), f64::from(y)).into(),
+            ), tolerance);
+            self.last = [x, y];
+            return;
+        }
         let p0 = self.last;
         for step in 1..=CURVE_STEPS {
             let t = step as f32 / CURVE_STEPS as f32;
@@ -502,6 +527,10 @@ impl FontLibrary {
     }
 
     pub(crate) fn shared_glyph_contours(&self, id: FontId, gid: u16, size_pt: f32) -> GlyphContours {
+        self.glyph_contours_with_tolerance(id, gid, size_pt, None)
+    }
+
+    pub(crate) fn glyph_contours_with_tolerance(&self, id: FontId, gid: u16, size_pt: f32, tolerance: Option<f64>) -> GlyphContours {
         use skrifa::MetadataProvider;
         const MAX_ENTRIES: usize = 4_096;
         const MAX_POINTS: usize = 512 * 1024;
@@ -511,12 +540,17 @@ impl FontLibrary {
         }
         // This library's faces and font bytes are immutable. Store the path
         // at its exact size before any placement or object transform.
-        let key = (id, gid, size_pt.to_bits());
+        // Bound refinement near the precision of the f32 font coordinates.
+        let tolerance = tolerance.map(|value| {
+            let size = f64::from(size_pt);
+            value.clamp(size * 1e-7, size * 0.0005)
+        });
+        let key = (id, gid, size_pt.to_bits(), tolerance.map(f64::to_bits));
         if let Some(cached) = self.contours.lock().ok().and_then(|cache| cache.entries.get(&key).cloned()) {
             return cached;
         }
         let contours: GlyphContours = self.with_font(id, |font| {
-            let mut pen = ContourPen { contours: Vec::new(), current: Vec::new(), last: [0.0, 0.0] };
+            let mut pen = ContourPen { contours: Vec::new(), current: Vec::new(), last: [0.0, 0.0], tolerance };
             let outlines = font.outline_glyphs();
             if let Some(glyph) = outlines.get(skrifa::GlyphId::new(u32::from(gid))) {
                 let settings = skrifa::outline::DrawSettings::unhinted(skrifa::instance::Size::new(size_pt), skrifa::instance::LocationRef::default());

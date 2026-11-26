@@ -1,6 +1,7 @@
 use crate::blend::BlendMode;
 use crate::command::Session;
 use crate::object::{Object, ObjectId, ObjectKind};
+use crate::selection::SelectOp;
 use crate::undo::Change;
 use dtool_protocol::{Command, CommandError, CommandResult};
 use serde::{Deserialize, Serialize};
@@ -9,6 +10,7 @@ use std::collections::{HashMap, HashSet};
 
 pub const NODE_GROUP: &str = "node.group";
 pub const NODE_FOLDER_CREATE: &str = "node.folder.create";
+pub const NODE_FOLDER_PROMOTE: &str = "node.folder.promote";
 pub const NODE_UNGROUP: &str = "node.ungroup";
 pub const NODE_ARRANGE: &str = "node.arrange";
 pub const NODE_LOCK_STATE: &str = "node.lock_state";
@@ -74,6 +76,8 @@ pub struct NodeSnapshot {
     pub objects: Vec<Object>,
     pub next_object_id: u64,
     pub selection: Vec<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection_key: Option<ObjectId>,
     #[serde(default)]
     pub frame_chains: Option<Vec<crate::frame::FrameChain>>,
     #[serde(default)]
@@ -113,7 +117,7 @@ pub struct NodeSnapshot {
 pub fn is_arrange_command(name: &str) -> bool {
     matches!(
         name,
-        NODE_GROUP | NODE_FOLDER_CREATE | NODE_UNGROUP | NODE_ARRANGE | NODE_LOCK_STATE | NODE_UNLOCK_ALL | NODE_SHOW_ALL | NODE_DELETE | OBJECT_DELETE | EDIT_DELETE
+        NODE_GROUP | NODE_FOLDER_CREATE | NODE_FOLDER_PROMOTE | NODE_UNGROUP | NODE_ARRANGE | NODE_LOCK_STATE | NODE_UNLOCK_ALL | NODE_SHOW_ALL | NODE_DELETE | OBJECT_DELETE | EDIT_DELETE
             | NODE_REPARENT | NODE_SELECT_INSIDE | NODE_HIDE_OTHERS | NODE_SHOW_OTHERS
     )
 }
@@ -143,6 +147,7 @@ pub fn can_execute(session: &Session, command: &Command) -> Option<bool> {
     }
     let has_objects = !session.document.objects.is_empty();
     let ready = match command.name.as_str() {
+        NODE_FOLDER_PROMOTE => promotable_groups(session, command).is_ok(),
         NODE_UNLOCK_ALL => session.document.objects.iter().any(|obj| obj.locked),
         NODE_SHOW_ALL => session.document.objects.iter().any(|obj| !obj.pickable),
         NODE_HIDE_OTHERS | NODE_SHOW_OTHERS => session.has_document && other_visibility_targets(session, command)
@@ -164,6 +169,7 @@ pub fn run(session: &mut Session, command: &Command) -> Option<CommandResult> {
     let result = match command.name.as_str() {
         NODE_GROUP => group(session, command),
         NODE_FOLDER_CREATE => create_folder(session, command),
+        NODE_FOLDER_PROMOTE => promote_groups(session, command),
         NODE_UNGROUP => ungroup(session, command),
         NODE_ARRANGE => arrange(session, command),
         NODE_LOCK_STATE => lock_state(session, command),
@@ -197,6 +203,7 @@ pub fn snapshot(session: &Session) -> NodeSnapshot {
         objects: session.document.objects.clone(),
         next_object_id: session.document.next_object_id,
         selection: session.selection.ids.iter().map(|id| id.0).collect(),
+        selection_key: session.selection.explicit_key(),
         frame_chains: Some(session.document.frame_chains.clone()),
         pixel_layers: Some(session.document.pixel_layers.clone()),
         placed_images: Some(session.document.placed_images.clone()),
@@ -252,12 +259,16 @@ pub fn restore(session: &mut Session, snapshot: &NodeSnapshot) {
         session.document.next_resource_id = next_resource_id.max(value);
     }
     session.document.raise_id_high_water();
-    session.selection.ids = snapshot
+    let selection = snapshot
         .selection
         .iter()
         .map(|id| ObjectId(*id))
         .filter(|id| session.document.get_object(*id).is_some())
         .collect();
+    session.selection.set(selection, SelectOp::Replace);
+    if let Some(key) = snapshot.selection_key {
+        session.selection.set_key(key);
+    }
 }
 
 fn restore_command(snapshot: &NodeSnapshot) -> Command {
@@ -269,12 +280,28 @@ pub fn commit_snapshot(session: &mut Session, name: &str, before: NodeSnapshot, 
 }
 
 pub(crate) fn commit(session: &mut Session, name: &str, before: NodeSnapshot, mut extra: Value) -> CommandResult {
-    if before.symbols.is_some() && matches!(name, NODE_ARRANGE | NODE_REPARENT | NODE_DELETE | OBJECT_DELETE | EDIT_DELETE | NODE_GROUP | NODE_FOLDER_CREATE | NODE_UNGROUP | crate::clipboard::EDIT_PASTE_INSIDE) {
+    use crate::clipboard::{EDIT_CUT, EDIT_DUPLICATE, EDIT_PASTE_INSIDE, EDIT_POWER_DUPLICATE};
+    use crate::commands::duplicate::EDIT_DUPLICATE_DRAG;
+
+    if before.symbols.is_some() && matches!(name,
+        NODE_ARRANGE | NODE_REPARENT | NODE_DELETE | OBJECT_DELETE | EDIT_DELETE
+        | NODE_GROUP | NODE_FOLDER_CREATE | NODE_UNGROUP | EDIT_CUT | EDIT_PASTE_INSIDE
+        | EDIT_DUPLICATE | EDIT_DUPLICATE_DRAG | EDIT_POWER_DUPLICATE | crate::clipboard::move_duplicate::MOVE_DUPLICATE
+    ) {
         let kept = crate::commands::symbols::structure::sync(&mut session.document, &before.objects, session.symbol_sync);
         session.selection.ids.retain(|id| session.document.get_object(*id).is_some());
         if kept {
             extra["warnings"] = json!(crate::commands::symbols::warnings(true));
         }
+    }
+    if name == crate::clipboard::EDIT_CUT && session.document.objects.iter().any(|object| {
+        object.path_text_data().is_some_and(|text| {
+            session.document.get_object(text.path).is_none()
+                && before.objects.iter().any(|old| old.id == text.path)
+        })
+    }) {
+        restore(session, &before);
+        return Err(CommandError::new("CLIPBOARD_PATH_IN_USE"));
     }
     let after = snapshot(session);
     session.undo.push(Change {
@@ -420,6 +447,37 @@ fn create_folder(session: &mut Session, command: &Command) -> CommandResult {
     session.document.objects[at..].rotate_right(1);
     session.selection.ids = vec![folder];
     commit(session, NODE_FOLDER_CREATE, before, json!({ "folder": folder.0 }))
+}
+
+fn promotable_groups(session: &Session, command: &Command) -> Result<Vec<ObjectId>, CommandError> {
+    if !session.has_document {
+        return Err(CommandError::no_document());
+    }
+    let ids = target_ids(session, command)?;
+    let doc = &session.document;
+    if ids.iter().any(|id| {
+        let Some(group) = doc.get_object(*id) else { return true };
+        !group.is_group() || group.layer_folder || group.locked || group.tone_blend.is_some()
+            || crate::artboard::is_artboard(group)
+            || doc.master_pages.assignments.iter().any(|assignment| assignment.group == Some(*id))
+            || doc.master_pages.source_of(*id).is_some()
+            || doc.symbols.instances.iter().any(|instance| instance.root == *id)
+            || crate::commands::symbols::object_link(doc, *id).is_some()
+    }) {
+        return Err(CommandError::invalid_params());
+    }
+    Ok(ids)
+}
+
+fn promote_groups(session: &mut Session, command: &Command) -> CommandResult {
+    let ids = promotable_groups(session, command)?;
+    let before = snapshot(session);
+    for group in &mut session.document.objects {
+        if ids.contains(&group.id) {
+            group.layer_folder = true;
+        }
+    }
+    commit(session, NODE_FOLDER_PROMOTE, before, json!({ "nodes": ids }))
 }
 
 fn group(session: &mut Session, command: &Command) -> CommandResult {
@@ -772,7 +830,14 @@ pub(crate) fn delete_objects(document: &mut crate::Document, doomed: &std::colle
     document.index.indexes.retain(|&story| stories.contains(&crate::StoryId(story)));
     document.text_links.retain(|link| stories.contains(&link.story));
     let images: std::collections::HashSet<_> = document.placed_images.iter().map(|image| image.resource).collect();
-    document.resources.retain(|resource| !removed_images.contains(&resource.id) || images.contains(&resource.id));
+    if !removed_images.is_empty() {
+        let paint_images = document.paint_image_uses();
+        document.resources.retain(|resource| {
+            !removed_images.contains(&resource.id)
+                || images.contains(&resource.id)
+                || paint_images.contains_key(&resource.id)
+        });
+    }
 }
 
 fn delete(session: &mut Session, command: &Command, gate_locked: bool) -> CommandResult {
@@ -792,6 +857,14 @@ fn delete(session: &mut Session, command: &Command, gate_locked: bool) -> Comman
 
 
 pub fn layer_panel_tree_command(session: &Session, include_hidden: bool) -> Command {
+    Command::with_params(NODE_TREE_QUERY, layer_panel_tree_params(session, include_hidden))
+}
+
+pub fn layer_panel_objects(session: &Session) -> Result<(Option<ObjectId>, Vec<&Object>), CommandError> {
+    tree_objects(&session.document, &layer_panel_tree_params(session, true))
+}
+
+fn layer_panel_tree_params(session: &Session, include_hidden: bool) -> Value {
     use crate::view::ViewTarget;
     let mut params = json!({"include_hidden": include_hidden});
     let doc = &session.document;
@@ -807,7 +880,7 @@ pub fn layer_panel_tree_command(session: &Session, include_hidden: bool) -> Comm
             params["page_id"] = json!(id.0);
         }
     }
-    Command::with_params(NODE_TREE_QUERY, params)
+    params
 }
 
 pub(crate) fn tree_query(session: &Session, command: &Command) -> CommandResult {

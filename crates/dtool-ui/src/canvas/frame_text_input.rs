@@ -165,7 +165,9 @@ fn paint_flow(ui: &Ui, session: &Session, rect: egui::Rect, view: &ViewState, to
 
 pub fn paint_overlay(ui: &Ui, session: &Session, rect: egui::Rect, view: &ViewState) {
     TOOL.with(|tool| paint_flow(ui, session, rect, view, &mut tool.borrow_mut(), None));
-    paint_spelling(ui, session, rect, view);
+    if !is_composing() && session.text_composing.is_none() {
+        paint_spelling(ui, session, rect, view);
+    }
     let doc = &session.document;
     if let Some((id, path)) = session.text_edit.as_ref().and_then(|edit| edit.object)
         .and_then(|id| Some((id, doc.get_object(id)?.path_text_data()?.path)))
@@ -178,7 +180,6 @@ pub fn paint_overlay(ui: &Ui, session: &Session, rect: egui::Rect, view: &ViewSt
             painter.add(if closed { egui::Shape::closed_line(points, stroke) } else { egui::Shape::line(points, stroke) });
         }
     }
-    paint_preedit(ui, session, view, rect);
 }
 
 pub fn paint_caret(ui: &Ui, session: &Session, response: &Response, view: &ViewState) {
@@ -208,27 +209,54 @@ pub fn paint_caret(ui: &Ui, session: &Session, response: &Response, view: &ViewS
     }
 }
 
-pub fn paint_text_selection(ui: &Ui, session: &Session, response: &Response, view: &ViewState) {
-    use dtool_tools::dtool_text as text;
-    if session.text_edit.as_ref().and_then(|edit| edit.object).and_then(|id| session.document.get_object(id))
-        .is_some_and(|object| matches!(object.kind, dtool_core::ObjectKind::Table(_))) {
-        crate::table::canvas::paint_text_selection(ui, response, session, view);
-        return;
+#[derive(Clone, Copy)]
+pub(crate) enum TextRangeMark {
+    Selection(egui::Color32),
+    Composition(egui::Stroke),
+}
+
+impl TextRangeMark {
+    pub(crate) fn paint(self, painter: &egui::Painter, points: [egui::Pos2; 4]) {
+        match self {
+            Self::Selection(fill) => {
+                painter.add(egui::Shape::convex_polygon(points.to_vec(), fill, egui::Stroke::NONE));
+            }
+            Self::Composition(stroke) => {
+                painter.line_segment([points[3], points[2]], stroke);
+            }
+        }
     }
-    let Some(edit) = session.text_edit.as_ref().filter(|edit| edit.caret != edit.anchor) else { return; };
+}
+
+pub fn paint_text_selection(ui: &Ui, session: &Session, response: &Response, view: &ViewState) {
     if is_composing() || session.text_composing.is_some() { return; }
-    let doc = &session.document;
-    let Some(core) = doc.stories.iter().find(|story| story.id == edit.story) else { return; };
-    let selected = edit.caret.min(edit.anchor)..edit.caret.max(edit.anchor);
-    let rect = response.rect;
-    let painter = ui.painter_at(rect);
     let accent = ui.visuals().selection.bg_fill;
     let alpha = if ui.memory(|memory| memory.focused().is_some_and(|id| id != response.id)) { 54 } else { 112 };
     let fill = egui::Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), alpha);
+    paint_text_range(ui, session, response.rect, view, TextRangeMark::Selection(fill));
+}
+
+pub(crate) fn paint_text_range(
+    ui: &Ui, session: &Session, rect: egui::Rect, view: &ViewState, mark: TextRangeMark,
+) {
+    use dtool_tools::dtool_text as text;
+    let Some(edit) = session.text_edit.as_ref().filter(|edit| edit.caret != edit.anchor) else { return; };
+    if edit.object.and_then(|id| session.document.get_object(id))
+        .is_some_and(|object| matches!(object.kind, dtool_core::ObjectKind::Table(_))) {
+        let mark = match mark {
+            TextRangeMark::Selection(_) => TextRangeMark::Selection(ui.visuals().selection.bg_fill.gamma_multiply(0.45)),
+            other => other,
+        };
+        crate::table::canvas::paint_text_range(ui, rect, session, view, mark);
+        return;
+    }
+    let doc = &session.document;
+    let Some(core) = doc.stories.iter().find(|story| story.id == edit.story) else { return; };
+    let selected = edit.caret.min(edit.anchor)..edit.caret.max(edit.anchor);
+    let painter = ui.painter_at(rect);
     let draw = |id, quad: [[f32; 2]; 4]| {
-        let points = dtool_core::commands::warp::live_warp_points(doc, id, &quad).unwrap_or_else(|| quad.to_vec());
-        let points = points.into_iter().map(|point| screen(rect, view, point)).collect();
-        painter.add(egui::Shape::convex_polygon(points, fill, egui::Stroke::NONE));
+        let points = dtool_core::commands::warp::live_warp_points(doc, id, &quad).and_then(|points| points.try_into().ok()).unwrap_or(quad);
+        mark.paint(&painter, points.map(|point| screen(rect, view, point)));
     };
     let library = text::FontLibrary::shared();
     let drawn = |id| dtool_core::scene::is_drawn_with_flags(doc, &view.canvas_flags, id);
@@ -317,7 +345,6 @@ pub fn handle(ui: &mut Ui, session: &mut Session, response: &Response, view: &Vi
     let pointer = up.or_else(|| response.hover_pos()).or_else(|| ui.input(|i| i.pointer.latest_pos()));
     let Some(pointer) = pointer else {
         TOOL.with(|tool| paint_flow(ui, session, rect, view, &mut tool.borrow_mut(), None));
-        paint_preedit(ui, session, view, rect);
         return;
     };
     let local = [pointer.x - rect.min.x, pointer.y - rect.min.y];
@@ -329,15 +356,8 @@ pub fn handle(ui: &mut Ui, session: &mut Session, response: &Response, view: &Vi
         let port = if tool.linking().is_none() { tool.out_port_at(&session.document, doc_point, tolerance) } else { None };
         let target = tool.linking().and_then(|_| tool.link_target(&session.document, doc_point));
         paint_flow(ui, session, rect, view, &mut tool, target);
-        paint_preedit(ui, session, view, rect);
-        if port.is_some() || tool.linking().is_some() {
-            ui.ctx().set_cursor_icon(egui::CursorIcon::Alias);
-        }
-        if !tool.get_status_text().is_empty() {
+        if response.hovered() && !tool.get_status_text().is_empty() {
             dtool_design::canvas_text_hint(ui,[pointer.x,pointer.y],dtool_strings::text(tool.get_status_text()));
-            if tool.linking().is_none() {
-                ui.ctx().set_cursor_icon(egui::CursorIcon::Text);
-            }
         }
         let gesture = ui.data(|data| data.get_temp::<FramePointerGesture>(selection_drag));
         let moved = gesture.is_some_and(|gesture| gesture.press.distance(pointer) >= 4.0);
@@ -371,6 +391,9 @@ pub fn handle(ui: &mut Ui, session: &mut Session, response: &Response, view: &Vi
                 }
             });
             if let Some(id) = gesture.frame {
+                if !released || response.hovered() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::Text);
+                }
                 let target = dtool_tools::frame_text::hit_frame_id(&session.document, doc_point)
                     .filter(|target| dtool_core::scene::is_drawn_with_flags(&session.document, &view.canvas_flags, *target)
                         && session.document.get_object(*target).and_then(|object| object.story_id())
@@ -398,6 +421,24 @@ pub fn handle(ui: &mut Ui, session: &mut Session, response: &Response, view: &Vi
                 );
                 dtool_design::canvas_frame_outline(ui,preview);
             }
+        }
+        if response.hovered() || response.is_pointer_button_down_on() {
+            let cursor = if tool.linking().is_some() {
+                egui::CursorIcon::Alias
+            } else if tool.drag_corners().is_some() {
+                egui::CursorIcon::Crosshair
+            } else if port.is_some() {
+                egui::CursorIcon::Alias
+            } else if !tool.get_status_text().is_empty()
+                || dtool_tools::frame_text::hit_frame_id(&session.document, doc_point).is_some_and(|id| {
+                    dtool_core::scene::is_drawn_with_flags(&session.document, &view.canvas_flags, id)
+                })
+            {
+                egui::CursorIcon::Text
+            } else {
+                egui::CursorIcon::Crosshair
+            };
+            ui.ctx().set_cursor_icon(cursor);
         }
         let raw_finished = gesture.is_some() && up.is_some();
         let clicked = response.clicked() || (raw_finished && !moved);
@@ -451,7 +492,11 @@ pub(crate) fn extend_selection(session: &mut Session, caret: usize) {
 }
 
 pub fn caret_screen_rect(session: &Session, view: &ViewState, canvas: egui::Rect) -> Option<egui::Rect> {
-    let [a, b] = caret_line(session)?;
+    caret_screen_rect_at(session, view, canvas, session.text_edit.as_ref()?.caret)
+}
+
+fn caret_screen_rect_at(session: &Session, view: &ViewState, canvas: egui::Rect, at: usize) -> Option<egui::Rect> {
+    let [a, b] = caret_line_at(session, at)?;
     let rect = egui::Rect::from_two_pos(screen(canvas, view, a), screen(canvas, view, b));
     Some(egui::Rect::from_min_size(rect.min, rect.size().max(egui::Vec2::splat(1.0))))
 }
@@ -464,16 +509,20 @@ fn edited_text_object(session: &Session) -> Option<&dtool_core::Object> {
 }
 
 fn caret_line(session: &Session) -> Option<[[f32; 2]; 2]> {
-    if let Some(ends) = crate::table::canvas::caret(session) {
+    caret_line_at(session, session.text_edit.as_ref()?.caret)
+}
+
+fn caret_line_at(session: &Session, at: usize) -> Option<[[f32; 2]; 2]> {
+    if let Some(ends) = crate::table::canvas::caret_line_at(session, at) {
         return Some(ends);
     }
     let object = edited_text_object(session)?;
     let [x, y] = object.pos;
-    let (target, ends) = if let Some(ends) = path_caret(session) {
+    let (target, ends) = if let Some(ends) = path_caret(session, at) {
         (object, ends)
-    } else if let Some(ends) = art_caret_line(session) {
+    } else if let Some(ends) = art_caret_line(session, at) {
         (object, ends)
-    } else if let Some((frame, ends)) = caret_layout_line(session) {
+    } else if let Some((frame, ends)) = caret_layout_line(session, at) {
         (session.document.get_object(frame).unwrap_or(object), ends)
     } else {
         (object, [[x, y], [x, y + (object.size[1].abs() / object.text_scale[1]).max(12.0)]])
@@ -488,13 +537,13 @@ fn caret_line(session: &Session) -> Option<[[f32; 2]; 2]> {
     Some(warped.and_then(|points| points.try_into().ok()).unwrap_or(ends))
 }
 
-fn path_caret(session: &Session) -> Option<[[f32; 2]; 2]> {
+fn path_caret(session: &Session, at: usize) -> Option<[[f32; 2]; 2]> {
     use dtool_tools::dtool_text::{path_text::path_text_insertions, FontLibrary};
     let edit = session.text_edit.as_ref()?;
     let object = session.document.get_object(edit.object?)?;
     if !object.is_path_text() { return None; }
     path_text_insertions(&FontLibrary::shared(), &session.document, object).into_iter()
-        .min_by_key(|(index, _)| index.abs_diff(edit.caret)).map(|(_, line)| line)
+        .min_by_key(|(index, _)| index.abs_diff(at)).map(|(_, line)| line)
 }
 
 pub(crate) fn path_text_at(scene: &dtool_core::scene::Scene, session: &Session, point: [f32; 2]) -> Option<(dtool_core::ObjectId, dtool_core::StoryId, usize)> {
@@ -523,8 +572,19 @@ pub(crate) fn closest_path_insertion(
         .min_by(|(_, a), (_, b)| a.total_cmp(b))
 }
 
+fn composition_insertion(edit: &dtool_core::command::TextEditState) -> usize {
+    // Committing a composition replaces the selection from its first character.
+    edit.anchor.min(edit.caret)
+}
+
 pub fn publish_caret_ime(ctx: &egui::Context, session: &Session, view: &ViewState, canvas: egui::Rect) {
-    if let Some(rect) = caret_screen_rect(session, view, canvas) {
+    let Some(edit) = session.text_edit.as_ref() else { return; };
+    let at = if is_composing() || session.text_composing.is_some() {
+        composition_insertion(edit)
+    } else {
+        edit.caret
+    };
+    if let Some(rect) = caret_screen_rect_at(session, view, canvas, at) {
         crate::input::publish_ime_caret(ctx, rect);
     }
 }
@@ -601,7 +661,11 @@ pub(crate) fn text_input(ui: &mut Ui, session: &mut Session, response: &Response
         return;
     }
     let events = ui.input(|i| i.events.clone());
+    let before = composition_text(session);
     feed_text_input(session, &events);
+    if before != composition_text(session) {
+        ui.ctx().request_repaint();
+    }
     if response.clicked() || response.drag_started() {
         commit_pending(session);
     }
@@ -610,7 +674,7 @@ pub(crate) fn text_input(ui: &mut Ui, session: &mut Session, response: &Response
     publish_caret_ime(ui.ctx(), session, view, response.rect);
 }
 
-fn caret_layout_line(session: &Session) -> Option<(ObjectId, [[f32; 2]; 2])> {
+fn caret_layout_line(session: &Session, at: usize) -> Option<(ObjectId, [[f32; 2]; 2])> {
     let edit = session.text_edit.as_ref()?;
     let mut offset = 0usize;
     let mut found = false;
@@ -624,82 +688,19 @@ fn caret_layout_line(session: &Session) -> Option<(ObjectId, [[f32; 2]; 2])> {
     if !found {
         return None;
     }
-    let point = dtool_core::longdoc::marks::caret_point(&session.document, offset + edit.caret)?;
+    let point = dtool_core::longdoc::marks::caret_point(&session.document, offset + at)?;
     Some((point.frame, [point.point, [point.point[0], point.point[1] + point.line_height]]))
 }
 
-struct PreeditLayout {
-    origin: egui::Pos2,
-    angle: f32,
-    size: egui::Vec2,
-    runs: Vec<(std::sync::Arc<egui::Galley>, bool)>,
-}
-
-impl PreeditLayout {
-    fn new(ui: &Ui, session: &Session, view: &ViewState, canvas: egui::Rect, text: &str) -> Option<Self> {
-        let [origin, end] = caret_line(session)?.map(|point| screen(canvas, view, point));
-        let normal = end - origin;
-        let angle = if normal.length_sq() > f32::EPSILON {
-            normal.angle() - std::f32::consts::FRAC_PI_2
-        } else {
-            view.rotation_deg.to_radians()
-        };
-        let font = egui::FontId::proportional((normal.length() * 0.8).max(dtool_design::font_size("ui")));
-        let vertical = edited_text_object(session).is_some_and(dtool_core::Object::is_vertical_art_text);
-        let parts = if vertical {
-            dtool_tools::dtool_text::canvas_text::vertical_composition_runs(text)
-        } else {
-            vec![(text, false)]
-        };
-        let mut size = egui::Vec2::ZERO;
-        let runs = parts.into_iter().map(|(run, upright)| {
-            let galley = ui.painter().layout_no_wrap(run.to_owned(), font.clone(), dtool_design::color("text"));
-            let advance = if upright { galley.size().x.max(galley.size().y) } else { galley.size().x };
-            size.x += advance;
-            size.y = size.y.max(galley.size().y);
-            (galley, upright)
-        }).collect();
-        Some(Self { origin, angle, size, runs })
-    }
-
-    fn corners(&self) -> [egui::Pos2; 4] {
-        let size = self.size;
-        let rotation = egui::emath::Rot2::from_angle(self.angle);
-        [[0.0, 0.0], [size.x, 0.0], [size.x, size.y], [0.0, size.y]]
-            .map(|[x, y]| self.origin + rotation * egui::vec2(x, y))
-    }
-}
-
-pub fn preedit_rect(ui: &Ui, session: &Session, view: &ViewState, canvas: egui::Rect, text: &str) -> Option<egui::Rect> {
-    Some(egui::Rect::from_points(&PreeditLayout::new(ui, session, view, canvas, text)?.corners()))
-}
-
-pub fn paint_preedit(ui: &Ui, session: &Session, view: &ViewState, canvas: egui::Rect) {
-    let text = if edit_route() == crate::input::EditRoute::Core {
+pub(crate) fn composition_text(session: &Session) -> Option<String> {
+    if edit_route() == crate::input::EditRoute::Core {
         session.text_composing.clone()
     } else {
         preedit_text()
-    };
-    let Some(layout) = text.and_then(|text| PreeditLayout::new(ui, session, view, canvas, &text)) else { return; };
-    let painter = ui.painter_at(canvas);
-    let corners = layout.corners();
-    painter.add(egui::Shape::convex_polygon(corners.to_vec(), dtool_design::color("panel.bg"), egui::Stroke::NONE));
-    let rotation = egui::emath::Rot2::from_angle(layout.angle);
-    let mut pen = 0.0;
-    for (galley, upright) in layout.runs {
-        let size = galley.size();
-        let advance = if upright { size.x.max(size.y) } else { size.x };
-        let angle = if upright { layout.angle - std::f32::consts::FRAC_PI_2 } else { layout.angle };
-        let centre = layout.origin + rotation * egui::vec2(pen + advance * 0.5, layout.size.y * 0.5);
-        let origin = centre - egui::emath::Rot2::from_angle(angle) * (size * 0.5);
-        painter.add(egui::epaint::TextShape::new(origin, galley, dtool_design::color("text")).with_angle(angle));
-        pen += advance;
     }
-    let line = egui::Stroke::new(dtool_design::stroke_width("md"), dtool_design::color("accent"));
-    painter.line_segment([corners[3], corners[2]], line);
 }
 
-fn art_caret_line(session: &Session) -> Option<[[f32; 2]; 2]> {
+fn art_caret_line(session: &Session, at: usize) -> Option<[[f32; 2]; 2]> {
     use dtool_tools::dtool_text as text;
     let edit = session.text_edit.as_ref()?;
     let object = edited_text_object(session)?;
@@ -709,7 +710,6 @@ fn art_caret_line(session: &Session) -> Option<[[f32; 2]; 2]> {
     let core = session.document.stories.iter().find(|story| story.id == edit.story)?;
     let story = text::bridge::story_in_document(core, &session.document);
     let lines = text::layout_story(&text::FontLibrary::shared(), &story, None);
-    let at = edit.caret;
     let size = dtool_core::text_cmd::size_pt_of(core, dtool_core::text_cmd::DEFAULT_SIZE_PT)
         * dtool_core::units::units_per_point(session.document.units, session.document.dpi);
     let line = lines.iter().find(|line| at >= line.range.start && at <= line.range.end).or_else(|| lines.last());

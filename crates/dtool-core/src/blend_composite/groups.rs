@@ -6,15 +6,21 @@ use crate::{Document, Object, ObjectId, ObjectKind, ViewState};
 use std::collections::{HashMap, HashSet};
 
 type GroupPaths = HashMap<ObjectId, Vec<ObjectId>>;
+type GroupBlurs = HashMap<ObjectId, crate::layer_style::raster::GaussianBlur>;
 type Tagged<'a, T> = (&'a T, &'a [ObjectId], usize);
 
-fn paths(doc: &Document, owners: impl Iterator<Item = ObjectId>, effect_groups: &[ObjectId]) -> GroupPaths {
+fn paths(doc: &Document, owners: impl Iterator<Item = ObjectId>, effect_groups: &[ObjectId], blurs: &GroupBlurs) -> GroupPaths {
     let masked: HashSet<_> = doc.layer_masks.iter().map(|mask| mask.object).collect();
+    let vector_masked: HashSet<_> = doc.objects.iter()
+        .filter(|object| object.clip_role == crate::object::ClipRole::Mask)
+        .filter_map(|object| object.parent_id)
+        .collect();
     let isolated: HashSet<_> = doc.objects.iter()
         .filter(|object| crate::artboard::is_artboard(object) || matches!(object.kind, ObjectKind::Group)
             && (object.blend_mode != BlendMode::PassThrough || object.tone_blend.is_some() || blend_of(doc, object.id).is_some()
-                || masked.contains(&object.id) || !matches!(object.transparency, crate::paint::Transparency::None)
-                || object.opacity < 1.0 && (effect_groups.contains(&object.id)
+                || masked.contains(&object.id) || blurs.contains_key(&object.id)
+                || !matches!(object.transparency, crate::paint::Transparency::None)
+                || object.opacity < 1.0 && (effect_groups.contains(&object.id) || vector_masked.contains(&object.id)
                     || crate::layer_style::raster::has_group_effect(object))))
         .map(|object| object.id)
         .collect();
@@ -49,7 +55,7 @@ fn paths(doc: &Document, owners: impl Iterator<Item = ObjectId>, effect_groups: 
 }
 
 pub(super) fn scene_has_groups(doc: &Document, scene: &Scene) -> bool {
-    !paths(doc, scene.prims.iter().filter_map(drawn_object), &[]).is_empty()
+    !paths(doc, scene.prims.iter().filter_map(drawn_object), &[], &HashMap::new()).is_empty()
 }
 
 #[derive(Clone, Copy)]
@@ -57,6 +63,7 @@ pub(crate) struct RasterGrid<'a> {
     pub bounds: [f32; 4],
     pub size: [u32; 2],
     pub view: Option<&'a ViewState>,
+    pub display_to_document: Option<[f32; 6]>,
 }
 
 #[derive(Clone, Copy)]
@@ -68,13 +75,21 @@ pub(super) struct PixelMask<'a> {
 }
 
 impl RasterGrid<'_> {
-    fn point(self, index: usize) -> [f32; 2] {
+    pub(super) fn point(self, index: usize) -> [f32; 2] {
         let [width, height] = self.size;
-        crate::scene::doc_point(
+        let point = crate::scene::doc_point(
             self.bounds, width, height, (index % width as usize) as u32,
             (index / width as usize) as u32, self.view,
-        )
+        );
+        self.display_to_document.map_or(point, |matrix| apply_matrix(&matrix, point))
     }
+}
+
+pub(crate) fn display_to_document(angle: f32) -> Option<[f32; 6]> {
+    (angle != 0.0).then(|| {
+        let (sin, cos) = f64::from(-angle).to_radians().sin_cos();
+        [cos as f32, sin as f32, -sin as f32, cos as f32, 0.0, 0.0]
+    })
 }
 
 impl<'a> PixelMask<'a> {
@@ -136,11 +151,12 @@ pub(crate) fn render<T: Clone>(
     items: &[T],
     owner: impl Fn(&T) -> Option<ObjectId>,
     effect_groups: &[ObjectId],
+    blurs: &GroupBlurs,
     grid: RasterGrid<'_>,
     pixels: &mut [u8],
     mut draw: impl FnMut(Vec<T>, f32, &mut [u8]),
 ) -> bool {
-    let paths = paths(doc, items.iter().filter_map(&owner), effect_groups);
+    let paths = paths(doc, items.iter().filter_map(&owner), effect_groups, blurs);
     if paths.is_empty() {
         return false;
     }
@@ -151,7 +167,7 @@ pub(crate) fn render<T: Clone>(
         let position = id.and_then(|id| order.get(&id)).copied().unwrap_or_default();
         (item, path, position)
     }).collect();
-    draw_groups(doc, &order, tagged, 1.0, grid, pixels, &mut draw);
+    draw_groups(doc, &order, tagged, 1.0, blurs, grid, pixels, &mut draw);
     true
 }
 
@@ -165,6 +181,7 @@ fn draw_groups<T: Clone>(
     positions: &HashMap<ObjectId, usize>,
     items: Vec<Tagged<'_, T>>,
     inherited_opacity: f32,
+    blurs: &GroupBlurs,
     grid: RasterGrid<'_>,
     pixels: &mut [u8],
     draw: &mut impl FnMut(Vec<T>, f32, &mut [u8]),
@@ -205,6 +222,7 @@ fn draw_groups<T: Clone>(
         }
         let mask = PixelMask::new(doc, group);
         let blend = blend_of(doc, id);
+        let blur = blurs.get(&id);
         let board = crate::artboard::is_artboard(group);
         let inverse = board.then(|| invert_matrix(&object_matrix(group))).flatten();
         let board_contains = |index| !board || inverse.is_some_and(|matrix| {
@@ -212,11 +230,13 @@ fn draw_groups<T: Clone>(
             let [left, top] = group.pos;
             x >= left && y >= top && x < left + group.size[0].abs() && y < top + group.size[1].abs()
         });
-        if (mask.is_some() || board || group.tone_blend.is_some()) && group.blend_mode == BlendMode::PassThrough && blend.is_none()
+        let masked_passthrough = mask.is_some()
+            || opacity < 1.0 && crate::clip_mask::has_any_mask(doc, id);
+        if blur.is_none() && (masked_passthrough || board || group.tone_blend.is_some()) && group.blend_mode == BlendMode::PassThrough && blend.is_none()
             && matches!(group.transparency, crate::paint::Transparency::None)
         {
             let mut layer = pixels.to_vec();
-            draw_groups(doc, positions, children, inherited_opacity * opacity, grid, &mut layer, draw);
+            draw_groups(doc, positions, children, inherited_opacity * opacity, blurs, grid, &mut layer, draw);
             for (index, (destination, result)) in pixels.chunks_exact_mut(4).zip(layer.chunks_exact(4)).enumerate() {
                 if destination != result && board_contains(index) {
                     let coverage = mask.map_or(255, |mask| mask.alpha(grid, index));
@@ -225,7 +245,11 @@ fn draw_groups<T: Clone>(
             }
         } else {
             let mut layer = vec![0; pixels.len()];
-            draw_groups(doc, positions, children, inherited_opacity * opacity, grid, &mut layer, draw);
+            draw_groups(doc, positions, children, inherited_opacity * opacity, blurs, grid, &mut layer, draw);
+            if let Some(&blur) = blur {
+                let density = std::array::from_fn(|axis| grid.size[axis] as f32 / grid.bounds[2 + axis]);
+                crate::layer_style::raster::blur_group(&mut layer, grid.size, density, blur);
+            }
             if let Some(mask) = mask {
                 mask.apply(&mut layer, grid);
             }
@@ -236,7 +260,9 @@ fn draw_groups<T: Clone>(
                     }
                 }
             }
-            super::apply_transparency(&mut layer, group, grid.bounds, grid.size, grid.view);
+            if let Some(transparency) = super::ObjectTransparency::new(doc, group) {
+                transparency.apply(&mut layer, grid);
+            }
             composite(pixels, &layer, blend, opacity);
         }
     }

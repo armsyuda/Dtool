@@ -223,7 +223,7 @@ impl ImportDialog {
                 for row in &mut self.rows {
                     ui.push_id(row.format.id.0, |ui| {
                         ui.separator();
-                        ui.checkbox(&mut row.selected, &row.format.name);
+                        dtool_design::toggle(ui, &mut row.selected, &row.format.name);
                         ui.horizontal(|ui| {
                             ui.label(text("table.formats.new_name"));
                             ui.add_enabled(row.selected, egui::TextEdit::singleline(&mut row.name).desired_width(175.0));

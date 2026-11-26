@@ -118,13 +118,15 @@ impl IconCache {
     }
 
     pub(crate) fn studio_button(&mut self, ui: &mut egui::Ui, id: &str, label: &str, selected: bool) -> egui::Response {
-        let colour = if selected { ui.visuals().selection.stroke.color } else { dtool_design::icons::current_icon_colour() };
+        let colour = if selected { dtool_design::selected_icon_ink(ui) } else { dtool_design::icons::current_icon_colour() };
         let texture = self.texture(ui.ctx(), id, colour, dtool_design::icon_texture_px(ui));
         let button = match &texture {
             Some(texture) => egui::Button::image(egui::Image::new(texture).fit_to_exact_size(egui::Vec2::splat(18.0))),
             None => egui::Button::new(label),
         };
-        let response = ui.add_sized([24.0, 23.0], button.selected(selected)).on_hover_text(label);
+        let response = dtool_design::with_icon_selection(ui, |ui| {
+            ui.add_sized([24.0, 23.0], button.selected(selected)).on_hover_text(label)
+        });
         response.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, ui.is_enabled(), selected, label));
         response
     }

@@ -787,10 +787,13 @@ pub(crate) fn alignment_buttons(ui: &mut egui::Ui, current: Option<Align>, wrap:
                 ui.end_row();
             }
             let selected = current == Some(align);
-            let response = ui.add(egui::Button::new("").selected(selected).min_size(egui::vec2(24.0, height)))
-                .on_hover_text(text(label));
+            let response = dtool_design::with_icon_selection(ui, |ui| {
+                ui.add(egui::Button::new("").selected(selected).min_size(egui::vec2(24.0, height)))
+                    .on_hover_text(text(label))
+            });
             response.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, ui.is_enabled(), selected, text(label)));
-            let colour = if selected { ui.visuals().selection.stroke.color } else { ui.style().interact(&response).fg_stroke.color };
+            let colour = if selected && response.enabled() { dtool_design::selected_icon_ink(ui) }
+                else { ui.style().interact(&response).fg_stroke.color };
             let centre = response.rect.center();
             for line in 0..4 {
                 let short = match align {

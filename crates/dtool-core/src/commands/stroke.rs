@@ -37,6 +37,7 @@ pub fn apply_stroke_set(doc: &mut Document, object_id: ObjectId, width: f32, das
 pub struct StrokePatch {
     pub width: Option<f32>,
     pub dash: Option<Vec<f32>>,
+    pub dash_offset: Option<f32>,
     pub cap: Option<Cap>,
     pub join: Option<Join>,
     pub align: Option<StrokeAlign>,
@@ -67,6 +68,7 @@ impl StrokePatch {
         Ok(Self {
             width: field::<f64>(params, "width")?.map(|value| value as f32),
             dash: field(params, "dash")?,
+            dash_offset: field::<f64>(params, "dash_offset")?.map(|value| value as f32),
             cap: field(params, "cap")?,
             join: field(params, "join")?,
             align: field(params, "align")?,
@@ -85,6 +87,9 @@ impl StrokePatch {
         }
         if let Some(dash) = &self.dash {
             next.dash = dash.clone();
+        }
+        if let Some(offset) = self.dash_offset {
+            next.dash_offset = offset;
         }
         if let Some(cap) = self.cap {
             next.cap = cap;
@@ -242,6 +247,39 @@ pub fn arrowheads(stroke: &StrokeStyle, points: &[[f32; 2]], closed: bool, width
         }
     }
     out
+}
+
+/// Stroke end decorations in the same coordinate space as the centreline.
+/// Open decorations carry their own solid stroke style.
+pub(crate) fn arrow_paths(path: &kurbo::BezPath, style: &StrokeStyle) -> Vec<(kurbo::BezPath, Option<StrokeStyle>)> {
+    if style.start_arrow.is_none() && style.end_arrow.is_none() {
+        return Vec::new();
+    }
+    let mut paths = Vec::new();
+    for (points, closed) in crate::outline::flatten_subpaths(path, crate::outline::OUTLINE_TOLERANCE) {
+        let points: Vec<_> = points.into_iter().map(|point| point.map(|value| value as f32)).collect();
+        for arrow in arrowheads(style, &points, closed, style.width) {
+            let Some((&first, rest)) = arrow.points.split_first() else { continue; };
+            let mut path = kurbo::BezPath::new();
+            let point = |[x, y]: [f32; 2]| (f64::from(x), f64::from(y));
+            path.move_to(point(first));
+            for &next in rest { path.line_to(point(next)); }
+            let stroke = if arrow.filled {
+                path.close_path();
+                None
+            } else {
+                Some(StrokeStyle {
+                    width: arrow.line_width,
+                    paint: style.paint.clone(),
+                    cap: style.cap,
+                    join: style.join.clone(),
+                    ..Default::default()
+                })
+            };
+            paths.push((path, stroke));
+        }
+    }
+    paths
 }
 
 pub fn apply_stroke_arrows_list(_doc: &Document) -> CommandResult {

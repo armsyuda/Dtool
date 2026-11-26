@@ -127,8 +127,7 @@ fn resource_table<const N: usize>(
     });
     ui.separator();
     let row_height = ui.spacing().interact_size.y;
-    let max_height = (ui.ctx().content_rect().height() * 0.36).clamp(100.0, 340.0);
-    let table_height = (count.max(4) as f32 * (row_height + ui.spacing().item_spacing.y)).min(max_height);
+    let table_height = (ui.available_height() - 156.0).clamp(100.0, 420.0);
     egui::ScrollArea::vertical().id_salt(id).max_height(table_height)
         .auto_shrink([false, false])
         .show_rows(ui, row_height, count, |ui, range| {
@@ -190,6 +189,9 @@ impl ResourceManagerDialog {
         self.selected.extend(session.selection.ids.iter()
             .filter_map(|&id| session.document.placed_resource(id))
             .map(|id| id.0));
+        self.selected.extend(session.document.paint_image_uses().into_iter()
+            .filter(|(_, uses)| uses.iter().any(|id| session.selection.ids.contains(id)))
+            .map(|(id, _)| id.0));
         if !self.selected.is_empty() {
             self.active_tab=0;
             self.selection_anchor=session.document.resources.iter()
@@ -204,25 +206,38 @@ impl ResourceManagerDialog {
         let texts=dtool_core::text_link::text_link_rows(&session.document);
         let mut pending=Pending::default();
         let screen = ctx.content_rect();
-        let default_width = (screen.width() - 40.0).clamp(360.0, 680.0);
+        let default_width = (screen.width() - 40.0).clamp(360.0, 800.0);
+        let default_height = (screen.height() - 96.0).clamp(320.0, 490.0);
         let mut open = self.open;
         egui::Window::new(text("dialog.resource_manager.title"))
             .collapsible(false)
             .open(&mut open)
-            .default_width(default_width)
+            .default_size(egui::vec2(default_width, default_height))
             .min_width(default_width.min(460.0))
             .default_pos(egui::pos2(screen.center().x - default_width * 0.5, screen.top() + 68.0))
-            .resizable([true, false])
+            .resizable(true)
             .show(ctx,|ui| {
             dtool_design::dialog_frame(ui,|ui| {
                 ui.horizontal(|ui| {
-                    if dtool_design::tab(ui,self.active_tab==0,text("rm.images")).clicked() {self.active_tab=0;self.last_located=None;}
-                    if dtool_design::tab(ui,self.active_tab==1,text("rm.text")).clicked() {self.active_tab=1;self.last_located=None;}
+                    let width = (ui.available_width() - ui.spacing().item_spacing.x) * 0.5;
+                    for (tab, label) in ["rm.images", "rm.text"].into_iter().enumerate() {
+                        let selected = self.active_tab == tab;
+                        let response = dtool_design::with_icon_selection(ui, |ui| {
+                            ui.add(egui::Button::selectable(selected, text(label)).min_size(egui::vec2(width, 24.0)))
+                        });
+                        if response.clicked() && !selected {
+                            self.active_tab = tab;
+                            self.last_located = None;
+                        }
+                    }
                 });
                 ui.add_space(dtool_design::space("md"));
                 if self.active_tab==0 {self.image_tab(ui,&images,doc_dir,&mut pending);} else {self.text_tab(ui,&texts,&mut pending);}
                 if let Some(message)=&self.error {ui.label(message);}
-                if dtool_design::button(ui,text("button.close")).clicked() {pending.close=true;}
+                ui.separator();
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if dtool_design::button(ui,text("button.close")).clicked() {pending.close=true;}
+                });
                 if dtool_design::dialog_keys(ui)==Some(dtool_design::DialogKey::Cancel) {pending.close=true;}
             });
         });
@@ -278,7 +293,8 @@ impl ResourceManagerDialog {
         }
         let located = pending.locate.and_then(|mut ids| {
             ids.retain(|id| session.document.get_object(*id).is_some());
-            ids.sort_by_key(|id| dtool_core::data_merge::layout::object_page_index(&session.document, *id));
+            ids.sort_by_key(|id| (dtool_core::data_merge::layout::object_page_index(&session.document, *id), id.0));
+            ids.dedup();
             let first = ids.first().copied()?;
             let next = ids.iter().position(|id| Some(*id) == self.last_located)
                 .and_then(|index| ids.get(index + 1)).copied().unwrap_or(first);
@@ -305,16 +321,17 @@ impl ResourceManagerDialog {
     }
 
     fn image_tab(&mut self,ui:&mut egui::Ui,rows:&[ResourceRow],doc_dir:Option<&Path>,pending:&mut Pending) {
-        resource_table(ui, "resource_images", [
+        dtool_design::dialog_section(ui, |ui| resource_table(ui, "resource_images", [
             ("rm.name", 3.1), ("rm.status", 1.2), ("rm.locations", 2.3),
             ("rm.file_size", 1.2), ("rm.uses", 0.8),
         ], rows.len(), |ui, index, widths| {
             let row = &rows[index];
             let mut checked = self.selected.contains(&row.id.0);
             let (toggled, clicked) = table_cell(ui, widths[0], |ui| {
-                let toggled = ui.checkbox(&mut checked, "").on_hover_text(&row.name).changed();
-                let clicked = ui.add(egui::Button::selectable(checked, &row.name).truncate())
-                    .on_hover_text(&row.name).clicked();
+                let toggled = dtool_design::toggle(ui, &mut checked, "").on_hover_text(&row.name).changed();
+                let clicked = dtool_design::with_icon_selection(ui, |ui| {
+                    ui.add(egui::Button::selectable(checked, &row.name).truncate())
+                }).on_hover_text(&row.name).clicked();
                 (toggled, clicked)
             });
             if toggled || clicked { self.last_located = None; }
@@ -342,7 +359,7 @@ impl ResourceManagerDialog {
             table_label(ui, widths[3], size, bytes);
             let uses = row.uses.len().to_string();
             table_label(ui, widths[4], &uses, &uses);
-        });
+        }));
         ui.add_space(dtool_design::space("md"));
         let selected: Vec<_> = rows.iter().filter(|row| self.selected.contains(&row.id.0)).collect();
         let single = match selected.as_slice() { [row] => Some(*row), _ => None };
@@ -355,7 +372,7 @@ impl ResourceManagerDialog {
                     ("rm.original_size", format!("{} × {}", row.original_size[0], row.original_size[1])),
                     ("rm.original_dpi", format!("{:.1}", row.original_dpi)),
                     ("rm.placed_size", if placed_size.is_empty() { "—".into() } else { placed_size }),
-                    ("rm.placed_dpi", format!("{:.1}", row.placed_dpi)),
+                    ("rm.placed_dpi", row.placed_size.map_or_else(|| "—".into(), |_| format!("{:.1}", row.placed_dpi))),
                     ("rm.colour_space", row.colour_space.clone()),
                 ] {
                     ui.horizontal(|ui| {
@@ -441,13 +458,14 @@ impl ResourceManagerDialog {
     }
 
     fn text_tab(&mut self,ui:&mut egui::Ui,rows:&[TextLinkRow],pending:&mut Pending) {
-        resource_table(ui, "resource_texts", [
+        dtool_design::dialog_section(ui, |ui| resource_table(ui, "resource_texts", [
             ("rm.name", 2.8), ("rm.status", 1.5), ("rm.frames", 0.9), ("rm.path", 4.0),
         ], rows.len(), |ui, index, widths| {
             let row = &rows[index];
             let clicked = table_cell(ui, widths[0], |ui| {
-                ui.add(egui::Button::selectable(self.selected_text == Some(row.story.0), &row.name).truncate())
-                    .on_hover_text(&row.name).clicked()
+                dtool_design::with_icon_selection(ui, |ui| {
+                    ui.add(egui::Button::selectable(self.selected_text == Some(row.story.0), &row.name).truncate())
+                }).on_hover_text(&row.name).clicked()
             });
             if clicked {
                 self.selected_text=Some(row.story.0);
@@ -458,7 +476,7 @@ impl ResourceManagerDialog {
             table_label(ui, widths[2], &frames, &frames);
             let path = row.path.to_string_lossy();
             table_label(ui, widths[3], path.as_ref(), path.as_ref());
-        });
+        }));
         ui.add_space(dtool_design::space("md"));
         let selected=self.selected_text.and_then(|story|rows.iter().find(|row|row.story.0==story));
         ui.horizontal(|ui| {

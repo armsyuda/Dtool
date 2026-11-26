@@ -24,7 +24,8 @@ pub enum Clip {
 pub struct EffectLayer {
     pub object: ObjectId,
     pub prim: Prim,
-    pub blur: f32,
+    pub blur: [f32; 2],
+    pub blur_angle: f32,
     pub blend: BlendMode,
     pub alpha: f32,
     pub clip: Option<Clip>,
@@ -59,7 +60,7 @@ impl EffectLayer {
 
     pub fn raster_padding(&self) -> f32 {
         let group = self.group_effect.as_ref().map_or(0.0, |(_, effect, _)| group_effect_padding(effect));
-        (self.blur * 1.5).max(self.outline_radius()).max(group)
+        blur_padding(self.blur, self.blur_angle).max(self.outline_radius()).max(group)
     }
 }
 
@@ -68,19 +69,20 @@ pub enum Item {
     Plain(Prim),
     Exact(Prim),
     Layer(EffectLayer),
+    GroupBlur { marker: Prim, blur: GaussianBlur },
 }
 
 impl Item {
     pub fn object(&self) -> Option<ObjectId> {
         match self {
-            Item::Plain(prim) | Item::Exact(prim) => prim_object(prim),
+            Item::Plain(prim) | Item::Exact(prim) | Item::GroupBlur { marker: prim, .. } => prim_object(prim),
             Item::Layer(layer) => Some(layer.object),
         }
     }
 
     pub fn prim(&self) -> &Prim {
         match self {
-            Item::Plain(prim) | Item::Exact(prim) => prim,
+            Item::Plain(prim) | Item::Exact(prim) | Item::GroupBlur { marker: prim, .. } => prim,
             Item::Layer(layer) => &layer.prim,
         }
     }
@@ -138,10 +140,12 @@ fn unit(value: f32) -> f32 {
 fn reach(effect: &LayerEffect) -> f32 {
     let blur = |radius: f32| finite(radius, 0.0).max(0.0) * 1.5 + 1.0;
     match &effect.params {
-        EffectParams::Shadow { radius, offset, .. } if effect.kind == EffectKind::OuterShadow => finite(*offset, 0.0).abs() + blur(*radius),
+        EffectParams::Shadow { radius, radius_y, blur_angle, offset, .. } if effect.kind == EffectKind::OuterShadow =>
+            finite(*offset, 0.0).abs() + blur_padding([*radius, radius_y.unwrap_or(*radius)], blur_angle.unwrap_or_default()) + 1.0,
         EffectParams::Glow { radius, .. } if effect.kind == EffectKind::OuterGlow => blur(*radius),
         EffectParams::Outline { width, align, .. } if *align != OutlineAlign::Inside => finite(*width, 0.0).max(0.0) * 2.0 + 1.0,
-        EffectParams::Blur { radius, .. } => blur(*radius),
+        EffectParams::Blur { radius, radius_y, angle, .. } =>
+            blur_padding([*radius, radius_y.unwrap_or(*radius)], angle.unwrap_or(0.0)) + 1.0,
         EffectParams::Light { bevel, soften, .. } if *bevel != BevelType::Inner => bevel_distance(&effect.params) + blur(*soften),
         _ => 0.0,
     }
@@ -176,9 +180,9 @@ pub fn is_path_brush_image(doc: &Document, prim: &Prim) -> bool {
 
 fn with_effect_paint(prim: &Prim, d: [f32; 2], paint: Paint) -> Option<(Prim, Option<Paint>)> {
     match prim {
-        Prim::Image { object, quad, .. } => {
+        Prim::Image { object, quad, sample_in_quad, .. } => {
             let shifted = quad.map(|p| [p[0] + d[0], p[1] + d[1]]);
-            Some((Prim::Image { object: *object, quad: shifted, opacity: 1.0 }, Some(paint)))
+            Some((Prim::Image { object: *object, quad: shifted, opacity: 1.0, sample_in_quad: *sample_in_quad }, Some(paint)))
         }
         Prim::Fill { paint: bitmap @ Paint::Bitmap(_), .. } => {
             Some((with_paint(prim, d, bitmap.clone())?, Some(paint)))
@@ -206,8 +210,8 @@ fn effect_clip(prim: &Prim, inside: bool) -> Option<Clip> {
         let source = Prim::Appearance { object: *object, inks: inks.clone(), origin: *origin, opacity: 1.0, tint: None };
         return Some(Clip::Alpha { source: Box::new(source), inside });
     }
-    if let Prim::Image { object, quad, .. } = prim {
-        let source = Prim::Image { object: *object, quad: *quad, opacity: 1.0 };
+    if let Prim::Image { object, quad, sample_in_quad, .. } = prim {
+        let source = Prim::Image { object: *object, quad: *quad, opacity: 1.0, sample_in_quad: *sample_in_quad };
         return Some(Clip::Alpha { source: Box::new(source), inside });
     }
     if let Prim::Fill { paint: paint @ Paint::Bitmap(_), .. } = prim {
@@ -249,7 +253,7 @@ struct Spec {
 
 impl Spec {
     fn layer(&self, prim: Option<(Prim, Option<Paint>)>, blur: f32, blend: BlendMode, clip: Option<Clip>, invert: bool, spread: f32) -> Vec<EffectLayer> {
-        prim.map(|(prim, tint)| EffectLayer { object: self.object, prim, blur: finite(blur, 0.0).max(0.0), blend, alpha: self.alpha, clip, invert, spread: unit(spread).min(0.99), tint, alpha_edge: None, image_clip: self.image_clip.clone(), group_effect: None }).into_iter().collect()
+        prim.map(|(prim, tint)| EffectLayer { object: self.object, prim, blur: [finite(blur, 0.0).max(0.0); 2], blur_angle: 0.0, blend, alpha: self.alpha, clip, invert, spread: unit(spread).min(0.99), tint, alpha_edge: None, image_clip: self.image_clip.clone(), group_effect: None }).into_iter().collect()
     }
 }
 
@@ -284,13 +288,21 @@ fn effect_layers(doc: &Document, prim: &Prim, effect: &LayerEffect) -> Option<(b
     let blend = effect.blend.clone();
     let inner = effect_clip(prim, true);
     match (&effect.kind, &effect.params) {
-        (EffectKind::OuterShadow, EffectParams::Shadow { radius, offset: distance, angle, intensity, colour, knock_out }) => {
+        (EffectKind::OuterShadow, EffectParams::Shadow { radius, radius_y, blur_angle, offset: distance, angle, intensity, colour, knock_out }) => {
             let clip = if *knock_out { effect_clip(prim, false) } else { None };
-            Some((false, spec.layer(with_effect_paint(prim, offset(*angle, *distance), solid(colour)), *radius, blend, clip, false, *intensity)))
+            let mut layers = spec.layer(with_effect_paint(prim, offset(*angle, *distance), solid(colour)), *radius, blend, clip, false, *intensity);
+            for layer in &mut layers {
+                (layer.blur, layer.blur_angle) = normalized_blur([*radius, radius_y.unwrap_or(*radius)], blur_angle.unwrap_or_default());
+            }
+            Some((false, layers))
         }
-        (EffectKind::InnerShadow, EffectParams::Shadow { radius, offset: distance, angle, intensity, colour, .. }) => {
+        (EffectKind::InnerShadow, EffectParams::Shadow { radius, radius_y, blur_angle, offset: distance, angle, intensity, colour, .. }) => {
             let clip = inner?;
-            Some((true, spec.layer(with_effect_paint(prim, offset(*angle, *distance), solid(colour)), *radius, blend, Some(clip), true, *intensity)))
+            let mut layers = spec.layer(with_effect_paint(prim, offset(*angle, *distance), solid(colour)), *radius, blend, Some(clip), true, *intensity);
+            for layer in &mut layers {
+                (layer.blur, layer.blur_angle) = normalized_blur([*radius, radius_y.unwrap_or(*radius)], blur_angle.unwrap_or_default());
+            }
+            Some((true, layers))
         }
         (EffectKind::OuterGlow, EffectParams::Glow { radius, intensity, colour, .. }) => {
             Some((false, spec.layer(with_effect_paint(prim, [0.0, 0.0], solid(colour)), *radius, blend, effect_clip(prim, false), false, *intensity)))
@@ -388,24 +400,18 @@ pub fn composite_rank(kind: EffectKind) -> u8 {
 }
 
 pub fn blurred_base(prim: &Prim, effects: &[LayerEffect]) -> Option<EffectLayer> {
-    let (radius, keep) = effects.iter().filter(|effect| effect.enabled).find_map(|effect| match (&effect.kind, &effect.params) {
-        (EffectKind::GaussianBlur, EffectParams::Blur { radius, preserve_alpha }) => Some((finite(*radius, 0.0).max(0.0), *preserve_alpha)),
-        _ => None,
-    })?;
-    if radius == 0.0 {
-        return None;
-    }
+    let blur = effects.iter().find_map(group_blur_params)?;
     let object = prim_object(prim)?;
     let base = match prim {
         Prim::Fill { paint, .. } | Prim::Stroke { paint, .. } => with_paint(prim, [0.0, 0.0], paint.clone())?,
-        Prim::Image { object, quad, .. } => Prim::Image { object: *object, quad: *quad, opacity: 1.0 },
+        Prim::Image { object, quad, sample_in_quad, .. } => Prim::Image { object: *object, quad: *quad, opacity: 1.0, sample_in_quad: *sample_in_quad },
         Prim::Appearance { object, inks, origin, .. } => {
             Prim::Appearance { object: *object, inks: inks.clone(), origin: *origin, opacity: 1.0, tint: None }
         }
         _ => return None,
     };
-    let clip = keep.then_some(Clip::PreserveAlpha);
-    Some(EffectLayer { object, prim: base, blur: radius, blend: BlendMode::Normal, alpha: prim_opacity(prim), clip, invert: false, spread: 0.0, tint: None, alpha_edge: None, image_clip: None, group_effect: None })
+    let clip = blur.preserve_alpha.then_some(Clip::PreserveAlpha);
+    Some(EffectLayer { object, prim: base, blur: blur.radii, blur_angle: blur.angle, blend: BlendMode::Normal, alpha: prim_opacity(prim), clip, invert: false, spread: 0.0, tint: None, alpha_edge: None, image_clip: None, group_effect: None })
 }
 
 fn appearance_sources(prim: &Prim) -> Option<impl Iterator<Item = Prim> + '_> {
@@ -557,9 +563,23 @@ pub fn effect_items(doc: &Document, flags: &CanvasFlags, base: Vec<Item>, staged
     }
     let mut cache: HashMap<ObjectId, Vec<LayerEffect>> = HashMap::new();
     let (mut group_behind, mut group_above) = group_effect_items(doc, &base, staged);
+    let mut group_blurs = HashMap::<usize, Vec<Item>>::new();
+    for group in doc.objects.iter().filter(|object| group_effect_target(object)) {
+        let effects = live_effects(doc, group.id, staged);
+        if let Some(blur) = effects.iter().find_map(group_blur_params) {
+            let members = doc.subtree_ids(group.id);
+            if let Some(first) = base.iter().position(|item| item.object().is_some_and(|id| members.contains(&id))) {
+                let marker = Prim::Mark { object: group.id, rect: [0.0; 4], role: String::new() };
+                group_blurs.entry(first).or_default().push(Item::GroupBlur { marker, blur });
+            }
+        }
+    }
     let mut first: HashMap<ObjectId, usize> = HashMap::new();
     let mut out: Vec<Item> = Vec::with_capacity(base.len());
     for (index, item) in base.into_iter().enumerate() {
+        if let Some(blurs) = group_blurs.remove(&index) {
+            out.extend(blurs);
+        }
         if let Some(layers) = group_behind.remove(&index) {
             out.extend(layers.into_iter().map(Item::Layer));
         }
@@ -671,13 +691,23 @@ fn bounds_edges([x, y, width, height]: [f32; 4]) -> [f32; 4] {
     [x, y, x + width, y + height]
 }
 
-fn blur_layer(layer: &mut [u8], width: usize, height: usize, sigma: f32) {
+fn blur_axes(radii: [f32; 2], angle: f32, [sx, sy]: [f32; 2]) -> [[f32; 2]; 2] {
+    let (sin, cos) = angle.to_radians().sin_cos();
+    let [x, y] = radii;
+    [[x * cos * sx, x * sin * sy], [-y * sin * sx, y * cos * sy]]
+}
+
+fn axis_extent([u, v]: [[f32; 2]; 2]) -> [f32; 2] {
+    [u[0].abs() + v[0].abs(), u[1].abs() + v[1].abs()]
+}
+
+fn blur_layer(layer: &mut [u8], width: usize, height: usize, axes: [[f32; 2]; 2]) {
     let mut visible = layer.chunks_exact(4).filter(|pixel| pixel[3] != 0);
     let Some(first) = visible.next() else { return };
     let colour = [first[0], first[1], first[2]];
     if visible.all(|pixel| pixel[..3] == colour) {
         let alpha = layer.chunks_exact(4).map(|pixel| [f32::from(pixel[3])]).collect();
-        for (pixel, [a]) in layer.chunks_exact_mut(4).zip(gaussian_blur(alpha, width, height, sigma)) {
+        for (pixel, [a]) in layer.chunks_exact_mut(4).zip(gaussian_blur(alpha, width, height, axes)) {
             pixel[..3].copy_from_slice(&colour);
             pixel[3] = a.round().clamp(0.0, 255.0) as u8;
         }
@@ -687,7 +717,7 @@ fn blur_layer(layer: &mut [u8], width: usize, height: usize, sigma: f32) {
         let a = f32::from(p[3]) / 255.0;
         [f32::from(p[0]) * a, f32::from(p[1]) * a, f32::from(p[2]) * a, f32::from(p[3])]
     }).collect();
-    for (pixel, value) in layer.chunks_exact_mut(4).zip(gaussian_blur(premultiplied, width, height, sigma)) {
+    for (pixel, value) in layer.chunks_exact_mut(4).zip(gaussian_blur(premultiplied, width, height, axes)) {
         let alpha = value[3] / 255.0;
         for channel in 0..3 {
             pixel[channel] = if alpha > 0.0 { (value[channel] / alpha).round().clamp(0.0, 255.0) as u8 } else { 0 };
@@ -696,17 +726,77 @@ fn blur_layer(layer: &mut [u8], width: usize, height: usize, sigma: f32) {
     }
 }
 
+pub(crate) fn blur_group(layer: &mut [u8], [width, height]: [u32; 2], density: [f32; 2], blur: GaussianBlur) {
+    let limit = width.max(height) as f32;
+    let axes = blur_axes(blur.radii, blur.angle, density.map(|value| value * 0.5)).map(|[x, y]| {
+        let length = x.hypot(y);
+        if !length.is_finite() || length <= 0.05 { return [0.0; 2]; }
+        let scale = (limit / length).min(1.0);
+        [x * scale, y * scale]
+    });
+    if axes == [[0.0; 2]; 2] {
+        return;
+    }
+    let [width, height] = [width as usize, height as usize];
+    let stride = width * 4;
+    let (mut left, mut top, mut right, mut bottom) = (width, height, 0, 0);
+    for (y, row) in layer.chunks_exact(stride).enumerate() {
+        let ink = |pixel: &[u8]| pixel[3] != 0;
+        if let Some(x) = row.chunks_exact(4).position(ink) {
+            left = left.min(x);
+            top = top.min(y);
+            right = right.max(row.chunks_exact(4).rposition(ink).unwrap_or(x) + 1);
+            bottom = y + 1;
+        }
+    }
+    if right == 0 {
+        return;
+    }
+    let [pad_x, pad_y] = axis_extent(axes).map(|value| (3.0 * value).ceil() as usize + 2);
+    let rows = top.saturating_sub(pad_y)..(bottom + pad_y).min(height);
+    let columns = left.saturating_sub(pad_x) * 4..(right + pad_x).min(width) * 4;
+    let tile_stride = columns.len();
+    let mut tile = Vec::with_capacity(rows.len() * tile_stride);
+    for row in layer.chunks_exact(stride).skip(rows.start).take(rows.len()) {
+        tile.extend_from_slice(&row[columns.clone()]);
+    }
+    blur_layer(&mut tile, tile_stride / 4, rows.len(), axes);
+    for (row, blurred) in layer.chunks_exact_mut(stride).skip(rows.start).zip(tile.chunks_exact(tile_stride)) {
+        let destination = &mut row[columns.clone()];
+        if blur.preserve_alpha {
+            for (pixel, colour) in destination.chunks_exact_mut(4).zip(blurred.chunks_exact(4)) {
+                pixel[..3].copy_from_slice(&colour[..3]);
+            }
+        } else {
+            destination.copy_from_slice(blurred);
+        }
+    }
+}
+
 fn gaussian_blur<const CHANNELS: usize>(
-    mut source: Vec<[f32; CHANNELS]>, width: usize, height: usize, sigma: f32,
+    mut source: Vec<[f32; CHANNELS]>, width: usize, height: usize, axes: [[f32; 2]; 2],
 ) -> Vec<[f32; CHANNELS]> {
-    let reach = (sigma * 3.0).ceil() as usize;
-    let kernel: Vec<f32> = (-(reach as isize)..=reach as isize)
-        .map(|i| (-(i * i) as f32 / (2.0 * sigma * sigma)).exp())
-        .collect();
-    let total: f32 = kernel.iter().sum();
+    let [[sigma_x, cross_y], [cross_x, sigma_y]] = axes;
+    if cross_x != 0.0 || cross_y != 0.0 {
+        return directional_blur(source, width, height, axes);
+    }
     let mut target = vec![[0.0; CHANNELS]; source.len()];
     // Transposing each pass keeps both passes reading contiguous rows.
-    for (columns, rows) in [(width, height), (height, width)] {
+    for (columns, rows, sigma) in [(width, height, sigma_x), (height, width, sigma_y)] {
+        if sigma <= 0.05 {
+            for (y, row) in source.chunks_exact(columns).enumerate() {
+                for (x, sample) in row.iter().enumerate() {
+                    target[x * rows + y] = *sample;
+                }
+            }
+            std::mem::swap(&mut source, &mut target);
+            continue;
+        }
+        let reach = (sigma * 3.0).ceil() as usize;
+        let kernel: Vec<f32> = (-(reach as isize)..=reach as isize)
+            .map(|i| (-(i * i) as f32 / (2.0 * sigma * sigma)).exp())
+            .collect();
+        let total: f32 = kernel.iter().sum();
         target.fill([0.0; CHANNELS]);
         for (y, row) in source.chunks_exact(columns).enumerate() {
             let has_ink = |sample: &[f32; CHANNELS]| sample.iter().any(|value| *value != 0.0);
@@ -716,6 +806,7 @@ fn gaussian_blur<const CHANNELS: usize>(
             let end = last.saturating_add(reach).min(columns - 1);
             let mut repeat_until = start;
             let mut repeated = [0.0; CHANNELS];
+            let mut constant_end = 0;
             for x in start..=end {
                 if x < repeat_until {
                     target[x * rows + y] = repeated;
@@ -736,14 +827,18 @@ fn gaussian_blur<const CHANNELS: usize>(
                             sum[channel] += sample[channel] * weight;
                         }
                     }
-                    // Every full window inside a constant alpha span has the same
+                    // Every full window inside a flat span has the same
                     // weighted sum. Reuse that sum without changing its rounding.
-                    if CHANNELS == 1 && reach >= 4 && weights.len() == kernel.len()
-                        && samples.first() == samples.last()
-                        && samples.iter().all(|sample| *sample == samples[0])
-                    {
-                        let extension = row[end - reach + 1..].iter().take_while(|sample| **sample == samples[0]).count();
-                        repeat_until = x + extension + 1;
+                    if reach >= 4 && weights.len() == kernel.len() {
+                        let left = begin - reach;
+                        let right = end - reach;
+                        if left >= constant_end {
+                            constant_end = left + 1 + row[left + 1..].iter()
+                                .take_while(|sample| **sample == row[left]).count();
+                        }
+                        if right < constant_end {
+                            repeat_until = x + constant_end - right;
+                        }
                     }
                 } else {
                     for (tap, weight) in (first_tap..=last_tap).zip(weights) {
@@ -762,11 +857,104 @@ fn gaussian_blur<const CHANNELS: usize>(
     source
 }
 
+fn directional_blur<const CHANNELS: usize>(
+    mut source: Vec<[f32; CHANNELS]>, width: usize, height: usize, axes: [[f32; 2]; 2],
+) -> Vec<[f32; CHANNELS]> {
+    use rayon::prelude::*;
+    use std::collections::BTreeMap;
+
+    let mut target = vec![[0.0; CHANNELS]; source.len()];
+    for [dx, dy] in axes {
+        let sigma = dx.hypot(dy);
+        if sigma <= 0.05 {
+            continue;
+        }
+        let reach = (sigma * 3.0).ceil() as isize;
+        let mut taps = BTreeMap::new();
+        let mut total = 0.0;
+        // A bilinear sample is four integer taps. Merge coincident taps once
+        // so the same source pixel is accumulated only once per output pixel.
+        for i in -reach..=reach {
+            let t = i as f32 / sigma;
+            let [x, y] = [dx * t, dy * t];
+            let [left, top] = [x.floor(), y.floor()];
+            let [u, v] = [x - left, y - top];
+            let weight = (-0.5 * t * t).exp();
+            total += weight;
+            let [x, y] = [left as isize, top as isize];
+            for (offset, coverage) in [
+                ((y, x), (1.0 - u) * (1.0 - v)),
+                ((y, x + 1), u * (1.0 - v)),
+                ((y + 1, x), (1.0 - u) * v),
+                ((y + 1, x + 1), u * v),
+            ] {
+                if coverage != 0.0 {
+                    *taps.entry(offset).or_insert(0.0) += weight * coverage;
+                }
+            }
+        }
+        let taps: Vec<_> = taps.into_iter().collect();
+        let ink = |pixel: &[f32; CHANNELS]| pixel.iter().any(|value| *value != 0.0);
+        let spans: Vec<_> = source.chunks_exact(width).map(|row| {
+            let first = row.iter().position(ink)?;
+            let last = row.iter().rposition(ink).unwrap_or(first);
+            Some(first..last + 1)
+        }).collect();
+        let clip_column = |x: isize| x.clamp(0, width as isize) as usize;
+        let render_row = |(y, row): (usize, &mut [[f32; CHANNELS]])| {
+            row.fill([0.0; CHANNELS]);
+            for &((dy, dx), weight) in &taps {
+                let source_y = (y as isize + dy).clamp(0, height as isize - 1) as usize;
+                let Some(span) = &spans[source_y] else { continue };
+                let source_row = &source[source_y * width..][..width];
+                let begin = clip_column(span.start as isize - dx);
+                let end = clip_column(span.end as isize - dx);
+                if begin < end {
+                    let start = (begin as isize + dx) as usize;
+                    let samples = &source_row[start..start + end - begin];
+                    for (pixel, sample) in row[begin..end].iter_mut().zip(samples) {
+                        add_blur_sample(pixel, sample, weight);
+                    }
+                }
+                // Preserve the original edge clamping for nonzero border pixels.
+                if span.start == 0 {
+                    for pixel in &mut row[..clip_column(-dx)] {
+                        add_blur_sample(pixel, &source_row[0], weight);
+                    }
+                }
+                if span.end == width {
+                    for pixel in &mut row[clip_column(width as isize - dx)..] {
+                        add_blur_sample(pixel, &source_row[width - 1], weight);
+                    }
+                }
+            }
+            for pixel in row {
+                *pixel = pixel.map(|value| value / total);
+            }
+        };
+        // Rows have separate output pixels and share the same input and tap order.
+        // Keep small effects on the caller to avoid work dispatch overhead.
+        if target.len().saturating_mul(taps.len()).saturating_mul(CHANNELS) >= 8_000_000 {
+            target.par_chunks_exact_mut(width).with_min_len(8).enumerate().for_each(render_row);
+        } else {
+            target.chunks_exact_mut(width).enumerate().for_each(render_row);
+        }
+        std::mem::swap(&mut source, &mut target);
+    }
+    source
+}
+
+fn add_blur_sample<const CHANNELS: usize>(pixel: &mut [f32; CHANNELS], sample: &[f32; CHANNELS], weight: f32) {
+    for channel in 0..CHANNELS {
+        pixel[channel] += sample[channel] * weight;
+    }
+}
+
 fn shape(doc: &Document, prim: &Prim, bounds: [f32; 4], width: u32, height: u32) -> Vec<u8> {
     match prim {
         Prim::Fill { paint, .. } if !matches!(paint, Paint::Bitmap(_)) => fill_layer(prim, bounds, width, height),
         prim => crate::blend_composite::rasterize_effect_source(
-            doc, &Scene { version: 0, prims: vec![prim.clone()], quads: Vec::new() }, bounds, width, height,
+            doc, &Scene { prims: vec![prim.clone()], ..Scene::default() }, bounds, width, height,
         ),
     }
 }
@@ -851,8 +1039,10 @@ pub fn draw_layer(doc: &Document, pixels: &mut [u8], item: &EffectLayer, bounds:
         return;
     }
     let scale = width as f32 / bounds[2];
-    let sigma = item.blur * 0.5 * scale;
-    let blur_pad = if sigma > 0.05 { (sigma * 3.0).ceil() as u32 + 1 } else { 0 };
+    let axes = blur_axes(item.blur, item.blur_angle, [0.5 * scale; 2]);
+    let [span_x, span_y] = axis_extent(axes);
+    let max_sigma = span_x.max(span_y);
+    let blur_pad = if max_sigma > 0.05 { (max_sigma * 3.0).ceil() as u32 + 1 } else { 0 };
     let outline_radius = (item.outline_radius() * scale).ceil().min(width.max(height) as f32) as u32;
     let pad = blur_pad.max(outline_radius);
     let unit_pad = pad as f32 / scale;
@@ -876,7 +1066,7 @@ pub fn draw_layer(doc: &Document, pixels: &mut [u8], item: &EffectLayer, bounds:
         }
         Some(AlphaEdge::Bevel { reference, inner }) => {
             if blur_pad > 0 {
-                blur_layer(&mut buffer, w as usize, h as usize, sigma);
+                blur_layer(&mut buffer, w as usize, h as usize, axes);
             }
             let reference = effect_shape(doc, item, reference, wide, [w, h]);
             for (pixel, original) in buffer.chunks_exact_mut(4).zip(reference.chunks_exact(4)) {
@@ -899,7 +1089,7 @@ pub fn draw_layer(doc: &Document, pixels: &mut [u8], item: &EffectLayer, bounds:
         }
     }
     if blur_pad > 0 && item.alpha_edge.is_none() {
-        blur_layer(&mut buffer, w as usize, h as usize, sigma);
+        blur_layer(&mut buffer, w as usize, h as usize, axes);
     }
     let clip_mask = item.clip.as_ref().and_then(|clip| {
         let contours = match clip {
@@ -1040,7 +1230,7 @@ fn effect_pass(doc: &Document, pixels: &mut [u8], item: &Item, bounds: [f32; 4],
         match item {
             Item::Exact(prim) => over(pixels, &fill_layer(prim, bounds, width, height)),
             Item::Layer(effect) => draw_effect_region(doc, pixels, effect, bounds, [width, height]),
-            Item::Plain(_) => {}
+            Item::Plain(_) | Item::GroupBlur { .. } => {}
         }
         return;
     }
@@ -1054,7 +1244,7 @@ fn effect_pass(doc: &Document, pixels: &mut [u8], item: &Item, bounds: [f32; 4],
             draw_layer(doc, &mut layer, effect, bounds, sw, sh);
             effect.blend
         }
-        Item::Plain(_) => return,
+        Item::Plain(_) | Item::GroupBlur { .. } => return,
     };
     let up = upsample(&layer, sw, sh, width, height);
     for (offset, px) in up.chunks_exact(4).enumerate() {
@@ -1068,19 +1258,24 @@ pub fn rasterize_items_scaled(doc: &Document, scene: &Scene, items: &[Item], bou
         return pixels;
     }
     if items.iter().all(|item| matches!(item, Item::Plain(_))) {
-        let all = Scene { version: scene.version, prims: items.iter().map(|item| item.prim().clone()).collect(), quads: scene.quads.clone() };
+        let all = Scene { version: scene.version, prims: items.iter().map(|item| item.prim().clone()).collect(), quads: scene.quads.clone(), display_rotation: scene.display_rotation };
         return rasterize_scene(doc, &all, bounds, width, height, None);
     }
-    let grid = groups::RasterGrid { bounds, size: [width, height], view: None };
+    let grid = groups::RasterGrid { bounds, size: [width, height], view: None, display_to_document: groups::display_to_document(scene.display_rotation) };
     let effect_groups: Vec<_> = items.iter().filter_map(|item| match item {
         Item::Layer(layer) if layer.group_effect.is_some() => Some(layer.object),
         _ => None,
     }).collect();
-    if !groups::render(doc, items, Item::object, &effect_groups, grid, &mut pixels, |mut run, opacity, target| {
+    let blurs = items.iter().filter_map(|item| match item {
+        Item::GroupBlur { marker, blur } => prim_object(marker).map(|id| (id, *blur)),
+        _ => None,
+    }).collect();
+    if !groups::render(doc, items, Item::object, &effect_groups, &blurs, grid, &mut pixels, |mut run, opacity, target| {
         for item in &mut run {
             match item {
                 Item::Plain(prim) | Item::Exact(prim) => groups::normalize_prim_opacity(prim, opacity),
                 Item::Layer(layer) => groups::normalize_opacity(&mut layer.alpha, opacity),
+                Item::GroupBlur { .. } => {}
             }
         }
         draw_items_over(doc, scene, &run, bounds, [width, height], effect_scale, target);
@@ -1091,10 +1286,13 @@ pub fn rasterize_items_scaled(doc: &Document, scene: &Scene, items: &[Item], bou
 }
 
 fn draw_items_over(doc: &Document, scene: &Scene, items: &[Item], bounds: [f32; 4], [width, height]: [u32; 2], effect_scale: f32, pixels: &mut [u8]) {
-    let mut segment = Scene { version: scene.version, prims: Vec::new(), quads: scene.quads.clone() };
+    let mut segment = Scene { version: scene.version, prims: Vec::new(), quads: scene.quads.clone(), display_rotation: scene.display_rotation };
     let mut open_clips = Vec::new();
     let mut has_content = false;
     for item in items {
+        if matches!(item, Item::GroupBlur { .. }) {
+            continue;
+        }
         if let Item::Plain(prim) = item {
             match prim {
                 Prim::Clip { rect: Some(_), .. } => open_clips.push(prim.clone()),
@@ -1118,9 +1316,12 @@ fn draw_items_over(doc: &Document, scene: &Scene, items: &[Item], bounds: [f32; 
     }
 }
 
-fn upto(items: Vec<Item>, object: ObjectId) -> Vec<Item> {
+fn upto(doc: &Document, items: Vec<Item>, object: ObjectId) -> Vec<Item> {
     let mut items = items;
-    if let Some(last) = items.iter().rposition(|item| item.object() == Some(object)) {
+    let members = doc.get_object(object).filter(|layer| layer.is_group()).map(|_| doc.subtree_ids(object));
+    if let Some(last) = items.iter().rposition(|item| item.object().is_some_and(|id|
+        id == object || members.as_ref().is_some_and(|ids| ids.contains(&id))))
+    {
         items.truncate(last + 1);
     }
     items
@@ -1158,7 +1359,7 @@ pub fn render_isolated_object(doc: &Document, flags: &CanvasFlags, staged: &[Sta
 
 pub fn render_object_region(doc: &Document, flags: &CanvasFlags, staged: &[StagedEffect], object: ObjectId, bounds: [f32; 4], width: u32, height: u32) -> Vec<u8> {
     let scene = clipped_scene(doc, flags);
-    let items = upto(effect_items(doc, flags, scene_items(&scene), staged), object);
+    let items = upto(doc, effect_items(doc, flags, scene_items(&scene), staged), object);
     rasterize_items(doc, &scene, &items, bounds, width, height)
 }
 
@@ -1194,7 +1395,42 @@ pub fn group_effect_target(object: &crate::Object) -> bool {
 }
 
 pub fn has_group_effect(object: &crate::Object) -> bool {
-    group_effect_target(object) && object.effects.iter().any(group_effect_enabled)
+    group_effect_target(object) && object.effects.iter().any(|effect|
+        group_effect_enabled(effect) || group_blur_params(effect).is_some())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GaussianBlur {
+    pub radii: [f32; 2],
+    pub angle: f32,
+    pub preserve_alpha: bool,
+}
+
+pub fn group_blur_params(effect: &LayerEffect) -> Option<GaussianBlur> {
+    let EffectParams::Blur { radius, radius_y, angle, preserve_alpha } = effect.params else { return None };
+    let (radii, angle) = normalized_blur([radius, radius_y.unwrap_or(radius)], angle.unwrap_or_default());
+    (effect.enabled && effect.kind == EffectKind::GaussianBlur
+        && angle.is_finite()
+        && radii.into_iter().all(|value| value.is_finite() && value >= 0.0)
+        && radii.into_iter().any(|value| value > 0.0))
+        .then_some(GaussianBlur { radii, angle, preserve_alpha })
+}
+
+fn normalized_blur(mut radii: [f32; 2], angle: f32) -> ([f32; 2], f32) {
+    let mut angle = angle.rem_euclid(180.0);
+    if radii[0] == radii[1] {
+        angle = 0.0;
+    } else if angle == 90.0 {
+        radii.swap(0, 1);
+        angle = 0.0;
+    }
+    (radii, angle)
+}
+
+pub fn blur_padding(radii: [f32; 2], angle: f32) -> f32 {
+    let (radii, angle) = normalized_blur(radii.map(|v| finite(v, 0.0).max(0.0)), finite(angle, 0.0));
+    let axes = blur_axes(radii, angle, [1.5; 2]);
+    axis_extent(axes).into_iter().fold(0.0, f32::max)
 }
 
 pub fn group_effect_enabled(effect: &LayerEffect) -> bool {
@@ -1209,7 +1445,8 @@ pub fn group_effect_on_top(effect: &LayerEffect) -> bool {
 
 pub fn group_effect_padding(effect: &LayerEffect) -> f32 {
     match effect.params {
-        EffectParams::Shadow { radius, .. } | EffectParams::Glow { radius, .. } => finite(radius, 0.0).max(0.0) * 1.5,
+        EffectParams::Shadow { radius, radius_y, blur_angle, .. } => blur_padding([radius, radius_y.unwrap_or(radius)], blur_angle.unwrap_or_default()),
+        EffectParams::Glow { radius, .. } => finite(radius, 0.0).max(0.0) * 1.5,
         EffectParams::Outline { width, align, .. } => finite(width, 0.0).max(0.0)
             * if align == OutlineAlign::Centre { 0.5 } else { 1.0 },
         _ => 0.0,
@@ -1232,7 +1469,7 @@ pub fn group_effect_scene<'a>(doc: &Document, group: ObjectId, prims: impl Itera
         groups::normalize_prim_opacity(&mut prim, opacity);
         prim
     }).collect();
-    Scene { version: doc.version, prims, quads: Vec::new() }
+    Scene { version: doc.version, prims, ..Scene::default() }
 }
 
 type GroupEffectItems = HashMap<usize, Vec<EffectLayer>>;
@@ -1268,7 +1505,7 @@ fn group_effect_items(doc: &Document, base: &[Item], staged: &[StagedEffect]) ->
             let on_top = group_effect_on_top(&effect);
             let layer = EffectLayer {
                 object: group.id, prim: Prim::Mark { object: group.id, rect: bounds, role: String::new() },
-                blur: radius, blend: effect.blend, alpha: opacity, clip: None, invert: false, spread: 0.0,
+                blur: [radius; 2], blur_angle: 0.0, blend: effect.blend, alpha: opacity, clip: None, invert: false, spread: 0.0,
                 tint: None, alpha_edge: None, image_clip: None, group_effect: Some((scene.clone(), effect, bounds)),
             };
             if on_top {
@@ -1300,16 +1537,19 @@ pub fn group_effect_pixels(
         return group_outline_pixels(&source, scene, effect, *align, fill, origin, bounds, [w, h]);
     }
     let inside = group_effect_on_top(effect);
-    let (radius, [dx, dy], intensity, colour, invert, clip) = match &effect.params {
-        EffectParams::Shadow { radius, offset: distance, angle, intensity, colour, knock_out } =>
-            (*radius, offset(*angle, *distance), *intensity, colour, inside, inside || *knock_out),
+    let (radii, blur_angle, [dx, dy], intensity, colour, invert, clip) = match &effect.params {
+        EffectParams::Shadow { radius, radius_y, blur_angle, offset: distance, angle, intensity, colour, knock_out } =>
+            ([*radius, radius_y.unwrap_or(*radius)], blur_angle.unwrap_or_default(), offset(*angle, *distance), *intensity, colour, inside, inside || *knock_out),
         EffectParams::Glow { radius, intensity, colour, from_centre } =>
-            (*radius, [0.0, 0.0], *intensity, colour, inside && !from_centre, true),
+            ([*radius; 2], 0.0, [0.0, 0.0], *intensity, colour, inside && !from_centre, true),
         _ => return None,
     };
     let [x, y, width, height] = bounds;
-    let sigma = finite(radius, 0.0).max(0.0) * 0.5 * w as f32 / width;
-    let pad = if sigma > 0.05 { (sigma * 3.0).ceil() as u32 + 1 } else { 0 };
+    let (radii, blur_angle) = normalized_blur(radii, blur_angle);
+    let axes = blur_axes(radii, blur_angle, [0.5 * w as f32 / width, 0.5 * h as f32 / height]);
+    let [span_x, span_y] = axis_extent(axes);
+    let span = span_x.max(span_y);
+    let pad = if span > 0.05 { (span * 3.0).ceil() as u32 + 1 } else { 0 };
     let pad_x = width * pad as f32 / w as f32;
     let pad_y = height * pad as f32 / h as f32;
     let [wide_w, wide_h] = [w + 2 * pad, h + 2 * pad];
@@ -1318,8 +1558,8 @@ pub fn group_effect_pixels(
     for pixel in shadow.chunks_exact_mut(4) {
         pixel[..3].copy_from_slice(&[colour.r, colour.g, colour.b]);
     }
-    if sigma > 0.05 {
-        blur_layer(&mut shadow, wide_w as usize, wide_h as usize, sigma);
+    if pad > 0 {
+        blur_layer(&mut shadow, wide_w as usize, wide_h as usize, axes);
     }
     let original = clip.then(|| rasterize_scene(&source, scene, bounds, w, h, None));
     let opacity = unit(effect.opacity) * f32::from(colour.a) / 255.0;

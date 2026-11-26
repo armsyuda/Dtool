@@ -57,6 +57,32 @@ pub fn backdrop_color() -> egui::Color32 {
     dtool_design::color("dialog.backdrop")
 }
 
+pub(crate) fn options_scroll<R>(ui: &mut egui::Ui, id: &'static str, height: f32, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    ui.scope(|ui| {
+        let mut scroll = egui::style::ScrollStyle::solid();
+        scroll.bar_width = 11.0;
+        scroll.handle_min_length = 28.0;
+        scroll.bar_outer_margin = 2.0;
+        scroll.foreground_color = true;
+        ui.style_mut().spacing.scroll = scroll;
+        egui::ScrollArea::vertical().id_salt(id).max_height(height).auto_shrink([false, false])
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
+            .show(ui, add).inner
+    }).inner
+}
+
+pub(crate) fn options_group(ui: &mut egui::Ui, title: &str) {
+    ui.add_space(dtool_design::space("xs"));
+    options_divider(ui);
+    ui.add_space(dtool_design::space("xs"));
+    ui.strong(title);
+}
+
+pub(crate) fn options_divider(ui: &mut egui::Ui) {
+    let (line, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), egui::Sense::hover());
+    ui.painter().hline(line.x_range(), line.center().y, egui::Stroke::new(1.0, dtool_design::color("border")));
+}
+
 pub fn show_modal<R>(
     ctx: &egui::Context,
     id: &str,

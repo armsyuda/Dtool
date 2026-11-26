@@ -93,7 +93,7 @@ fn hatch_and_gradient_follow_transform_in_same_order() {
     transform_paint_matrix(&mut hatch, scale);
     let Paint::Hatch(h) = &hatch else { panic!() };
     assert_eq!([h.matrix[4], h.matrix[5]], [10.0, 14.0]);
-    let mut gradient = Paint::Gradient { kind: GradientKind::Linear, stops: Vec::<GradientStop>::new(), geom: GradientGeom { start: [5.0, 7.0], end: [6.0, 7.0], ratio: 1.0 } };
+    let mut gradient = Paint::Gradient { kind: GradientKind::Linear, stops: Vec::<GradientStop>::new(), geom: GradientGeom { start: [5.0, 7.0], end: [6.0, 7.0], ratio: 1.0, ..GradientGeom::default() } };
     transform_paint_matrix(&mut gradient, scale);
     let Paint::Gradient { geom, .. } = &gradient else { panic!() };
     assert_eq!(geom.start, [10.0, 14.0]);

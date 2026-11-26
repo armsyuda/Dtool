@@ -72,7 +72,7 @@ fn lossy_pdf(with_body: bool) -> Vec<u8> {
     build_pdf(&[
         "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
         "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
-        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << /ExtGState << /G1 << /BM /Multiply >> >> /Shading << /Sh1 << /ShadingType 2 /ColorSpace /DeviceRGB /Coords [0 0 1 0] /Function << /FunctionType 2 /Domain [0 1] /C0 [1 0 0] /C1 [0 0 1] /N 1 >> >> >> >> /Annots [5 0 R] /Contents 4 0 R >>".to_string(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << /ExtGState << /G1 << /BM /UnrecognizedBlend >> >> /Shading << /Sh1 << /ShadingType 3 /ColorSpace /DeviceRGB /Coords [0 0 1 3 0 2] /Function << /FunctionType 2 /Domain [0 1] /C0 [1 0 0] /C1 [0 0 1] /N 1 >> >> >> >> /Annots [5 0 R] /Contents 4 0 R >>".to_string(),
         stream("", if with_body { "0 0 1 rg 10 10 100 50 re f /G1 gs /Sh1 sh" } else { "/G1 gs /Sh1 sh" }),
         "<< /Type /Annot /Subtype /Text /Rect [0 0 10 10] /Contents (note) >>".to_string(),
     ])

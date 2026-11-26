@@ -381,6 +381,13 @@ fn finite2(v: [f32; 2]) -> bool {
     v[0].is_finite() && v[1].is_finite()
 }
 
+pub(crate) fn local_transform_origin(object: &Object, point: [f32; 2]) -> Result<[f32; 2], CommandError> {
+    let local = crate::geometry::doc_to_object_local(object, point).ok_or_else(CommandError::invalid_params)?;
+    let extent = object.size.map(|size| if size == 0.0 { 1.0 } else { size.abs() });
+    let origin = std::array::from_fn(|axis| (local[axis] - object.pos[axis]) / extent[axis]);
+    finite2(origin).then_some(origin).ok_or_else(CommandError::invalid_params)
+}
+
 pub(crate) fn resolve_target_ids(doc: &Document, ids: &Option<Vec<u64>>, selection: &Selection) -> Result<Vec<ObjectId>, CommandError> {
     let targets: Vec<ObjectId> = match ids {
         Some(list) => list.iter().map(|id| ObjectId(*id)).collect(),
@@ -1431,6 +1438,7 @@ struct BatchRollback {
     clipboard: std::sync::Arc<crate::clipboard::ClipboardPayload>,
     last_duplicate_ids: Vec<ObjectId>,
     last_transform_delta: Option<[f32; 2]>,
+    duplicate_revision: Option<u64>,
     last_duplicate_steps: Vec<TransformSelectionBoxArgs>,
     text_edit: Option<TextEditState>,
     active_tool: String,
@@ -1455,6 +1463,7 @@ impl BatchRollback {
             clipboard: session.clipboard.get_payload(),
             last_duplicate_ids: session.last_duplicate_ids.clone(),
             last_transform_delta: session.last_transform_delta,
+            duplicate_revision: session.duplicate_revision,
             last_duplicate_steps: session.last_duplicate_steps.clone(),
             text_edit: session.text_edit.clone(),
             active_tool: session.active_tool.clone(),
@@ -1478,6 +1487,7 @@ impl BatchRollback {
         session.clipboard.restore_payload(self.clipboard);
         session.last_duplicate_ids = self.last_duplicate_ids;
         session.last_transform_delta = self.last_transform_delta;
+        session.duplicate_revision = self.duplicate_revision;
         session.last_duplicate_steps = self.last_duplicate_steps;
         session.text_edit = self.text_edit;
         session.active_tool = self.active_tool;
@@ -1520,6 +1530,7 @@ pub struct Session {
     pub clipboard: AppClipboard,
     pub last_duplicate_ids: Vec<ObjectId>,
     pub last_transform_delta: Option<[f32; 2]>,
+    pub duplicate_revision: Option<u64>,
     pub last_duplicate_steps: Vec<TransformSelectionBoxArgs>,
     /// Last aspect lock sent with transform.set; reported by transform.query (session state, not undoable).
     pub transform_aspect_locked: bool,
@@ -1734,7 +1745,7 @@ impl Session {
         ids.len() == self.selection.ids.len() && self.selection.ids.iter().all(|id| ids.contains(id))
     }
 
-    fn custom_transform_origin(&self, ids: &[ObjectId]) -> Option<[f32; 2]> {
+    pub(crate) fn custom_transform_origin(&self, ids: &[ObjectId]) -> Option<[f32; 2]> {
         if let [id] = ids {
             let object = self.document.get_object(*id)?;
             let local = object.transform_origin?;
@@ -1760,15 +1771,7 @@ impl Session {
             let id = *id;
             let before = self.document.get_object(id).filter(|object| !object.locked).cloned()
                 .ok_or_else(CommandError::invalid_params)?;
-            let origin = if let Some(point) = point {
-                let local = crate::geometry::doc_to_object_local(&before, point).ok_or_else(CommandError::invalid_params)?;
-                let extent = before.size.map(|size| if size == 0.0 { 1.0 } else { size.abs() });
-                let origin = std::array::from_fn(|axis| (local[axis] - before.pos[axis]) / extent[axis]);
-                if !finite2(origin) { return Err(CommandError::invalid_params()); }
-                Some(origin)
-            } else {
-                None
-            };
+            let origin = point.map(|point| local_transform_origin(&before, point)).transpose()?;
             if before.transform_origin == origin {
                 return Ok(serde_json::json!({"changes":[]}));
             }
@@ -1842,6 +1845,7 @@ impl Session {
             history: crate::history_store::SessionHistory::default(),
             last_duplicate_ids: Vec::new(),
             last_transform_delta: None,
+            duplicate_revision: None,
             last_duplicate_steps: Vec::new(),
             transform_aspect_locked: false,
             transform_origin: None,
@@ -2095,7 +2099,7 @@ impl Session {
         self.document.version += 1;
     }
 
-    fn apply_command(&mut self, command: &Command) -> Result<(), CommandError> {
+    pub(crate) fn apply_command(&mut self, command: &Command) -> Result<(), CommandError> {
         if command.name == VIEW_ZOOM_SET {
             let args = parse_view_zoom_set(&command.params)?;
             self.view_zoom_set(args);
@@ -2874,6 +2878,8 @@ impl Session {
                 let old_objects = self.snapshot_objects(&affected);
                 execute_transform_selection_box(&mut self.document, &ids, &args)
                     .map_err(|_| CommandError { code: "INVALID_PARAMS".to_string(), message_key: "error.invalid_params".to_string() })?;
+                let continues_duplicate = ids == self.last_duplicate_ids
+                    && self.duplicate_revision == Some(self.undo.revision());
                 if !ids.is_empty() && ids == self.last_duplicate_ids {
                     let roots: Vec<_> = old_objects.iter().filter(|object| ids.contains(&object.id)).cloned().collect();
                     let centre = crate::clipboard::box_centre(&roots);
@@ -2885,6 +2891,9 @@ impl Session {
                     params: serde_json::to_value(&args).unwrap_or_default(),
                 };
                 self.push_restore_undo("transform.selection_box", redo, old_objects);
+                if continues_duplicate {
+                    self.duplicate_revision = Some(self.undo.revision());
+                }
                 let changed: Vec<u64> = affected.iter().map(|id| id.0).collect();
                 Ok(serde_json::json!({
                     "doc_version": self.generation,
@@ -2903,6 +2912,8 @@ impl Session {
                 if let Some(lock) = args.aspect_locked {
                     self.transform_aspect_locked = lock;
                 }
+                let continues_duplicate = ids == self.last_duplicate_ids
+                    && self.duplicate_revision == Some(self.undo.revision());
                 if !ids.is_empty() && ids == self.last_duplicate_ids {
                     if let Some((old, new)) = ids.first().and_then(|id| old_objects.iter().find(|old| old.id == *id))
                         .and_then(|old| self.document.get_object(old.id).map(|new| (old, new))) {
@@ -2922,6 +2933,9 @@ impl Session {
                     },
                 };
                 self.push_restore_undo("transform.set", redo, old_objects);
+                if continues_duplicate {
+                    self.duplicate_revision = Some(self.undo.revision());
+                }
                 let changed: Vec<u64> = affected.iter().map(|id| id.0).collect();
                 Ok(serde_json::json!({
                     "doc_version": self.generation,
@@ -3064,21 +3078,24 @@ impl CommandBus for Session {
 
 impl Session {
     pub fn actual_zoom(&self) -> f32 {
-        let units = self.document.units;
-        let Some(dpi) = self.display_dpi.filter(|dpi| dpi.is_finite() && *dpi > 0.0) else {
-            return crate::view::actual_zoom(units);
-        };
-        if units == crate::document::Units::Px {
-            return dpi / self.document.dpi.max(1.0);
-        }
-        crate::units::to_px(1.0, units, dpi).unwrap_or_else(|| crate::view::actual_zoom(units))
+        let dpi = self.display_dpi.filter(|dpi| dpi.is_finite() && *dpi > 0.0).unwrap_or(96.0);
+        dpi / crate::units::per_inch(self.document.units, self.document.dpi)
     }
 
     pub fn view_zoom_set(&mut self, args: ViewZoomSetArgs) -> serde_json::Value {
+        self.apply_view_zoom(args)
+    }
+
+    pub fn zoom_limits(&self) -> crate::view::ZoomLimits {
+        crate::view::ZoomLimits::for_actual(self.actual_zoom())
+    }
+
+    pub(crate) fn apply_view_zoom(&mut self, args: ViewZoomSetArgs) -> serde_json::Value {
+        let zoom = self.zoom_limits().clamp(args.zoom);
         let pivot = args.around.or_else(|| args.view_size.map(|size| [size[0] * 0.5, size[1] * 0.5]));
         match pivot {
-            Some(pivot) => crate::view::zoom_about(&mut self.view, args.zoom, pivot),
-            None => self.view.zoom = crate::view::clamp_zoom(args.zoom),
+            Some(pivot) => crate::view::set_zoom_about(&mut self.view, zoom, pivot),
+            None => self.view.zoom = zoom,
         }
         serde_json::json!({
             "doc_version": self.generation,
@@ -3097,7 +3114,7 @@ impl Session {
         view_size: [f32; 2],
         target: crate::view::FitTarget,
     ) -> Result<serde_json::Value, CommandError> {
-        use crate::view::{FitTarget, center_region, clamp_zoom, fit_zoom, rotated_bounds};
+        use crate::view::{FitTarget, center_region, rotated_bounds};
 
         if !self.has_document {
             return Err(CommandError::no_document());
@@ -3109,6 +3126,7 @@ impl Session {
         let size = [bounds[2], bounds[3]];
         let rotation_deg = self.view.rotation_deg;
         let rotated = rotated_bounds(size, rotation_deg);
+        let zoom_limits = self.zoom_limits();
         self.view.zoom = match target {
             FitTarget::Current => {
                 // Leave room for the visible outline stroke at the viewport edge.
@@ -3117,12 +3135,12 @@ impl Session {
                 } else {
                     view_size
                 };
-                fit_zoom(size, available, rotation_deg)
+                zoom_limits.fit(size, available, rotation_deg)
             }
-            FitTarget::Width => clamp_zoom(view_size[0] / rotated[0].max(f32::EPSILON)),
+            FitTarget::Width => zoom_limits.clamp(view_size[0] / rotated[0].max(f32::EPSILON)),
             FitTarget::Selection | FitTarget::Document => {
                 let available = view_size.map(|side| (side - 24.0).max(side * 0.5));
-                clamp_zoom((available[0] / rotated[0].max(f32::EPSILON))
+                zoom_limits.clamp((available[0] / rotated[0].max(f32::EPSILON))
                     .min(available[1] / rotated[1].max(f32::EPSILON)))
             }
         };

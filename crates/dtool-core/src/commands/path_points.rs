@@ -171,7 +171,7 @@ fn selection(session: &Session, params: &Value) -> CommandResult {
 fn plan(session: &Session, command: &Command) -> Result<Plan, CommandError> {
     let params = &command.params;
     let id = object_id(params)?;
-    let preserve_transform = command.name == REVERSE && preserve_transform(params)?;
+    let preserve_transform = matches!(command.name.as_str(), REVERSE | SMOOTH) && preserve_transform(params)?;
     let mut contours = world_contours(editable_curve_impl(session, id, preserve_transform)?);
     let extra = match command.name.as_str() {
         POINTS_TRANSFORM | POINT_MOVE => transform(&mut contours, params)?,

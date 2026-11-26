@@ -16,6 +16,7 @@ pub const EXPORT_OPEN_MODIFIERS: Modifiers = Modifiers { ctrl: true, shift: true
 pub const FIND_OPEN_COMMAND: &str = "ui.find.open";
 pub const FIND_OPEN_KEY: &str = "F";
 pub const FIND_OPEN_MODIFIERS: Modifiers = Modifiers { ctrl: true, shift: false, alt: false };
+const DELETE_COMMAND: &str = "Serif.Interop.Persona.Commands.DeleteObjectsCommand";
 
 pub use dtool_core::shortcuts::{Focus, Modifiers};
 
@@ -86,7 +87,7 @@ fn collect(value: &serde_json::Value, map: &mut ShortcutMap) {
 
 impl ShortcutMap {
     pub fn affinity_default() -> Self {
-        Self::from_affinity_json(DEFAULT_KEYMAP_JSON).with_export_default().with_find_default()
+        Self::from_affinity_json(DEFAULT_KEYMAP_JSON).with_export_default().with_find_default().with_delete_default()
     }
 
     pub fn with_find_default(mut self) -> Self {
@@ -110,6 +111,18 @@ impl ShortcutMap {
                 key: EXPORT_OPEN_KEY.to_string(),
                 modifiers: EXPORT_OPEN_MODIFIERS,
             });
+        }
+        self
+    }
+
+    fn with_delete_default(mut self) -> Self {
+        let modifiers = Modifiers::default();
+        let taken = self.bindings.get("x").is_some_and(|list| {
+            list.iter().any(|shortcut| shortcut.modifiers == modifiers
+                && crate::shortcut_commands::target_for(&shortcut.command).is_some())
+        });
+        if self.bindings_for(DELETE_COMMAND).is_empty() && !taken {
+            self.add(Shortcut { command: DELETE_COMMAND.to_string(), key: "X".to_string(), modifiers });
         }
         self
     }
@@ -146,7 +159,7 @@ impl ShortcutMap {
         if let Some(path) = Self::config_path() {
             if let Ok(content) = fs::read_to_string(&path) {
                 if let Some(map) = Self::parse_any(&content) {
-                    return map.with_export_default().with_find_default();
+                    return map.with_export_default().with_find_default().with_delete_default();
                 }
             }
         }

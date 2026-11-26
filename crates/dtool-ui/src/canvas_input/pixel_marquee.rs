@@ -89,6 +89,7 @@ impl Gesture {
         if !self.active() && let Some(at) = down.filter(|at| can_start(ui, response, *at)) {
             self.surface = target(at);
         }
+        self.brush_outline = None;
         let surface = self.surface.or_else(|| up.or_else(|| response.hover_pos()).and_then(target))?;
         let to_pixels = |at| surface.doc_to_pixel(to_doc(at));
         if response.hovered() { ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair); }
@@ -334,8 +335,8 @@ impl Gesture {
                 painter.add(egui::Shape::line(points, Stroke::new(width, colour)));
             }
             if let Some((point, radius)) = self.brush_outline {
-                painter.circle_stroke(point, radius, Stroke::new(2.0, Color32::from_black_alpha(180)));
-                painter.circle_stroke(point, radius, Stroke::new(1.0, Color32::WHITE));
+                painter.circle_stroke(point, radius, Stroke::new(3.2, super::CURSOR_EDGE));
+                painter.circle_stroke(point, radius, Stroke::new(2.2, super::CURSOR_FACE));
             }
             return;
         }

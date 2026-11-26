@@ -60,6 +60,7 @@ pub struct ImportOptions {
     pub dpi: u32,
     pub colour: ImportColour,
     pub favour_editable_text: bool,
+    pub outline_embedded_text: bool,
     pub group_text_lines: bool,
     pub password: Option<String>,
     pub fonts: Vec<FontReplacement>,
@@ -73,6 +74,7 @@ impl Default for ImportOptions {
             dpi: 300,
             colour: ImportColour::Rgb,
             favour_editable_text: false,
+            outline_embedded_text: false,
             group_text_lines: false,
             password: None,
             fonts: Vec::new(),
@@ -180,6 +182,19 @@ pub fn import_pdf(path: &Path, opts: &ImportOptions) -> Result<(Document, Import
         lopdf::Error::IO(error) => IoError::from_io(&error),
         _ => IoError::new(IoErrorKind::UnsupportedProfile),
     })?;
+    map_document(doc, opts)
+}
+
+pub fn import_pdf_bytes(bytes: &[u8], opts: &ImportOptions) -> Result<(Document, ImportReport), IoError> {
+    if !bytes.starts_with(b"%PDF-") {
+        return Err(IoError::new(IoErrorKind::InvalidFormat));
+    }
+    let doc = PdfDocument::load_mem_with_options(bytes, LoadOptions::with_max_decompressed_size(64 * 1024 * 1024))
+        .map_err(|_| IoError::new(IoErrorKind::UnsupportedProfile))?;
+    map_document(doc, opts)
+}
+
+fn map_document(doc: PdfDocument, opts: &ImportOptions) -> Result<(Document, ImportReport), IoError> {
     if doc.is_encrypted() {
         return Err(IoError::new(IoErrorKind::UnsupportedProfile));
     }

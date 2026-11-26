@@ -1,4 +1,5 @@
 use crate::canvas_size::px_to_unit;
+use crate::command::{ObjectRestoreArgs, execute_object_restore, transform_target_ids};
 use crate::commands::{arrange, layer_meta};
 use crate::object::{Object, ObjectId};
 use crate::selection::SelectOp;
@@ -43,8 +44,8 @@ fn nudge(session: &mut Session, command: &Command) -> CommandResult {
     }
     let dx = delta(&command.params, "dx")?;
     let dy = delta(&command.params, "dy")?;
-    let targets = nudge_targets(session, &command.params);
-    if targets.is_empty() {
+    let roots = nudge_targets(session, &command.params);
+    if roots.is_empty() {
         return Err(CommandError::new("NOTHING_SELECTED"));
     }
     let units = session.document.units;
@@ -53,21 +54,20 @@ fn nudge(session: &mut Session, command: &Command) -> CommandResult {
     if step.iter().any(|v| !v.is_finite()) {
         return Err(CommandError::invalid_params());
     }
-    let before = session.document.clone();
-    for id in &targets {
-        if let Some(object) = session.document.find_object_mut(id.0) {
-            object.pos[0] += step[0];
-            object.pos[1] += step[1];
+    let targets = transform_target_ids(&session.document, &roots);
+    let before = session.snapshot_objects(&targets);
+    let mut after = before.clone();
+    for object in &mut after {
+        object.pos[0] += step[0];
+        object.pos[1] += step[1];
+        if object.pos.iter().any(|v| !v.is_finite()) {
+            return Err(CommandError::invalid_params());
         }
     }
-    let after = session.document.clone();
-    session.undo.push(crate::undo::Change {
-        name: command.name.clone(),
-        undo: Command::with_params("core.feature.restore", json!({ "document": before })),
-        redo: Command::with_params("core.feature.restore", json!({ "document": after })),
-    });
-    session.generation += 1;
-    session.document.version += 1;
+    let after = ObjectRestoreArgs { objects: after };
+    execute_object_restore(&mut session.document, &after)?;
+    let redo = Command::with_params("object.restore", json!(after));
+    session.push_restore_undo(&command.name, redo, before);
     Ok(json!({
         "doc_version": session.generation,
         "changes": [{ "name": command.name }],

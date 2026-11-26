@@ -32,8 +32,7 @@ fn c13_b10_svg_rejects_unapplied_options_before_writing_on_live_path() {
     workspace.session_mut().unwrap().document.create_object(dtool_core::Object { size: [20.0, 20.0], ..Default::default() });
     let mut variants: Vec<(&str, Value)> = vec![
         ("embed_images", json!(false)),
-        ("raster_dpi", json!(300)),
-        ("rasterize", json!("Everything")),
+        ("raster_dpi", json!(0)),
         ("flatten_transforms", json!(true)),
         ("tile_patterns", json!(true)),
         ("longer_text_spans", json!(true)),

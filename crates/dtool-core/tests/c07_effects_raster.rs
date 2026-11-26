@@ -22,7 +22,7 @@ fn shadow(kind: EffectKind, offset: f32, radius: f32, intensity: f32, knock_out:
     let mut effect = default_effect(kind);
     effect.opacity = 1.0;
     effect.blend = BlendMode::Normal;
-    effect.params = EffectParams::Shadow { radius, offset, angle: 135.0, intensity, colour: Colour::new(0, 0, 255, 255), knock_out };
+    effect.params = EffectParams::Shadow { radius, radius_y: None, blur_angle: None, offset, angle: 135.0, intensity, colour: Colour::new(0, 0, 255, 255), knock_out };
     effect
 }
 
@@ -61,14 +61,14 @@ fn bevel_lights_the_azimuth_side_and_shades_the_other() {
 #[test]
 fn object_gaussian_blur_spreads_past_the_edge_unless_alpha_is_preserved() {
     let mut blur = default_effect(EffectKind::GaussianBlur);
-    blur.params = EffectParams::Blur { radius: 4.0, preserve_alpha: false };
+    blur.params = EffectParams::Blur { radius: 4.0, radius_y: None, angle: None, preserve_alpha: false };
     let (doc, _) = doc_with(1.0, vec![blur.clone()]);
     let outside = px(&doc, 51.0, 30.0);
     assert!(outside[3] > 0 && outside[3] < 255 && outside[0] == 255, "{outside:?}");
     assert_eq!(px(&doc, 30.0, 30.0), [255, 0, 0, 255]);
     let edge = px(&doc, 49.5, 30.0);
     assert!(edge[3] < 255, "{edge:?}");
-    blur.params = EffectParams::Blur { radius: 4.0, preserve_alpha: true };
+    blur.params = EffectParams::Blur { radius: 4.0, radius_y: None, angle: None, preserve_alpha: true };
     let (kept, _) = doc_with(1.0, vec![blur]);
     assert_eq!(px(&kept, 51.0, 30.0)[3], 0);
 }

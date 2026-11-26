@@ -160,6 +160,9 @@ pub fn options_from(params: &Value) -> Result<ImportOptions, CommandError> {
     if let Some(flag) = raw.get("favour_editable_text").and_then(Value::as_bool) {
         options.favour_editable_text = flag;
     }
+    if let Some(flag) = raw.get("outline_embedded_text").and_then(Value::as_bool) {
+        options.outline_embedded_text = flag;
+    }
     if let Some(flag) = raw.get("group_text_lines").and_then(Value::as_bool) {
         options.group_text_lines = flag;
     }

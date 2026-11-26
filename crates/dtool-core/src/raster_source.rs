@@ -6,6 +6,15 @@ use serde::{Deserialize, Serialize};
 pub struct LayerMask {
     pub object: ObjectId,
     pub coverage: PixelSelection,
+    /// Original hard boundary in normalized mask coordinates, when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vector_outline: Option<crate::curve::Curve>,
+}
+
+impl LayerMask {
+    pub fn new(object: ObjectId, coverage: PixelSelection) -> Self {
+        Self { object, coverage, vector_outline: None }
+    }
 }
 
 /// Masks on raster sources are applied while decoding their pixels.

@@ -1,6 +1,7 @@
 pub mod frame_text_input;
 pub mod longdoc_marks;
 
+use dtool_core::view::ZoomLimits;
 use dtool_core::view_state::ViewState;
 use dtool_core::workspace::Workspace;
 
@@ -16,12 +17,12 @@ pub enum CanvasViewCommand {
 
 impl CanvasViewCommand {
     pub(crate) fn from_wheel(
-        view: &ViewState, scroll: [f32; 2], zoom_delta: f32, pointer: Option<[f32; 2]>,
+        view: &ViewState, scroll: [f32; 2], zoom_delta: f32, pointer: Option<[f32; 2]>, limits: ZoomLimits,
     ) -> Option<Self> {
         // Egui separates Ctrl+wheel and pinch zoom from unmodified scrolling.
         if zoom_delta.is_finite() && zoom_delta > 0.0 && zoom_delta != 1.0 {
             let around = pointer?;
-            let zoom = clamp_zoom(view.zoom * zoom_delta);
+            let zoom = limits.clamp(view.zoom * zoom_delta);
             return (zoom != view.zoom).then_some(Self::ZoomSet { zoom, around: Some(around) });
         }
         (scroll != [0.0, 0.0]).then_some(Self::Pan { delta: scroll })
@@ -90,7 +91,7 @@ impl CanvasView {
         }
 
         if response.hovered() {
-            if let Some(command) = CanvasViewCommand::from_wheel(state, [scroll.x, scroll.y], zoom_delta, pointer) {
+            if let Some(command) = CanvasViewCommand::from_wheel(state, [scroll.x, scroll.y], zoom_delta, pointer, ZoomLimits::default()) {
                 commands.push(command);
             }
 

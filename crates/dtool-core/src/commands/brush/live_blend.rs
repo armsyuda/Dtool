@@ -199,6 +199,13 @@ fn blend_gradient_geometry(a: GradientGeom, b: GradientGeom, t: f64) -> Gradient
         start,
         end: [start[0] + length * cos, start[1] + length * sin],
         ratio: a.ratio + t * (b.ratio - a.ratio),
+        focus: if a.focus.is_some() || b.focus.is_some() {
+            let from = a.focus.unwrap_or([0.0; 2]);
+            let to = b.focus.unwrap_or([0.0; 2]);
+            Some(std::array::from_fn(|i| from[i] + t * (to[i] - from[i])))
+        } else { None },
+        focus_radius: a.focus_radius + t * (b.focus_radius - a.focus_radius),
+        spread: if t < 0.5 { a.spread } else { b.spread },
     }
 }
 

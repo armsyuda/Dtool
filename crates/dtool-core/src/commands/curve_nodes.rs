@@ -6,7 +6,7 @@ use crate::commands::curve_edit::{commit_contours_with_transform, contour_index,
 use crate::curve::{Contour, NodeKind, PathPoint, PointId};
 use crate::object::ObjectId;
 use dtool_protocol::{Command, CommandError, CommandResult};
-use kurbo::{CubicBez, ParamCurve, ParamCurveNearest, Point};
+use kurbo::{CubicBez, Line, ParamCurve, ParamCurveNearest, Point};
 use serde_json::{json, Value};
 
 pub const CURVE_NODES_INSERT: &str = "curve.nodes.insert";
@@ -111,7 +111,7 @@ fn arr(p: Point) -> [f64; 2] {
 
 pub fn segment_count(contour: &Contour) -> usize {
     let n = contour.points.len();
-    if contour.closed && n > 2 { n } else { n.saturating_sub(1) }
+    if contour.closed && n > 1 { n } else { n.saturating_sub(1) }
 }
 
 pub fn segment(contour: &Contour, index: usize) -> Option<CubicBez> {
@@ -128,6 +128,28 @@ pub fn nearest_segment(contour: &Contour, point: [f64; 2]) -> Option<(usize, f64
         .filter_map(|i| segment(contour, i).map(|bez| (i, bez.nearest(pt(point), 1e-6))))
         .map(|(i, near)| (i, near.t, near.distance_sq.sqrt()))
         .min_by(|a, b| a.2.total_cmp(&b.2))
+}
+
+/// Find a point on one segment within the given distance, using the control hull to skip distant segments.
+pub fn segment_point_within(contour: &Contour, index: usize, point: [f64; 2], radius: f64) -> Option<[f64; 2]> {
+    let bez = segment(contour, index)?;
+    let [x, y] = point;
+    let control = [bez.p0, bez.p1, bez.p2, bez.p3];
+    if control.iter().all(|p| p.x < x - radius) || control.iter().all(|p| p.x > x + radius)
+        || control.iter().all(|p| p.y < y - radius) || control.iter().all(|p| p.y > y + radius)
+    {
+        return None;
+    }
+    let p = pt(point);
+    let (distance_sq, target) = if bez.p0 == bez.p1 && bez.p2 == bez.p3 {
+        let line = Line::new(bez.p0, bez.p3);
+        let near = line.nearest(p, 1e-6);
+        (near.distance_sq, line.eval(near.t))
+    } else {
+        let near = bez.nearest(p, 1e-6);
+        (near.distance_sq, bez.eval(near.t))
+    };
+    (distance_sq <= radius * radius).then(|| arr(target))
 }
 
 fn insert(contour: &mut Contour, params: &Value) -> Result<PointId, CommandError> {

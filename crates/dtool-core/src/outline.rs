@@ -6,7 +6,7 @@ use std::f64::consts::{FRAC_1_SQRT_2, PI};
 
 mod stroke;
 mod spiral;
-pub use stroke::{pressure_stroke_path, styled_stroke_path};
+pub use stroke::{pressure_stroke_path, styled_stroke_path, styled_stroke_path_with_tolerance};
 
 pub const OUTLINE_TOLERANCE: f64 = 0.1;
 pub const DIMENSION_TICK: f64 = 6.0;
@@ -14,26 +14,42 @@ pub const DIMENSION_LABEL_GAP: f64 = 4.0;
 pub const DIMENSION_LABEL_SIZE: f64 = 10.0;
 
 pub fn object_outline(object: &Object) -> Option<BezPath> {
+    object_outline_with_tolerance(object, crate::boolean::DEFAULT_TOLERANCE)
+}
+
+pub(crate) fn object_outline_with_tolerance(object: &Object, tolerance: f64) -> Option<BezPath> {
     match &object.kind {
         ObjectKind::Curve(curve) => Some(cornered(curve).to_kurbo()),
         ObjectKind::Shape => match crate::commands::qr::payload(object) {
             Some(payload) => Some(crate::commands::qr::outline(payload, object.size)),
             None => shape_outline(object),
         },
-        ObjectKind::Compound(spec) => crate::boolean::compound_outline(spec),
+        ObjectKind::Compound(spec) => crate::boolean::compound_outline_with_tolerance(spec, tolerance),
         _ => None,
     }
 }
 
 pub fn object_outline_world(object: &Object) -> Option<BezPath> {
+    object_outline_world_with_tolerance(object, crate::boolean::DEFAULT_TOLERANCE)
+}
+
+/// Resolve an outline with a tolerance measured in world-space document units.
+pub fn object_outline_world_with_tolerance(object: &Object, tolerance: f64) -> Option<BezPath> {
+    let (affine, scale) = object_outline_transform(object)?;
+    let path = object_outline_with_tolerance(object, tolerance / scale.max(1.0))?;
+    Some(affine * path)
+}
+
+pub(crate) fn object_outline_transform(object: &Object) -> Option<(Affine, f64)> {
     let matrix = crate::geometry::object_matrix(object);
     if matrix.iter().chain(&object.pos).any(|value| !value.is_finite()) {
         return None;
     }
-    let path = object_outline(object)?;
+    let [a, b, c, d, _, _] = matrix.map(f64::from);
+    let scale = ((a + d).hypot(b - c) + (a - d).hypot(b + c)) * 0.5;
     let [x, y] = object.pos.map(f64::from);
     let affine = Affine::new(matrix.map(f64::from)) * Affine::translate((x, y));
-    Some(affine * path)
+    Some((affine, scale))
 }
 
 fn path_text_scale(object: &Object) -> [f64; 2] {

@@ -8,7 +8,7 @@ pub(crate) fn gradient_pattern(paint: &Paint, page_origin: [f64; 2]) -> Option<S
     let dx = geom.end[0] - geom.start[0];
     let dy = geom.end[1] - geom.start[1];
     let length = dx.hypot(dy);
-    if stops.is_empty() || !length.is_finite() || length <= 1e-14
+    if stops.is_empty() || !geom.spread.is_pad() || !length.is_finite() || length <= 1e-14
         || stops.iter().any(|stop| !(0.0..=1.0).contains(&stop.offset) || stop.colour.a < 255)
         || stops.windows(2).any(|pair| pair[0].offset >= pair[1].offset)
     {
@@ -30,7 +30,12 @@ pub(crate) fn gradient_pattern(paint: &Paint, page_origin: [f64; 2]) -> Option<S
     if last.offset < 1.0 {
         stops.push(GradientStop { offset: 1.0, ..last });
     }
-    let (kind, coords) = if *kind == GradientKind::Linear { (2, "0 0 1 0") } else { (3, "0 0 0 0 0 1") };
+    let (kind, coords) = if *kind == GradientKind::Linear {
+        (2, "0 0 1 0".to_owned())
+    } else {
+        let [fx, fy] = geom.focus.unwrap_or([0.0; 2]);
+        (3, format!("{fx} {fy} {} 0 0 1", geom.focus_radius))
+    };
     let mut pattern = format!("[/Pattern] setcolorspace\n<< /PatternType 2 /Shading << /ShadingType {kind} /ColorSpace /DeviceRGB /Coords [{coords}] /Extend [true true] /Function ");
     if stops.len() == 2 {
         write_segment(&mut pattern, stops[0].colour, stops[1].colour);

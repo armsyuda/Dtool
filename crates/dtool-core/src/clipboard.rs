@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use crate::object::Object;
+use crate::commands::symbols::{Symbols, clipboard as symbol_clipboard};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ClipboardKind {
@@ -56,6 +57,12 @@ pub struct ClipboardBundle {
     pub swatch_bindings: Vec<crate::colour::swatch::SwatchBinding>,
     #[serde(default)]
     pub text_links: Vec<crate::text_link::TextLink>,
+    #[serde(default, skip_serializing_if = "Symbols::is_empty")]
+    pub symbols: Symbols,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_dimensions: Option<(crate::document::Units, f32)>,
+    #[serde(skip)]
+    pub(crate) symbol_source: Option<crate::workspace::ContextId>,
 }
 
 #[derive(Debug, Default)]
@@ -66,6 +73,12 @@ pub struct AppClipboard {
 impl AppClipboard {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn set_imported_objects(&mut self, document: &crate::Document, roots: &[crate::object::ObjectId]) {
+        let mut bundle = collect_bundle(document, roots);
+        bundle.source_dimensions = Some((document.units, document.dpi));
+        self.set_bundle(bundle);
     }
 
     pub fn share(&self) -> Self {
@@ -86,8 +99,16 @@ impl AppClipboard {
     }
 
     pub fn set_bundle(&mut self, bundle: ClipboardBundle) {
+        self.replace_bundle(bundle, None);
+    }
+
+    fn set_flattened(&mut self, bundle: ClipboardBundle, png: Vec<u8>) {
+        self.replace_bundle(bundle, Some(png));
+    }
+
+    fn replace_bundle(&mut self, bundle: ClipboardBundle, image_png: Option<Vec<u8>>) {
         let roots = bundle.roots.iter().filter_map(|id| bundle.objects.iter().find(|o| o.id == *id).cloned()).collect();
-        self.replace(ClipboardPayload { kind: ClipboardKind::Objects, objects: Some(roots), bundle: Some(bundle), ..ClipboardPayload::default() });
+        self.replace(ClipboardPayload { kind: ClipboardKind::Objects, objects: Some(roots), bundle: Some(bundle), image_png, ..ClipboardPayload::default() });
     }
 
     pub fn set_image(&mut self, png: Vec<u8>) {
@@ -197,8 +218,15 @@ fn subtree(doc: &crate::document::Document, ids: &[crate::object::ObjectId]) -> 
 }
 
 pub fn collect_bundle(doc: &crate::document::Document, ids: &[crate::object::ObjectId]) -> ClipboardBundle {
+    collect_bundle_with_guides(doc, ids, false)
+}
+
+fn collect_bundle_with_guides(doc: &crate::Document, ids: &[crate::ObjectId], reuse_external_guides: bool) -> ClipboardBundle {
     let mut set = subtree(doc, ids);
-    let paths: Vec<crate::object::ObjectId> = doc.objects.iter().filter(|o| set.contains(&o.id)).filter_map(|o| o.path_text_data().map(|d| d.path)).collect();
+    let paths: Vec<_> = doc.objects.iter().filter(|object| set.contains(&object.id)).filter_map(|object| {
+        let path = object.path_text_data()?.path;
+        (!(reuse_external_guides && symbol_clipboard::has_external_guide(doc, object.id))).then_some(path)
+    }).collect();
     for path in paths {
         if doc.get_object(path).is_some() && set.insert(path) {
             for id in subtree(doc, &[path]) {
@@ -215,17 +243,21 @@ pub(crate) fn collect_bundle_members(doc: &crate::Document, set: &std::collectio
     let story_ids: std::collections::HashSet<crate::document::StoryId> = objects.iter().flat_map(object_stories).collect();
     let placed_images: Vec<crate::resources::PlacedImage> = doc.placed_images.iter().filter(|p| set.contains(&p.object_id)).cloned().collect();
     let resources = doc.resources.iter().filter(|r| placed_images.iter().any(|p| p.resource == r.id)).cloned().collect();
-    let brush_refs: std::collections::BTreeSet<_> = objects.iter().flat_map(|object| {
-        let stroke = object.path_brush.as_ref().map(|texture| texture.resource_id.as_str());
-        let fill = match &object.fill {
-            crate::paint::Paint::Bitmap(bitmap) => Some(bitmap.resource_id.as_str()),
-            _ => None,
-        };
-        stroke.into_iter().chain(fill)
-    }).collect();
-    let brush_sources = brush_refs.into_iter().filter_map(|reference| {
-        crate::path_brush::snapshot_resource(doc, reference).map(|image| (reference.to_string(), image))
-    }).collect();
+    use crate::paint::{PaintResourceKind, ResourceCollector, visit_vector_resources};
+    let mut collector = ResourceCollector::new();
+    for object in &objects {
+        visit_vector_resources(&mut collector, object);
+    }
+    let brush_sources = collector.finish().into_iter()
+        .filter(|reference| matches!(reference.kind, PaintResourceKind::Bitmap | PaintResourceKind::Pattern))
+        .filter_map(|reference| {
+            let image = crate::path_brush::snapshot_resource(doc, &reference.id).or_else(|| {
+                // Keep an unavailable link so paste assigns a new ID and the user can relink it.
+                crate::path_brush::resource(doc, &reference.id).filter(|image| image.is_linked()).cloned()
+            })?;
+            Some((reference.id, image))
+        })
+        .collect();
     let frame_chains = doc
         .frame_chains
         .iter()
@@ -249,6 +281,7 @@ pub(crate) fn collect_bundle_members(doc: &crate::Document, set: &std::collectio
         pixel_layers: doc.pixel_layers.entries.iter().filter(|e| set.contains(&e.object)).cloned().collect(),
         frame_chains,
         objects,
+        ..ClipboardBundle::default()
     }
 }
 
@@ -292,6 +325,40 @@ pub(crate) fn copy_bundle_in_document(
     doc: &mut crate::Document, bundle: &ClipboardBundle, offset: [f32; 2],
 ) -> std::collections::HashMap<crate::ObjectId, crate::ObjectId> {
     paste_bundle_impl(doc, bundle, None, offset, &std::collections::HashMap::new(), true)
+}
+
+fn remap_pasted_paints(
+    doc: &mut crate::Document, object: &mut Object, resources: &std::collections::HashMap<String, String>,
+) {
+    use crate::paint::{Paint, Transparency};
+    let remap = |id: &mut String| {
+        if let Some(mapped) = resources.get(id) {
+            id.clone_from(mapped);
+        }
+    };
+    object.path_brush = object.path_brush.take().and_then(|mut texture| {
+        texture.resource_id = resources.get(&texture.resource_id)?.clone();
+        Some(texture)
+    });
+    let fills = std::iter::once(&mut object.fill).chain(&mut object.additional_fills);
+    let strokes = std::iter::once(&mut object.stroke).chain(&mut object.additional_strokes);
+    for paint in fills.chain(strokes.map(|stroke| &mut stroke.paint)) {
+        match paint {
+            Paint::Bitmap(bitmap) => remap(&mut bitmap.resource_id),
+            Paint::Pattern(pattern) => remap(&mut pattern.resource_id),
+            _ => {}
+        }
+    }
+    if let Transparency::InverseBitmap(bitmap) = &mut object.transparency {
+        remap(&mut bitmap.resource_id);
+    }
+    if let crate::object::ObjectKind::Compound(compound) = &mut object.kind {
+        for operand in &mut compound.operands {
+            // Releasing a compound promotes these stored IDs to layer IDs.
+            operand.id = doc.alloc_object_id();
+            remap_pasted_paints(doc, operand, resources);
+        }
+    }
 }
 
 fn paste_bundle_impl(
@@ -341,22 +408,14 @@ fn paste_bundle_impl(
     let mut brush_ids = std::collections::HashMap::new();
     for (reference, image) in &bundle.brush_sources {
         let id = crate::path_brush::import_snapshot(doc, image);
-        brush_ids.insert(reference, id.0.to_string());
+        brush_ids.insert(reference.clone(), id.0.to_string());
     }
     let mut ids = existing.clone();
     let new_objects = || bundle.objects.iter().filter(|object| !existing.contains_key(&object.id));
     for object in new_objects() {
         let mut copy = object.clone();
         copy.id = ObjectId(0);
-        copy.path_brush = copy.path_brush.and_then(|mut texture| {
-            texture.resource_id = brush_ids.get(&texture.resource_id)?.clone();
-            Some(texture)
-        });
-        if let crate::paint::Paint::Bitmap(bitmap) = &mut copy.fill
-            && let Some(new_reference) = brush_ids.get(&bitmap.resource_id)
-        {
-            bitmap.resource_id = new_reference.clone();
-        }
+        remap_pasted_paints(doc, &mut copy, &brush_ids);
         let new_id = doc.create_object(copy);
         ids.insert(object.id, new_id);
     }
@@ -461,6 +520,8 @@ pub const EDIT_PASTE_STYLE: &str = "edit.paste_style";
 pub const EDIT_PASTE_FX: &str = "edit.paste_fx";
 pub const EDIT_DUPLICATE: &str = "edit.duplicate";
 pub const EDIT_POWER_DUPLICATE: &str = "edit.power_duplicate";
+pub mod move_duplicate;
+pub mod flattened;
 pub const EDIT_PASTE_SPECIAL: &str = "edit.paste_special";
 pub const EDIT_PASTE_WITHOUT_FORMAT: &str = "edit.paste_without_format";
 pub const DOC_NEW_FROM_CLIPBOARD: &str = "doc.new_from_clipboard";
@@ -504,6 +565,8 @@ pub fn can_execute(session: &crate::command::Session, command: &dtool_protocol::
     let has_selection = !selected_roots(session).is_empty();
     let allowed = match command.name.as_str() {
         EDIT_COPY | EDIT_CUT | EDIT_DUPLICATE => has_selection,
+        flattened::COPY_FLATTENED => true,
+        move_duplicate::MOVE_DUPLICATE => move_duplicate::available(session),
         EDIT_PASTE => {
             let payload = payload();
             payload_bundle(&payload).is_some() || paste_text(&payload).is_some()
@@ -522,6 +585,7 @@ pub fn can_execute(session: &crate::command::Session, command: &dtool_protocol::
 pub fn run(session: &mut crate::command::Session, command: &dtool_protocol::Command) -> Option<Result<serde_json::Value, dtool_protocol::CommandError>> {
     let result = match command.name.as_str() {
         EDIT_COPY => copy(session, false),
+        flattened::COPY_FLATTENED => flattened::copy(session),
         EDIT_CUT => copy(session, true),
         EDIT_PASTE => paste(session, command),
         EDIT_PASTE_INSIDE => paste_inside(session),
@@ -529,7 +593,8 @@ pub fn run(session: &mut crate::command::Session, command: &dtool_protocol::Comm
         EDIT_PASTE_FX => paste_fx(session),
         EDIT_PASTE_WITHOUT_FORMAT => paste_without_format(session, command),
         EDIT_DUPLICATE => duplicate(session, command),
-        EDIT_POWER_DUPLICATE => power_duplicate(session),
+        move_duplicate::MOVE_DUPLICATE => move_duplicate::run(session, &command.params),
+        EDIT_POWER_DUPLICATE => power_duplicate(session, EDIT_POWER_DUPLICATE),
         EDIT_PASTE_SPECIAL => paste_special(session, command),
         _ => return None,
     };
@@ -540,6 +605,22 @@ fn ids_json(ids: &[crate::object::ObjectId]) -> serde_json::Value {
     serde_json::json!({ "ids": ids.iter().map(|id| id.0).collect::<Vec<u64>>() })
 }
 
+fn collect_for_edit(session: &crate::Session, roots: &[crate::ObjectId]) -> ClipboardBundle {
+    let mut bundle = collect_bundle(&session.document, roots);
+    let symbols = symbol_clipboard::capture(&session.document, &bundle);
+    let guides: Vec<_> = symbol_clipboard::external_guides(&symbols)
+        .filter(|guide| !bundle.objects.iter().any(|object| object.id == *guide))
+        .filter(|guide| session.document.get_object(*guide).is_some()).collect();
+    if !guides.is_empty() {
+        let ids: Vec<_> = roots.iter().copied().chain(guides).collect();
+        bundle = collect_bundle(&session.document, &ids);
+    }
+    bundle.symbols = symbols;
+    bundle.source_dimensions = Some((session.document.units, session.document.dpi));
+    bundle.symbol_source = session.context;
+    bundle
+}
+
 fn copy(session: &mut crate::command::Session, cut: bool) -> Result<serde_json::Value, dtool_protocol::CommandError> {
     if !session.has_document {
         return Err(dtool_protocol::CommandError::no_document());
@@ -548,21 +629,58 @@ fn copy(session: &mut crate::command::Session, cut: bool) -> Result<serde_json::
     if roots.is_empty() {
         return Err(dtool_protocol::CommandError::invalid_params());
     }
-    let bundle = collect_bundle(&session.document, &roots);
+    let bundle = collect_for_edit(session, &roots);
     if !cut {
         session.clipboard.set_bundle(bundle);
         return Ok(serde_json::json!({ "doc_version": session.generation, "changes": [{ "name": EDIT_COPY }] }));
     }
     let before = crate::commands::arrange::snapshot(session);
-    session.clipboard.set_bundle(bundle);
     remove_subtree(&mut session.document, &roots);
     session.selection.ids.clear();
-    crate::commands::arrange::commit_snapshot(session, EDIT_CUT, before, ids_json(&roots))
+    let result = crate::commands::arrange::commit_snapshot(session, EDIT_CUT, before, ids_json(&roots))?;
+    session.clipboard.set_bundle(bundle);
+    Ok(result)
 }
 
 fn commit_paste(session: &mut crate::command::Session, name: &str, before: crate::commands::arrange::NodeSnapshot, ids: Vec<crate::object::ObjectId>) -> Result<serde_json::Value, dtool_protocol::CommandError> {
     session.selection.set(ids.clone(), crate::selection::SelectOp::Replace);
     crate::commands::arrange::commit_snapshot(session, name, before, ids_json(&ids))
+}
+
+fn paste_objects(
+    session: &mut crate::Session, name: &str, mut bundle: ClipboardBundle,
+    parent: Option<crate::ObjectId>, at: Option<[f32; 2]>, default_offset: [f32; 2],
+) -> crate::CommandResult {
+    let factor = bundle.source_dimensions.map_or(1.0, |(units, dpi)| {
+        crate::doc_setup::unit_factor(units, dpi, session.document.units, session.document.dpi)
+    });
+    if !factor.is_finite() || factor <= 0.0 {
+        return Err(dtool_protocol::CommandError::invalid_params());
+    }
+    if factor != 1.0 {
+        crate::doc_setup::transform_object_dimensions(&mut bundle.objects, factor, [factor; 2], |pos, size, _| {
+            (pos * factor, size * factor)
+        })?;
+    }
+    let offset = at.map_or(default_offset, |at| std::array::from_fn(|axis| {
+        let min = bundle.objects.iter().filter(|object| bundle.roots.contains(&object.id))
+            .map(|object| object.pos[axis]).fold(f32::INFINITY, f32::min);
+        at[axis] - min
+    }));
+    if offset.iter().any(|value| !value.is_finite()) {
+        return Err(dtool_protocol::CommandError::invalid_params());
+    }
+    if !bundle.symbols.is_empty() && symbol_clipboard::can_link_under(&session.document, parent) {
+        let mut document = session.document.clone();
+        let mapping = paste_bundle_mapped(&mut document, &bundle, parent, offset);
+        symbol_clipboard::paste(&mut document, &bundle, &mapping, session.context, offset, factor)?;
+        let ids: Vec<_> = bundle.roots.iter().filter_map(|id| mapping.get(id).copied()).collect();
+        let extra = ids_json(&ids);
+        return crate::commands::document_change::commit(session, name, document, ids, extra);
+    }
+    let before = crate::commands::arrange::snapshot(session);
+    let ids = paste_bundle(&mut session.document, &bundle, parent, offset);
+    commit_paste(session, name, before, ids)
 }
 
 fn paste(session: &mut crate::command::Session, command: &dtool_protocol::Command) -> Result<serde_json::Value, dtool_protocol::CommandError> {
@@ -581,18 +699,7 @@ fn paste(session: &mut crate::command::Session, command: &dtool_protocol::Comman
         return paste_plain_text(session, &text, at);
     }
     let bundle = payload_bundle(&payload).ok_or_else(dtool_protocol::CommandError::invalid_params)?;
-    let offset = match at {
-        Some(at) => {
-            let roots: Vec<&Object> = bundle.objects.iter().filter(|o| bundle.roots.contains(&o.id)).collect();
-            let min_x = roots.iter().map(|o| o.pos[0]).fold(f32::INFINITY, f32::min);
-            let min_y = roots.iter().map(|o| o.pos[1]).fold(f32::INFINITY, f32::min);
-            [at[0] - min_x, at[1] - min_y]
-        }
-        None => [PASTE_STEP, PASTE_STEP],
-    };
-    let before = crate::commands::arrange::snapshot(session);
-    let ids = paste_bundle(&mut session.document, &bundle, None, offset);
-    commit_paste(session, EDIT_PASTE, before, ids)
+    paste_objects(session, EDIT_PASTE, bundle, None, at, [PASTE_STEP; 2])
 }
 
 fn paste_special(session: &mut crate::command::Session, command: &dtool_protocol::Command) -> Result<serde_json::Value, dtool_protocol::CommandError> {
@@ -652,9 +759,7 @@ fn paste_inside(session: &mut crate::command::Session) -> Result<serde_json::Val
         return Err(dtool_protocol::CommandError::invalid_params());
     }
     let bundle = payload_bundle(&session.clipboard.get_payload()).ok_or_else(dtool_protocol::CommandError::invalid_params)?;
-    let before = crate::commands::arrange::snapshot(session);
-    let ids = paste_bundle(&mut session.document, &bundle, Some(container), [0.0, 0.0]);
-    commit_paste(session, EDIT_PASTE_INSIDE, before, ids)
+    paste_objects(session, EDIT_PASTE_INSIDE, bundle, Some(container), None, [0.0; 2])
 }
 
 fn style_source(payload: &ClipboardPayload) -> Result<(Option<crate::paint::Paint>, Option<crate::paint::StrokeStyle>, Option<f32>), dtool_protocol::CommandError> {
@@ -761,14 +866,17 @@ fn new_document_from_bundle(workspace: &mut crate::workspace::Workspace, bundle:
         return Err(dtool_protocol::CommandError::invalid_params());
     }
     let size = [(max[0] - min[0]).max(1.0), (max[1] - min[1]).max(1.0)];
-    let mut doc = crate::document::Document::default();
-    match doc.pages.first_mut() {
-        Some(page) => page.size = size,
-        None => doc = crate::document::Document::new(size, doc.units, doc.dpi, 1),
-    }
+    let (units, dpi) = bundle.source_dimensions.unwrap_or_else(|| {
+        let default = crate::document::Document::default();
+        (default.units, default.dpi)
+    });
+    let mut doc = crate::document::Document::new(size, units, dpi, 1);
+    let offset = [-min[0], -min[1]];
+    let mapping = paste_bundle_mapped(&mut doc, bundle, None, offset);
+    symbol_clipboard::paste(&mut doc, bundle, &mapping, None, offset, 1.0)?;
+    let ids: Vec<_> = bundle.roots.iter().filter_map(|id| mapping.get(id).copied()).collect();
     let id = workspace.insert_context("", None, doc, 0);
     let session = &mut workspace.get_mut(id).ok_or_else(dtool_protocol::CommandError::context_not_found)?.session;
-    let ids = paste_bundle(&mut session.document, bundle, None, [-min[0], -min[1]]);
     session.selection.set(ids, crate::selection::SelectOp::Replace);
     session.undo = crate::undo::UndoStack::default();
     Ok(id)
@@ -828,31 +936,53 @@ fn duplicate(session: &mut crate::command::Session, command: &dtool_protocol::Co
     } else {
         [0.0, 0.0]
     };
-    duplicate_selection(session, EDIT_DUPLICATE, offset)
+    // Preserve the free-space placement of an ordinary artboard duplicate.
+    let can_repeat = !session.last_duplicate_steps.is_empty()
+        || (offset == [0.0, 0.0] && session.last_transform_delta.is_some());
+    if can_repeat && !roots.is_empty() && roots == session.last_duplicate_ids
+        && session.duplicate_revision == Some(session.undo.revision())
+    {
+        return power_duplicate(session, EDIT_DUPLICATE);
+    }
+    duplicate_roots(session, EDIT_DUPLICATE, &roots, offset)
 }
 
 pub fn duplicate_selection(session: &mut crate::command::Session, name: &str, offset: [f32; 2]) -> Result<serde_json::Value, dtool_protocol::CommandError> {
     let roots = selected_roots(session);
+    duplicate_roots(session, name, &roots, offset)
+}
+
+fn copy_duplicate_roots(doc: &mut crate::Document, roots: &[crate::ObjectId], offset: [f32; 2]) -> Vec<crate::ObjectId> {
+    let bundle = collect_bundle_with_guides(doc, roots, true);
+    let mapping = paste_bundle_mapped(doc, &bundle, None, offset);
+    let ids = bundle.roots.iter().filter_map(|original| {
+        let id = *mapping.get(original)?;
+        let parent = doc.get_object(*original).and_then(|object| object.parent_id);
+        crate::artboard::edit::name_duplicate(doc, id);
+        if let Some(object) = doc.find_object_mut(id.0) {
+            object.parent_id = parent;
+        }
+        Some(id)
+    }).collect();
+    symbol_clipboard::duplicate(doc, &mapping, offset);
+    ids
+}
+
+pub(crate) fn duplicate_roots(session: &mut crate::command::Session, name: &str, roots: &[crate::ObjectId], offset: [f32; 2]) -> Result<serde_json::Value, dtool_protocol::CommandError> {
     if roots.is_empty() {
         return Err(dtool_protocol::CommandError::invalid_params());
     }
-    let bundle = collect_bundle(&session.document, &roots);
-    let parents: Vec<Option<crate::object::ObjectId>> = bundle.roots.iter().map(|id| session.document.get_object(*id).and_then(|o| o.parent_id)).collect();
     let before = crate::commands::arrange::snapshot(session);
-    let ids = paste_bundle(&mut session.document, &bundle, None, offset);
-    for (id, parent) in ids.iter().zip(parents) {
-        crate::artboard::edit::name_duplicate(&mut session.document, *id);
-        if let Some(object) = session.document.find_object_mut(id.0) {
-            object.parent_id = parent;
-        }
-    }
+    let ids = copy_duplicate_roots(&mut session.document, roots, offset);
     session.last_duplicate_ids = ids.clone();
     session.last_transform_delta = (offset != [0.0, 0.0]).then_some(offset);
     session.last_duplicate_steps.clear();
-    commit_paste(session, name, before, ids)
+    let result = commit_paste(session, name, before, ids)?;
+    session.duplicate_revision = Some(session.undo.revision());
+    Ok(result)
 }
 
-fn power_duplicate(session: &mut crate::command::Session) -> Result<serde_json::Value, dtool_protocol::CommandError> {
+fn power_duplicate(session: &mut crate::command::Session, name: &str) -> Result<serde_json::Value, dtool_protocol::CommandError> {
     if session.last_transform_delta.is_none() && session.last_duplicate_steps.is_empty() {
         return Err(dtool_protocol::CommandError::invalid_params());
     }
@@ -861,16 +991,8 @@ fn power_duplicate(session: &mut crate::command::Session) -> Result<serde_json::
     if sources.is_empty() || sources.iter().any(|id| session.document.get_object(*id).is_none()) {
         return Err(dtool_protocol::CommandError::invalid_params());
     }
-    let bundle = collect_bundle(&session.document, &sources);
-    let parents: Vec<Option<crate::object::ObjectId>> = bundle.roots.iter().map(|id| session.document.get_object(*id).and_then(|o| o.parent_id)).collect();
     let before = crate::commands::arrange::snapshot(session);
-    let ids = paste_bundle(&mut session.document, &bundle, None, delta);
-    for (id, parent) in ids.iter().zip(parents) {
-        crate::artboard::edit::name_duplicate(&mut session.document, *id);
-        if let Some(object) = session.document.find_object_mut(id.0) {
-            object.parent_id = parent;
-        }
-    }
+    let ids = copy_duplicate_roots(&mut session.document, &sources, delta);
     for mut step in session.last_duplicate_steps.clone() {
         let objects: Vec<Object> = ids.iter().filter_map(|id| session.document.get_object(*id).cloned()).collect();
         let centre = box_centre(&objects);
@@ -881,5 +1003,7 @@ fn power_duplicate(session: &mut crate::command::Session) -> Result<serde_json::
         }
     }
     session.last_duplicate_ids = ids.clone();
-    commit_paste(session, EDIT_POWER_DUPLICATE, before, ids)
+    let result = commit_paste(session, name, before, ids)?;
+    session.duplicate_revision = Some(session.undo.revision());
+    Ok(result)
 }

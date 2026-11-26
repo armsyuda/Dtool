@@ -48,7 +48,7 @@ impl FindFormat {
                 ui.end_row();
             }
             ui.label(text("find.format.italic"));
-            ui.checkbox(&mut self.italic, "");
+            dtool_design::toggle(ui, &mut self.italic, "");
             ui.end_row();
         });
     }
@@ -133,9 +133,9 @@ impl FindPanel {
                 ui.text_edit_singleline(&mut self.replacement);
             });
             ui.horizontal(|ui| {
-                ui.checkbox(&mut self.regex, text("find.regex"));
-                ui.checkbox(&mut self.case_sensitive, text("find.match_case"));
-                ui.checkbox(&mut self.whole_word, text("find.whole_word"));
+                dtool_design::toggle(ui, &mut self.regex, text("find.regex"));
+                dtool_design::toggle(ui, &mut self.case_sensitive, text("find.match_case"));
+                dtool_design::toggle(ui, &mut self.whole_word, text("find.whole_word"));
                 let labels: Vec<&str> = FIND_SCOPES.iter().map(|(_, key)| text(key)).collect();
                 let mut index = FIND_SCOPES.iter().position(|(scope, _)| *scope == self.scope).unwrap_or(0);
                 if dtool_design::dropdown(ui, "find.scope", &mut index, &labels).changed() {

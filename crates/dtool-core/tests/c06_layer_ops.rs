@@ -57,7 +57,7 @@ fn merge_retargets_placed_image_and_mask_without_dropping_resource() {
     let front = session.document.create_object(raster_object("B", [2.0, 0.0], [2.0, 2.0], 2, 2, [0, 255, 0, 255]));
     let resource = session.document.add_image_resource(ImageResource { pixel_size: [2, 2], dpi: 72.0, ..ImageResource::default() });
     session.document.place_image(front, resource).unwrap();
-    session.document.layer_masks.push(LayerMask { object: front, coverage: PixelSelection::all(2, 2) });
+    session.document.layer_masks.push(LayerMask::new(front, PixelSelection::all(2, 2)));
     let reply = session.run(&Command::with_params("node.merge", json!({ "nodes": [back.0, front.0] }))).unwrap();
     assert_eq!(reply["resource"], resource.0);
     assert!(session.document.image_resource(resource).is_some());

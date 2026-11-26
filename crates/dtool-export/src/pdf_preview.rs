@@ -27,6 +27,17 @@ pub(super) fn render_page(
     dpi: f32,
     options: &ExportOptions,
 ) -> Result<RgbaImage, ExportError> {
+    // Windows.Data.Pdf skips function-based shadings, including conical fills
+    // and strokes. Interpret the same exported PDF with a renderer that handles them.
+    if let Ok(document) = hayro::hayro_syntax::Pdf::new(pdf.to_vec())
+        && document.objects().into_iter().any(|object| {
+            object.into_dict().and_then(|dict| {
+                dict.get::<hayro::hayro_syntax::object::Number>(b"ShadingType")
+            }).is_some_and(|kind| kind.as_i64() == 1)
+        })
+    {
+        return render_function_shading_page(&document, page_index, dpi, options);
+    }
     // The GUI thread may already have a single-threaded COM apartment.
     std::thread::scope(|scope| {
         scope
@@ -34,6 +45,46 @@ pub(super) fn render_page(
             .join()
             .map_err(|_| ExportError::Io("PDF preview worker failed".into()))?
     })
+}
+
+fn render_function_shading_page(
+    document: &hayro::hayro_syntax::Pdf,
+    page_index: u32,
+    dpi: f32,
+    options: &ExportOptions,
+) -> Result<RgbaImage, ExportError> {
+    use hayro::{RenderCache, RenderSettings, hayro_interpret::InterpreterSettings, kurbo::Affine};
+    use hayro::vello_cpu::{Pixmap, RasterizerSettings, RenderContext, Resources, TargetInit, color::palette::css::WHITE};
+
+    let page = document.pages().get(page_index as usize).ok_or_else(|| ExportError::InvalidArea("pages".into()))?;
+    let (page_width, page_height) = page.render_dimensions();
+    if !(page_width > 0.0 && page_height > 0.0 && page_width.is_finite() && page_height.is_finite()) {
+        return Err(ExportError::InvalidArea("pages".into()));
+    }
+    let (width, height) = preview_size(page_width, page_height, dpi, options)?;
+    let mut context = RenderContext::new(width as u16, height as u16);
+    let scale = Affine::scale_non_uniform(f64::from(width) / f64::from(page_width), f64::from(height) / f64::from(page_height));
+    hayro::render_into(
+        page,
+        &RenderCache::new(),
+        &InterpreterSettings::default(),
+        &RenderSettings::default(),
+        &mut context,
+        scale * Affine::new(page.initial_transform(true).as_coeffs()),
+    );
+    context.flush();
+    let mut pixels = Pixmap::new(width as u16, height as u16);
+    context.render_with(&mut pixels, &mut Resources::default(), RasterizerSettings {
+        target_init: TargetInit::Clear(WHITE),
+        ..Default::default()
+    });
+    RgbaImage::from_raw(width, height, pixels.data_as_u8_slice().to_vec())
+        .ok_or_else(|| ExportError::Io("PDF preview pixel buffer has an invalid size".into()))
+}
+
+fn preview_size(width_pt: f32, height_pt: f32, dpi: f32, options: &ExportOptions) -> Result<(u32, u32), ExportError> {
+    let dpi = if dpi.is_finite() && dpi > 0.0 { dpi } else { 72.0 };
+    target_size((0.0, 0.0, width_pt * dpi / 72.0, height_pt * dpi / 72.0), dpi, options)
 }
 
 fn render_in_apartment(
@@ -54,12 +105,7 @@ fn render_in_apartment(
         .map_err(io_error)?;
     let page = document.GetPage(page_index).map_err(io_error)?;
     let size = page.Size().map_err(io_error)?;
-    let dpi = if dpi.is_finite() && dpi > 0.0 { dpi } else { 72.0 };
-    let (width, height) = target_size(
-        (0.0, 0.0, size.Width * dpi / 96.0, size.Height * dpi / 96.0),
-        dpi,
-        options,
-    )?;
+    let (width, height) = preview_size(size.Width * 72.0 / 96.0, size.Height * 72.0 / 96.0, dpi, options)?;
     let render = PdfPageRenderOptions::new().map_err(io_error)?;
     render.SetDestinationWidth(width).map_err(io_error)?;
     render.SetDestinationHeight(height).map_err(io_error)?;

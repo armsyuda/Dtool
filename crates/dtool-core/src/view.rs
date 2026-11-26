@@ -237,11 +237,47 @@ pub fn fit_scroll(page_size: [f32; 2], view_size: [f32; 2], zoom: f32, rotation_
     [view_size[0] * 0.5 - centre[0], view_size[1] * 0.5 - centre[1]]
 }
 
-pub fn clamp_zoom(zoom: f32) -> f32 {
-    if zoom.is_nan() {
-        return 1.0;
+/// Magnification limits relative to the calibrated actual-size zoom.
+#[derive(Clone, Copy)]
+pub struct ZoomLimits(f32);
+
+impl Default for ZoomLimits {
+    fn default() -> Self {
+        Self(1.0)
     }
-    zoom.clamp(ZOOM_MIN, ZOOM_MAX)
+}
+
+impl ZoomLimits {
+    pub fn for_actual(actual: f32) -> Self {
+        if actual.is_finite() && actual >= f32::MIN_POSITIVE / ZOOM_MIN && actual <= f32::MAX / ZOOM_MAX {
+            Self(actual)
+        } else {
+            Self::default()
+        }
+    }
+
+    pub fn clamp(self, zoom: f32) -> f32 {
+        if zoom.is_nan() {
+            return self.0;
+        }
+        zoom.clamp(self.0 * ZOOM_MIN, self.0 * ZOOM_MAX)
+    }
+
+    pub fn zoom_about(self, state: &mut ViewState, zoom: f32, pivot: [f32; 2]) {
+        set_zoom_about(state, self.clamp(zoom), pivot);
+    }
+
+    pub fn fit(self, page_size: [f32; 2], view_size: [f32; 2], rotation_deg: f32) -> f32 {
+        let [width, height] = rotated_bounds(page_size, rotation_deg);
+        if width <= 0.0 || height <= 0.0 {
+            return self.0 * ZOOM_MIN;
+        }
+        self.clamp((view_size[0] / width).min(view_size[1] / height))
+    }
+}
+
+pub fn clamp_zoom(zoom: f32) -> f32 {
+    ZoomLimits::default().clamp(zoom)
 }
 
 fn safe_zoom(zoom: f32) -> f32 {
@@ -263,8 +299,11 @@ pub fn doc_to_canvas(state: &ViewState, canvas_min: [f32; 2], doc: [f32; 2]) -> 
 }
 
 pub fn zoom_about(state: &mut ViewState, zoom: f32, pivot: [f32; 2]) {
+    ZoomLimits::default().zoom_about(state, zoom, pivot);
+}
+
+pub(crate) fn set_zoom_about(state: &mut ViewState, zoom: f32, pivot: [f32; 2]) {
     let old = safe_zoom(state.zoom);
-    let zoom = clamp_zoom(zoom);
     let doc_x = (pivot[0] - state.scroll[0]) / old;
     let doc_y = (pivot[1] - state.scroll[1]) / old;
     state.scroll = [pivot[0] - doc_x * zoom, pivot[1] - doc_y * zoom];
@@ -288,16 +327,7 @@ pub fn visible_doc_quad(state: &ViewState, view_size: [f32; 2]) -> [[f32; 2]; 4]
 }
 
 pub fn fit_zoom(page_size: [f32; 2], view_size: [f32; 2], rotation_deg: f32) -> f32 {
-    let [rotated_w, rotated_h] = rotated_bounds(page_size, rotation_deg);
-
-    if rotated_w <= 0.0 || rotated_h <= 0.0 {
-        return ZOOM_MIN;
-    }
-
-    let zoom_x = view_size[0] / rotated_w;
-    let zoom_y = view_size[1] / rotated_h;
-
-    clamp_zoom(zoom_x.min(zoom_y))
+    ZoomLimits::default().fit(page_size, view_size, rotation_deg)
 }
 
 pub fn view_to_doc(state: &ViewState, point: [f32; 2]) -> [f32; 2] {

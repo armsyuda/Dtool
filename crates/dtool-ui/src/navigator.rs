@@ -1,172 +1,207 @@
-use dtool_core::{CanvasFlags, Document, ViewState};
-use dtool_design;
+use dtool_core::{CanvasFlags, ContextId, Document, Session, ViewState};
+use dtool_core::view::{ViewTarget, ZoomLimits};
 use dtool_strings::text;
+use egui::{ColorImage, Pos2, Rect, TextureHandle, TextureOptions, vec2};
 
+type ThumbnailRevision = (Option<ContextId>, u64, u64, CanvasFlags);
+type NavigatorImage = ([f32; 4], Vec<dtool_core::scene::Quad>, ColorImage);
+
+struct NavigatorThumbnail {
+    bounds: [f32; 4],
+    paper: Vec<dtool_core::scene::Quad>,
+    texture: TextureHandle,
+}
+const THUMBNAIL_PIXELS: f32 = 256.0;
+
+#[derive(Default)]
 pub struct NavigatorPanel {
     pub view_box_dragging: bool,
     pub drag_start_view: [f32; 2],
     pub drag_start_scroll: [f32; 2],
-}
-
-impl Default for NavigatorPanel {
-    fn default() -> Self {
-        Self {
-            view_box_dragging: false,
-            drag_start_view: [0.0, 0.0],
-            drag_start_scroll: [0.0, 0.0],
-        }
-    }
+    thumbnail: Option<(ThumbnailRevision, Option<NavigatorThumbnail>)>,
+    pub(crate) navigation_changed: bool,
+    job: Option<crate::panels::ThumbnailJob<ThumbnailRevision, Option<NavigatorImage>>>,
 }
 
 impl NavigatorPanel {
     pub fn show(
         &mut self,
         ui: &mut egui::Ui,
-        state: &ViewState,
-        thumbnail: &Document,
-        page_size: [f32; 2],
+        session: Option<&Session>,
         view_size: [f32; 2],
-        actual: f32,
-        show_guides: bool,
-        show_bleed: bool,
         on_pan: &dyn Fn([f32; 2]),
         on_zoom_set: &dyn Fn(f32),
         on_toggle_guides: &dyn Fn(bool),
         on_toggle_bleed: &dyn Fn(bool),
     ) {
-        let thumb_bg = dtool_design::color("navigator.thumb.bg");
-        let view_box_stroke = dtool_design::color("navigator.viewbox.stroke");
-        let view_box_fill = dtool_design::color("navigator.viewbox.fill");
+        let actual = session.map_or(1.0, Session::actual_zoom);
+        let zoom = session.map_or(actual, |session| session.view.zoom);
+        ui.add_enabled_ui(session.is_some(), |ui| zoom_controls(ui, zoom, actual, on_zoom_set));
+        ui.separator();
 
-        let header_text = text("panel.navigator.title");
-        dtool_design::panel_header(ui, header_text);
-
-        let thumb_size = [
-            dtool_design::space("nav.thumb.width"),
-            dtool_design::space("nav.thumb.height"),
-        ];
-
-        let (thumb_rect, response) = ui.allocate_exact_size(
-            egui::vec2(thumb_size[0], thumb_size[1]),
-            egui::Sense::click_and_drag(),
-        );
-
-        if response.drag_started() {
-            self.view_box_dragging = true;
-            self.drag_start_view = [response.interact_pointer_pos().unwrap_or_default()[0], response.interact_pointer_pos().unwrap_or_default()[1]];
-            self.drag_start_scroll = state.scroll;
-        }
-
-        let drag_scale = (thumb_size[0] / page_size[0].max(1.0)).min(thumb_size[1] / page_size[1].max(1.0));
-        if response.dragged() && self.view_box_dragging {
-            let d = response.drag_delta();
-            if d.x != 0.0 || d.y != 0.0 {
-                on_pan(view_box_drag_pan(state, [d.x, d.y], drag_scale));
-            }
-        }
-
+        let width = ui.available_width().max(1.0);
+        let height = (ui.available_height() - 46.0).clamp(64.0,
+            (width * 1.1).max(dtool_design::space("nav.thumb.height")));
+        let (rect, response) = ui.allocate_exact_size(vec2(width, height), egui::Sense::click_and_drag());
+        ui.painter().rect_filled(rect, dtool_design::radius("nav.thumb.radius"), dtool_design::color("navigator.thumb.bg"));
         if response.drag_stopped() {
             self.view_box_dragging = false;
         }
+        let Some(session) = session else {
+            self.thumbnail = None;
+            self.view_box_dragging = false;
+            return;
+        };
+        let state = &session.view;
+        self.update_thumbnail(ui.ctx(), session);
 
-        if response.clicked() {
+        if let Some((_, Some(thumbnail))) = &self.thumbnail {
+            let [x, y, width, height] = thumbnail.bounds;
+            let scale = (rect.width() / width).min(rect.height() / height);
+            let image_rect = Rect::from_center_size(rect.center(), vec2(width * scale, height * scale));
+            let origin = image_rect.min - vec2(x * scale, y * scale);
+            let painter = ui.painter_at(rect);
+            for quad in &thumbnail.paper {
+                let corners = quad.map(|[x, y]| origin + vec2(x * scale, y * scale));
+                painter.add(egui::Shape::convex_polygon(corners.to_vec(), egui::Color32::WHITE, egui::Stroke::NONE));
+            }
+            painter.image(thumbnail.texture.id(), image_rect, Rect::from_min_max(Pos2::ZERO, egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
+
+            let quad = view_box_quad(state, view_size, [origin.x, origin.y], scale);
+            let points = quad.map(|point| egui::pos2(point[0], point[1])).to_vec();
+            let edge = dtool_design::stroke_width("thin").max(1.0);
+            painter.add(egui::Shape::convex_polygon(points, dtool_design::color("navigator.viewbox.fill"),
+                egui::Stroke::new(edge, dtool_design::color("navigator.viewbox.stroke"))));
+
             if let Some(point) = response.interact_pointer_pos() {
-                let ox = (thumb_size[0] - page_size[0] * drag_scale) * 0.5;
-                let oy = (thumb_size[1] - page_size[1] * drag_scale) * 0.5;
-                let doc_point = [((point.x-thumb_rect.left()-ox)/drag_scale).clamp(0.0,page_size[0]),
-                    ((point.y-thumb_rect.top()-oy)/drag_scale).clamp(0.0,page_size[1])];
-                let view_point = dtool_core::doc_to_view(state, doc_point);
-                on_pan([view_size[0]*0.5-view_point[0],view_size[1]*0.5-view_point[1]]);
+                if response.drag_started() {
+                    self.view_box_dragging = true;
+                    self.drag_start_view = (point - response.total_drag_delta().unwrap_or_default()).into();
+                    self.drag_start_scroll = state.scroll;
+                }
+                if response.dragged() && self.view_box_dragging {
+                    let delta = [point.x - self.drag_start_view[0], point.y - self.drag_start_view[1]];
+                    let pan = view_box_drag_pan(state, delta, scale);
+                    let remaining = std::array::from_fn(|axis| self.drag_start_scroll[axis] + pan[axis] - state.scroll[axis]);
+                    if remaining != [0.0, 0.0] {
+                        on_pan(remaining);
+                    }
+                }
+            }
+            if response.clicked()
+                && let Some(point) = response.interact_pointer_pos()
+            {
+                let doc = (image_rect.clamp(point) - origin) / scale;
+                let shown = dtool_core::doc_to_view(state, [doc.x, doc.y]);
+                on_pan([view_size[0] * 0.5 - shown[0], view_size[1] * 0.5 - shown[1]]);
             }
         }
-
-        let painter = ui.painter();
-
-        painter.rect_filled(
-            thumb_rect,
-            dtool_design::radius("nav.thumb.radius"),
-            thumb_bg,
-        );
-
-        let scale_x = thumb_size[0] / page_size[0].max(1.0);
-        let scale_y = thumb_size[1] / page_size[1].max(1.0);
-        let scale = scale_x.min(scale_y);
-
-        let offset_x = (thumb_size[0] - page_size[0] * scale) * 0.5;
-        let offset_y = (thumb_size[1] - page_size[1] * scale) * 0.5;
-
-        let thumb_items = thumbnail_item_bounds(thumbnail, &state.canvas_flags);
-        if !thumb_items.is_empty() {
-            for bounds in thumb_items {
-                let x0 = thumb_rect.min.x + offset_x + bounds[0] * scale;
-                let y0 = thumb_rect.min.y + offset_y + bounds[1] * scale;
-                let x1 = thumb_rect.min.x + offset_x + (bounds[0] + bounds[2]) * scale;
-                let y1 = thumb_rect.min.y + offset_y + (bounds[1] + bounds[3]) * scale;
-
-                painter.rect_filled(
-                    egui::Rect::from_min_max(egui::pos2(x0, y0), egui::pos2(x1, y1)),
-                    0.0,
-                    dtool_design::color("navigator.thumb.item"),
-                );
-            }
-        } else {
-            let x0 = thumb_rect.min.x + offset_x;
-            let y0 = thumb_rect.min.y + offset_y;
-            let x1 = thumb_rect.min.x + offset_x + page_size[0] * scale;
-            let y1 = thumb_rect.min.y + offset_y + page_size[1] * scale;
-
-            painter.rect_filled(
-                egui::Rect::from_min_max(egui::pos2(x0, y0), egui::pos2(x1, y1)),
-                0.0,
-                dtool_design::color("navigator.thumb.page"),
-            );
-        }
-
-        let origin = [thumb_rect.min.x + offset_x, thumb_rect.min.y + offset_y];
-        let quad = view_box_quad(state, view_size, origin, scale);
-        let points: Vec<egui::Pos2> = quad.iter().map(|p| egui::pos2(p[0], p[1])).collect();
-        let edge = dtool_design::stroke_width("thin").max(1.0);
-        painter.with_clip_rect(thumb_rect).add(egui::Shape::convex_polygon(points, view_box_fill, egui::Stroke::new(edge, view_box_stroke)));
-
-        ui.add_space(dtool_design::space("sm"));
-
-        let zoom_min = dtool_tools::ZOOM_MIN;
-        let zoom_max = dtool_tools::ZOOM_MAX;
-
-        let mut slider_value = state.zoom / actual;
-        let slider_response = dtool_design::slider(
-            ui,
-            &mut slider_value,
-            zoom_min..=zoom_max,
-            text("panel.navigator.zoom"),
-        );
-
-        if slider_response.changed() {
-            on_zoom_set(dtool_tools::clamp_zoom(slider_value * actual));
-        }
-
-        if response.hovered() && ui.input(|i| i.pointer.has_pointer()) {
-            let zoom_delta = ui.input(|i| i.smooth_scroll_delta.y);
-            if zoom_delta != 0.0 {
-                let new_zoom = dtool_tools::clamp_zoom(state.zoom * (1.0 + zoom_delta * 0.01));
-                on_zoom_set(new_zoom);
+        if response.hovered() {
+            let wheel = ui.input_mut(|input| std::mem::take(&mut input.smooth_scroll_delta.y));
+            if wheel != 0.0 {
+                let zoom = ZoomLimits::for_actual(actual).clamp(zoom * (wheel * 0.004).exp());
+                on_zoom_set(zoom);
             }
         }
 
         ui.add_space(dtool_design::space("sm"));
-
-        let mut show_guides = show_guides;
-        if dtool_design::toggle(ui, &mut show_guides, text("panel.navigator.show_guides")).changed() {
-            on_toggle_guides(show_guides);
+        let mut guides = session.guides.show;
+        if dtool_design::toggle(ui, &mut guides, text("panel.navigator.show_guides")).changed() {
+            on_toggle_guides(guides);
         }
+        let mut bleed = state.canvas_flags.show_bleed;
+        if dtool_design::toggle(ui, &mut bleed, text("panel.navigator.show_bleed")).changed() {
+            on_toggle_bleed(bleed);
+        }
+    }
 
-        let mut show_bleed = show_bleed;
-        if dtool_design::toggle(ui, &mut show_bleed, text("panel.navigator.show_bleed")).changed() {
-            on_toggle_bleed(show_bleed);
+    fn update_thumbnail(&mut self, ctx: &egui::Context, session: &Session) {
+        use std::sync::mpsc::TryRecvError;
+
+        let flags = &session.view.canvas_flags;
+        let revision = (session.context, session.generation, session.document.version, flags.clone());
+        if self.thumbnail.as_ref().is_some_and(|(old, ..)| old.0 != revision.0 || old.3 != revision.3) {
+            self.thumbnail = None;
+            self.view_box_dragging = false;
+        }
+        if let Some(job) = &self.job {
+            match job.result.try_recv() {
+                Ok(image) if job.revision == revision => {
+                    let image = image.map(|(bounds, paper, image)| NavigatorThumbnail {
+                        bounds, paper,
+                        texture: ctx.load_texture("navigator overview", image, TextureOptions::LINEAR),
+                    });
+                    self.thumbnail = Some((revision.clone(), image));
+                }
+                Ok(_) | Err(TryRecvError::Disconnected) => {}
+                Err(TryRecvError::Empty) => return,
+            }
+            self.job = None;
+        }
+        if self.thumbnail.as_ref().is_none_or(|(stamp, ..)| stamp != &revision) {
+            let doc = session.document.clone();
+            let flags = flags.clone();
+            self.job = crate::panels::ThumbnailJob::start(ctx, "dtool-navigator-thumbnail", revision,
+                move || navigator_image(&doc, &flags)).ok();
         }
     }
 }
 
+fn zoom_controls(ui: &mut egui::Ui, zoom: f32, actual: f32, on_zoom_set: &dyn Fn(f32)) {
+    let min = dtool_core::ZOOM_MIN * 100.0;
+    let max = dtool_core::ZOOM_MAX * 100.0;
+    let mut percent = (zoom / actual * 10_000.0).round() / 100.0;
+    let mut changed = false;
+    let label = text("panel.navigator.zoom");
+    let limits = ZoomLimits::for_actual(actual);
+    ui.horizontal(|ui| {
+        let width = 20.0;
+        let input_width = (ui.available_width() - 2.0 * width - 3.0 * ui.spacing().item_spacing.x).clamp(30.0, 62.0);
+        let rail_width = ui.available_width() - 2.0 * width - input_width - 3.0 * ui.spacing().item_spacing.x;
+        if ui.add_sized([width, ui.spacing().interact_size.y], egui::Button::new("−"))
+            .on_hover_text(text("context.zoom.out")).clicked()
+        {
+            on_zoom_set(limits.clamp(zoom / dtool_core::command::ZOOM_STEP));
+        }
+        if rail_width >= 12.0 {
+            changed |= dtool_design::logarithmic_slider_rail(ui, &mut percent, min..=max, rail_width, label,
+                ui.is_enabled(), f64::from(min)).changed();
+        }
+        if ui.add_sized([width, ui.spacing().interact_size.y], egui::Button::new("+"))
+            .on_hover_text(text("context.zoom.in")).clicked()
+        {
+            on_zoom_set(limits.clamp(zoom * dtool_core::command::ZOOM_STEP));
+        }
+        let field = egui::DragValue::new(&mut percent).range(min..=max).suffix(" %").max_decimals(2)
+            .clamp_existing_to_range(false).update_while_editing(false);
+        changed |= ui.add_sized([input_width, ui.spacing().interact_size.y], field).on_hover_text(label).changed();
+    });
+    if changed {
+        on_zoom_set(limits.clamp(percent / 100.0 * actual));
+    }
+}
+
+fn navigator_image(doc: &Document, flags: &CanvasFlags) -> Option<NavigatorImage> {
+    let pages = dtool_core::scene::page_rects(doc).into_iter().enumerate()
+        .filter(|(index, _)| !dtool_core::artboard::edit::is_backing_page(doc, *index))
+        .map(|(_, rect)| dtool_core::geometry::rect_quad(rect, &dtool_core::scene::IDENTITY));
+    let boards = ViewTarget::artboards(doc).map(dtool_core::geometry::object_world_quad);
+    let paper: Vec<_> = pages.chain(boards).filter(|quad| quad.iter().flatten().all(|v| v.is_finite())).collect();
+    let [x, y, right, bottom] = paper.iter().flatten().copied()
+        .map(|[x, y]| [x, y, x, y])
+        .reduce(|a, b| [a[0].min(b[0]), a[1].min(b[1]), a[2].max(b[2]), a[3].max(b[3])])?;
+    let [width, height] = [right - x, bottom - y];
+    if ![width, height].iter().all(|side| side.is_finite() && *side > 0.0) {
+        return None;
+    }
+    let bounds = [x, y, width, height];
+    let scale = THUMBNAIL_PIXELS / width.max(height);
+    let [w, h] = [width, height].map(|axis| (axis * scale).round().max(1.0) as u32);
+    let pixels = dtool_render::scene::with_fill_antialiasing(|| {
+        dtool_core::layer_style::raster::render_region(doc, flags, &[], bounds, w, h)
+    });
+    Some((bounds, paper, ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &pixels)))
+}
 
 fn adjust_thumbnail_bounds(doc: &Document, flags: &CanvasFlags, mut bounds: [f32; 4]) -> Option<[f32; 4]> {
     if flags.force_pixel_alignment {

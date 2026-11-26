@@ -123,6 +123,7 @@ fn convert(session: &mut Session, name: &str, params: &Value) -> CommandResult {
     let ids: Vec<u64> = plan.iter().map(|(id, _)| id.0).collect();
     let edited = edit.is_some();
     let converted_text = plan.iter().any(|(_, conversion)| matches!(conversion, Conversion::Text(_)));
+    let compound_tolerance = crate::boolean::compound_conversion_tolerance(&session.document);
     for (id, conversion) in plan {
         match conversion {
             Conversion::Shape(mut curve) => {
@@ -143,7 +144,7 @@ fn convert(session: &mut Session, name: &str, params: &Value) -> CommandResult {
             Conversion::Compound => {
                 let object = session.document.find_object_mut(id.0).expect("planned compound");
                 let ObjectKind::Compound(spec) = &object.kind else { unreachable!("planned compound") };
-                match crate::boolean::expanded_compound_curve(spec, crate::boolean::DEFAULT_TOLERANCE) {
+                match crate::boolean::expanded_compound_curve(object, spec, compound_tolerance, None) {
                     Ok(curve) => object.kind = ObjectKind::Curve(curve),
                     Err(error) => {
                         crate::commands::arrange::restore(session, &before);

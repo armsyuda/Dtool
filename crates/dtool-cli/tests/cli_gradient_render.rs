@@ -17,7 +17,7 @@ fn cli_gradient_fill_renders_more_than_one_colour() {
     workspace.activate(id).unwrap();
     let shared = workspace.into_shared();
     let stops = vec![GradientStop { offset: 0.0, colour: Colour::new(255, 0, 0, 255) }, GradientStop { offset: 1.0, colour: Colour::new(0, 0, 255, 255) }];
-    let fill = Paint::Gradient { kind: GradientKind::Linear, stops, geom: GradientGeom { start: [0.0, 10.0], end: [100.0, 10.0], ratio: 1.0 } };
+    let fill = Paint::Gradient { kind: GradientKind::Linear, stops, geom: GradientGeom { start: [0.0, 10.0], end: [100.0, 10.0], ratio: 1.0, ..GradientGeom::default() } };
     run(&shared, "object.create", json!({ "pos": [0.0, 0.0], "size": [100.0, 20.0], "fill": serde_json::to_value(&fill).unwrap() }));
     let samples: Vec<Vec<u64>> = [2.0, 50.0, 98.0].iter().map(|x| rgba(&run(&shared, "color.pick", json!({ "x": x, "y": 10.0 })))).collect();
     assert!(samples.iter().all(|c| c[3] == 255), "{samples:?}");

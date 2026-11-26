@@ -10,6 +10,7 @@ publish.workspace = true
 skrifa.workspace = true
 serde.workspace = true
 dtool-core.workspace = true
+kurbo.workspace = true
 
 parley = { workspace = true, features = ["system", "complex-scripts"] }
 memmap2.workspace = true

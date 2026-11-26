@@ -277,7 +277,7 @@ pub(crate) fn run(session: &mut Session, command: &Command) -> CommandResult {
     copy_document_metadata(&source, &mut document, &map, &bundle, factor);
     masters::materialize_groups(&mut document);
     masters::arrange_masters(&mut document);
-    let imported_symbols = crate::commands::symbols::page_import::import(&source, &mut document, &map, &new_ids, &directory, factor)?;
+    let imported_symbols = crate::commands::symbols::page_import::import(&source, &mut document, &map, &new_ids, Some(&directory))?;
     let omitted_links = navigation::copy(&source, target, &mut document, &bundle, &map, &excerpts,
         navigation::PageTransfer::Import { indices: &indices, at })?;
     document.validate_refs().map_err(CommandError::from)?;

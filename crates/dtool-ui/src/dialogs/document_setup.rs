@@ -210,17 +210,18 @@ impl DocumentSetupDialog {
 
     fn restore_local(&self, session: &mut Session) {
         if let Some(store) = &self.store {
-            session.document = store.original.clone();
+            dtool_core::commands::doc_setup::replace_document_preserving_view(session, store.original.clone());
         }
     }
 
     fn apply_local(&mut self, session: &mut Session) -> Result<(), CommandError> {
-        self.restore_local(session);
-        let result = self.setup.try_apply(&mut session.document);
-        if result.is_err() {
+        let mut next = self.store.as_ref().map_or_else(|| session.document.clone(), |store| store.original.clone());
+        if let Err(error) = self.setup.try_apply(&mut next) {
             self.restore_local(session);
+            return Err(error);
         }
-        result
+        dtool_core::commands::doc_setup::replace_document_preserving_view(session, next);
+        Ok(())
     }
 
     pub fn preview_now(&mut self, session: &mut Session) {
@@ -373,7 +374,7 @@ impl DocumentSetupDialog {
             let arrow = if open { "▾" } else { "▸" };
             if ui.button(format!("{arrow}  {}", text(title))).clicked() { open = !open; }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                dtool_design::tooltip(ui.checkbox(&mut margins.enabled, ""), text(title)).changed()
+                dtool_design::tooltip(dtool_design::toggle(ui, &mut margins.enabled, ""), text(title)).changed()
             }).inner
         }).inner;
         if changed { open = margins.enabled; }
@@ -428,7 +429,7 @@ impl DocumentSetupDialog {
     fn toolbar(&mut self, ui: &mut egui::Ui) -> (bool, bool) {
         let mut changed = false;
         let mut preview_toggled = false;
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             if dtool_design::tab(ui, self.setup.scope == SetupScope::WholeDocument, text("doc_setup.scope.whole")).clicked() {
                 changed |= self.set_scope(SetupScope::WholeDocument);
             }
@@ -437,9 +438,7 @@ impl DocumentSetupDialog {
             {
                 changed |= self.set_scope(SetupScope::SelectedSpreads);
             }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                preview_toggled = Self::flag(ui, &mut self.preview, "menu.view.preview");
-            });
+            preview_toggled = Self::flag(ui, &mut self.preview, "menu.view.preview");
         });
         (changed, preview_toggled)
     }
@@ -466,7 +465,7 @@ impl DocumentSetupDialog {
         let start = preview.map_or(0, |spread| spread.start);
         let mut scene = None;
         let mut visible_pages = HashSet::new();
-        let preview_height = if has_spreads { (height * 0.42).clamp(84.0, 320.0) } else { (height - 34.0).max(84.0) };
+        let preview_height = if has_spreads { (height * 0.42).clamp(72.0, 320.0) } else { (height - 58.0).max(68.0) };
         let width = ui.available_width();
         ui.allocate_ui_with_layout(vec2(width, preview_height), Layout::top_down(Align::Center), |ui| {
             draw_pages(ui, &pages, vec2(width, preview_height), Some(&self.setup), |ctx, offset| {
@@ -480,9 +479,10 @@ impl DocumentSetupDialog {
         let (scope_changed, preview_toggled) = self.toolbar(ui);
         ui.separator();
         if !has_spreads { return (scope_changed, preview_toggled); }
+        let thumbnail_height = (height - preview_height - 58.0).max(32.0);
         egui::ScrollArea::vertical()
             .id_salt("document_setup_spreads")
-            .max_height((height - preview_height - 48.0).max(32.0))
+            .max_height(thumbnail_height)
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 ui.horizontal_wrapped(|ui| {
@@ -504,7 +504,7 @@ impl DocumentSetupDialog {
                                         if selected {
                                             let mut checked = self.setup.page_ids.contains(&spread.id);
                                             let can_toggle = !checked || self.setup.page_ids.len() > 1;
-                                            if ui.add_enabled(can_toggle, egui::Checkbox::new(&mut checked, &spread.label)).changed() {
+                                            if dtool_design::toggle_with(ui, &mut checked, &spread.label, &dtool_design::ControlState::enabled(can_toggle)).changed() {
                                                 if checked {
                                                     self.setup.page_ids.push(spread.id);
                                                     self.preview_spread = Some(spread.id);
@@ -540,18 +540,18 @@ impl DocumentSetupDialog {
         let label_width = (ui.available_width() * 0.42).clamp(94.0, 160.0);
         if !selected {
             section(ui, "unit.document", true);
-            setting_row(ui, "doc_setup.units", label_width, |ui| {
-                let previous = UNIT_VALUES.iter().position(|units| *units == self.setup.units).unwrap_or(0);
-                let mut unit = previous;
-                let labels = UNIT_KEYS.map(text);
-                egui::ComboBox::from_id_salt("doc_setup.units")
-                    .width(ui.available_width())
-                    .selected_text(labels[unit])
-                    .show_index(ui, &mut unit, labels.len(), |index| labels[index].to_owned());
-                if unit != previous {
-                    self.setup.convert_units(UNIT_VALUES[unit]);
-                    changed = true;
-                }
+            ui.label(text("doc_setup.units"));
+            dtool_design::with_icon_selection(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    for (units, key) in UNIT_VALUES.into_iter().zip(UNIT_KEYS) {
+                        let selected = self.setup.units == units;
+                        let response = ui.add(egui::Button::selectable(selected, crate::captions::units_identity(units)));
+                        if response.on_hover_text(text(key)).clicked() && !selected {
+                            self.setup.convert_units(units);
+                            changed = true;
+                        }
+                    }
+                });
             });
             setting_row(ui, "doc_setup.dpi", label_width, |ui| {
                 changed |= Self::number(ui, &mut self.setup.dpi, "doc_setup.dpi", "", edits, false);
@@ -600,9 +600,13 @@ impl DocumentSetupDialog {
             });
         }
         setting_row(ui, "doc_setup.orientation", label_width, |ui| {
-            if pair(ui, &mut self.setup.landscape, "doc_setup.portrait", "doc_setup.landscape") {
-                self.setup.page_size.swap(0, 1);
-                changed = true;
+            for (landscape, key) in [(false, "doc_setup.portrait"), (true, "doc_setup.landscape")] {
+                let selected = self.setup.landscape == landscape;
+                if super::orientation_button(ui, landscape, selected, text(key)).clicked() && !selected {
+                    self.setup.landscape = landscape;
+                    self.setup.page_size.swap(0, 1);
+                    changed = true;
+                }
             }
         });
         if selected {
@@ -611,9 +615,19 @@ impl DocumentSetupDialog {
 
         ui.add_enabled_ui(selected || self.size_changed(), |ui| {
             ui.horizontal_top(|ui| {
-                ui.vertical(|ui| {
-                    changed |= ui.radio_value(&mut self.setup.resize, ResizeMode::Rescale, text("doc_setup.rescale")).changed();
-                    changed |= ui.radio_value(&mut self.setup.resize, ResizeMode::AnchorToPage, text("doc_setup.anchor_to_page")).changed();
+                dtool_design::with_icon_selection(ui, |ui| {
+                    ui.vertical(|ui| {
+                        for (mode, key) in [
+                            (ResizeMode::Rescale, "doc_setup.rescale"),
+                            (ResizeMode::AnchorToPage, "doc_setup.anchor_to_page"),
+                        ] {
+                            let selected = self.setup.resize == mode;
+                            if ui.add(egui::Button::new(text(key)).selected(selected)).clicked() && !selected {
+                                self.setup.resize = mode;
+                                changed = true;
+                            }
+                        }
+                    });
                 });
                 ui.add_space(10.0);
                 ui.add_enabled_ui(self.setup.resize == ResizeMode::AnchorToPage, |ui| {
@@ -651,13 +665,13 @@ impl DocumentSetupDialog {
         changed |= Self::margins_section(ui, &mut self.setup.margins, "doc_setup.margins", unit, edits);
         changed |= Self::margins_section(ui, &mut self.setup.bleed, "doc_setup.bleed", unit, edits);
 
-        ui.separator();
+        crate::dialog_chrome::options_divider(ui);
         let (scale_changed, invalid_scale) = super::new_document_options::drawing_scale_section(
             ui, &mut self.setup.drawing_scale, &mut self.setup.measurement_unit, edits.scope, false,
         );
         changed |= scale_changed;
         edits.invalid |= invalid_scale;
-        ui.separator();
+        crate::dialog_chrome::options_divider(ui);
         egui::CollapsingHeader::new(text("doc_setup.page_origin")).show(ui, |ui| {
             for (index, key) in ["doc_setup.page_origin.x", "doc_setup.page_origin.y"].into_iter().enumerate() {
                 setting_row(ui, key, label_width, |ui| {
@@ -672,11 +686,9 @@ impl DocumentSetupDialog {
         let Ok(services) = colour::services().read() else { return false; };
         let current = self.setup.colour_format().ok();
         let mut changed = false;
-        setting_row(ui, "doc_setup.colour_format", label_width, |ui| {
-            egui::ComboBox::from_id_salt("document_setup_colour_format")
-                .width(ui.available_width())
-                .selected_text(&self.setup.colour_format)
-                .show_ui(ui, |ui| {
+        ui.label(text("doc_setup.colour_format"));
+        dtool_design::with_icon_selection(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
                     for &format in ColourFormat::colour_format_list() {
                         let default = dtool_core::commands::document_colour::default_profile(format, &services);
                         let profiles = services.profiles.list(format.model);
@@ -686,17 +698,18 @@ impl DocumentSetupDialog {
                             profiles.first().copied()
                         };
                         let label = format.to_string();
-                        if ui.add_enabled(profile.is_some(), egui::Button::new(&label).selected(current == Some(format))).clicked()
+                        let button = egui::Button::selectable(current == Some(format), &label)
+                            .wrap_mode(egui::TextWrapMode::Extend);
+                        if ui.add_enabled(profile.is_some(), button).clicked()
                             && current != Some(format)
                             && let Some(profile) = profile
                         {
                             self.setup.colour_format = label;
                             self.setup.colour_profile = profile.to_owned();
                             changed = true;
-                            ui.close();
                         }
                     }
-                });
+            });
         });
         if let Ok(format) = self.setup.colour_format() {
             setting_row(ui, "doc_setup.colour_profile", label_width, |ui| {
@@ -732,7 +745,7 @@ impl DocumentSetupDialog {
         let available = ui.ctx().content_rect().size();
         let maximum = (available - vec2(36.0, 76.0)).max(vec2(320.0, 260.0));
         let initial = vec2(1060.0, 810.0).min(maximum);
-        let minimum = vec2(620.0, 386.0).min(maximum);
+        let minimum = vec2(460.0, 360.0).min(maximum);
         let size = self.window_size.unwrap_or(initial).clamp(minimum, maximum);
         let surface = dtool_design::theme::surface(ui.ctx(), "dialog.bg");
         let background = egui::Color32::from_rgb(surface.r(), surface.g(), surface.b());
@@ -758,37 +771,44 @@ impl DocumentSetupDialog {
                 });
                 let footer_height = row_height + separator_height + 2.0 * spacing + error_height;
                 let height = (content.height() - footer_height - edge).max(160.0);
-                let gap = 16.0;
                 let width = content.width() - edge;
-                let settings_width = ((width - gap) * 0.42).clamp((width - gap).min(310.0) * 0.8, 440.0);
-                let preview_width = (width - gap - settings_width).max(1.0);
-                let divider = ui.cursor().min + vec2(preview_width + gap * 0.5, 0.0);
-                ui.painter().vline(divider.x, divider.y..=divider.y + height, ui.visuals().widgets.noninteractive.bg_stroke);
+                let layout_document = session.document.layout_artboard_origins.is_some();
                 let mut invalid = false;
-                ui.horizontal_top(|ui| {
-                    ui.spacing_mut().item_spacing.x = gap;
-                    ui.allocate_ui_with_layout(vec2(preview_width, height), Layout::top_down(Align::Min), |ui| {
-                        ui.set_width(preview_width);
-                        (changed, preview_toggled) = self.preview_pane(ui, height);
-                    });
-                    ui.allocate_ui_with_layout(vec2(settings_width, height), Layout::top_down(Align::Min), |ui| {
-                        ui.set_width(settings_width);
-                        egui::ScrollArea::vertical()
-                            .id_salt("document_setup_settings")
-                            .max_height(height)
-                            .auto_shrink([false, false])
-                            .show(ui, |ui| {
-                                ui.spacing_mut().item_spacing.y = 4.0;
-                                let scope = self.setup.scope == SetupScope::SelectedSpreads;
-                                let mut edits = NumberEdits {
-                                    scope: egui::Id::unique(("document_setup_inputs", self.next_token, scope)),
-                                    invalid: false,
-                                };
-                                changed |= self.settings_pane(ui, session.document.layout_artboard_origins.is_some(), &mut edits);
-                                invalid = edits.invalid;
+                if width < 545.0 {
+                    crate::dialog_chrome::options_scroll(ui, "document_setup_compact", height, |ui| {
+                            dtool_design::dialog_section(ui, |ui| {
+                                (changed, preview_toggled) = self.preview_pane(ui, 220.0);
                             });
+                            dtool_design::dialog_section(ui, |ui| {
+                                let (settings_changed, bad_input) = self.settings_fields(ui, layout_document);
+                                changed |= settings_changed;
+                                invalid = bad_input;
+                            });
+                        });
+                } else {
+                    let gap = 10.0;
+                    let inset = 2.0 * (dtool_design::space("sm") + dtool_design::stroke_width("thin"));
+                    let settings_width = ((width - gap) * 0.42).clamp(272.0, 440.0);
+                    let preview_width = width - gap - settings_width;
+                    ui.horizontal_top(|ui| {
+                        ui.spacing_mut().item_spacing.x = gap;
+                        ui.allocate_ui_with_layout(vec2(preview_width, height), Layout::top_down(Align::Min), |ui| {
+                            dtool_design::dialog_section(ui, |ui| {
+                                ui.set_width(preview_width - inset);
+                                (changed, preview_toggled) = self.preview_pane(ui, height - inset);
+                            });
+                        });
+                        ui.allocate_ui_with_layout(vec2(settings_width, height), Layout::top_down(Align::Min), |ui| {
+                            dtool_design::dialog_section(ui, |ui| {
+                                ui.set_width(settings_width - inset);
+                                let outcome = crate::dialog_chrome::options_scroll(ui, "document_setup_settings", height - inset,
+                                    |ui| self.settings_fields(ui, layout_document));
+                                changed |= outcome.0;
+                                invalid = outcome.1;
+                            });
+                        });
                     });
-                });
+                }
                 ui.add(egui::Separator::default().spacing(separator_height));
                 if let Some(err) = &self.error {
                     ui.colored_label(ui.visuals().error_fg_color, text(&err.message_key));
@@ -869,6 +889,17 @@ impl DocumentSetupDialog {
         }
     }
 
+    fn settings_fields(&mut self, ui: &mut egui::Ui, layout_document: bool) -> (bool, bool) {
+        ui.spacing_mut().item_spacing.y = 4.0;
+        let selected = self.setup.scope == SetupScope::SelectedSpreads;
+        let mut edits = NumberEdits {
+            scope: egui::Id::unique(("document_setup_inputs", self.next_token, selected)),
+            invalid: false,
+        };
+        let changed = self.settings_pane(ui, layout_document, &mut edits);
+        (changed, edits.invalid)
+    }
+
     pub fn query(session: &mut Session) -> DocSetup {
         let _ = session.run_named(DOC_SETUP_QUERY, json!({}));
         DocSetup::from_document(&session.document)
@@ -876,12 +907,11 @@ impl DocumentSetupDialog {
 }
 
 fn section(ui: &mut egui::Ui, key: &str, first: bool) {
-    if !first {
-        ui.add_space(4.0);
-        ui.separator();
-        ui.add_space(3.0);
+    if first {
+        ui.strong(text(key));
+    } else {
+        crate::dialog_chrome::options_group(ui, text(key));
     }
-    ui.label(egui::RichText::new(text(key)).size(15.0).strong());
 }
 
 fn setting_row<T>(ui: &mut egui::Ui, key: &str, label_width: f32, add: impl FnOnce(&mut egui::Ui) -> T) -> T {
@@ -896,7 +926,7 @@ fn setting_row<T>(ui: &mut egui::Ui, key: &str, label_width: f32, add: impl FnOn
 
 fn flag_row(ui: &mut egui::Ui, label_width: f32, value: &mut bool, key: &str) -> bool {
     setting_row(ui, key, label_width, |ui| {
-        dtool_design::tooltip(ui.checkbox(value, ""), text(key)).changed()
+        dtool_design::tooltip(dtool_design::toggle(ui, value, ""), text(key)).changed()
     })
 }
 

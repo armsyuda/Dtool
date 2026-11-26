@@ -83,8 +83,26 @@ pub struct BandPass {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum EffectParams {
-    Blur { radius: f32, preserve_alpha: bool },
-    Shadow { radius: f32, offset: f32, angle: f32, intensity: f32, colour: Colour, knock_out: bool },
+    Blur {
+        radius: f32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        radius_y: Option<f32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        angle: Option<f32>,
+        preserve_alpha: bool,
+    },
+    Shadow {
+        radius: f32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        radius_y: Option<f32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        blur_angle: Option<f32>,
+        offset: f32,
+        angle: f32,
+        intensity: f32,
+        colour: Colour,
+        knock_out: bool,
+    },
     Glow { radius: f32, intensity: f32, colour: Colour, from_centre: bool },
     Outline { width: f32, align: OutlineAlign, fill: Paint },
     Light { radius: f32, depth: f32, soften: f32, azimuth: f32, elevation: f32, bevel: BevelType, highlight: Colour, shadow: Colour },
@@ -106,7 +124,7 @@ pub struct LayerEffect {
 pub fn overlay_gradient(size: [f32; 2]) -> Paint {
     let [w, h] = size.map(|v| if v.is_finite() && v.abs() > 0.0 { f64::from(v.abs()) } else { 1.0 });
     let stops = vec![GradientStop { offset: 0.0, colour: black() }, GradientStop { offset: 1.0, colour: white() }];
-    Paint::Gradient { kind: GradientKind::Linear, stops, geom: GradientGeom { start: [w * 0.5, h], end: [w * 0.5, 0.0], ratio: 1.0 } }
+    Paint::Gradient { kind: GradientKind::Linear, stops, geom: GradientGeom { start: [w * 0.5, h], end: [w * 0.5, 0.0], ratio: 1.0, ..GradientGeom::default() } }
 }
 
 pub fn default_effect_for(kind: EffectKind, size: [f32; 2]) -> LayerEffect {
@@ -127,9 +145,9 @@ fn white() -> Colour {
 
 pub fn default_effect(kind: EffectKind) -> LayerEffect {
     let (blend, params) = match kind {
-        EffectKind::GaussianBlur => (BlendMode::Normal, EffectParams::Blur { radius: 4.0, preserve_alpha: false }),
-        EffectKind::OuterShadow => (BlendMode::Multiply, EffectParams::Shadow { radius: 4.0, offset: 4.0, angle: 135.0, intensity: 0.0, colour: black(), knock_out: true }),
-        EffectKind::InnerShadow => (BlendMode::Multiply, EffectParams::Shadow { radius: 4.0, offset: 4.0, angle: 135.0, intensity: 0.0, colour: black(), knock_out: false }),
+        EffectKind::GaussianBlur => (BlendMode::Normal, EffectParams::Blur { radius: 4.0, radius_y: None, angle: None, preserve_alpha: false }),
+        EffectKind::OuterShadow => (BlendMode::Multiply, EffectParams::Shadow { radius: 4.0, radius_y: None, blur_angle: None, offset: 4.0, angle: 135.0, intensity: 0.0, colour: black(), knock_out: true }),
+        EffectKind::InnerShadow => (BlendMode::Multiply, EffectParams::Shadow { radius: 4.0, radius_y: None, blur_angle: None, offset: 4.0, angle: 135.0, intensity: 0.0, colour: black(), knock_out: false }),
         EffectKind::OuterGlow => (BlendMode::Screen, EffectParams::Glow { radius: 8.0, intensity: 0.0, colour: white(), from_centre: false }),
         EffectKind::InnerGlow => (BlendMode::Screen, EffectParams::Glow { radius: 8.0, intensity: 0.0, colour: white(), from_centre: false }),
         EffectKind::Outline => (BlendMode::Normal, EffectParams::Outline { width: 1.0, align: OutlineAlign::Outside, fill: Paint::Solid { colour: black() } }),
@@ -164,8 +182,14 @@ impl LayerEffect {
             }
         }
         match (&self.params, self.kind) {
-            (EffectParams::Blur { radius, .. }, EffectKind::GaussianBlur) => radius.is_finite() && *radius >= 0.0,
-            (EffectParams::Shadow { radius, offset, angle, intensity, .. }, EffectKind::OuterShadow | EffectKind::InnerShadow) => finite(&[*offset, *angle]) && radius.is_finite() && *radius >= 0.0 && unit(*intensity),
+            (EffectParams::Blur { radius, radius_y, angle, .. }, EffectKind::GaussianBlur) => {
+                [*radius, radius_y.unwrap_or(*radius)].into_iter().all(|value| value.is_finite() && value >= 0.0)
+                    && angle.is_none_or(f32::is_finite)
+            }
+            (EffectParams::Shadow { radius, radius_y, blur_angle, offset, angle, intensity, .. }, EffectKind::OuterShadow | EffectKind::InnerShadow) =>
+                finite(&[*offset, *angle, blur_angle.unwrap_or_default()])
+                    && [*radius, radius_y.unwrap_or(*radius)].into_iter().all(|r| r.is_finite() && r >= 0.0)
+                    && unit(*intensity),
             (EffectParams::Glow { radius, intensity, .. }, EffectKind::OuterGlow | EffectKind::InnerGlow) => radius.is_finite() && *radius >= 0.0 && unit(*intensity),
             (EffectParams::Outline { width, .. }, EffectKind::Outline) => width.is_finite() && *width >= 0.0,
             (EffectParams::Light { radius, depth, soften, azimuth, elevation, .. }, EffectKind::ThreeD | EffectKind::BevelEmboss) => finite(&[*depth, *soften, *azimuth, *elevation]) && radius.is_finite() && *radius >= 0.0 && *soften >= 0.0,

@@ -1,7 +1,7 @@
 use dtool_core::commands::appearance::{Focus, Kind, PaintSlot};
 use dtool_core::workspace::Workspace;
 use dtool_core::paint::{Cap, Join, LineStyle, StrokeAlign, Arrow, PaintOrder, StrokeStyle};
-use dtool_core::{Command, CommandError, ContextId, Object};
+use dtool_core::{Command, CommandError, ContextId, Object, ObjectId, Session};
 use dtool_design::{ControlState, NumericEvent, NumericSpec, NumericValue};
 use dtool_strings::text;
 use serde_json::{json, Value};
@@ -21,8 +21,17 @@ pub struct StrokePanel {
     pub paint_order_value: dtool_core::paint::PaintOrder,
     pub pending_commands: Vec<dtool_core::Command>,
     pub error_key: Option<String>,
-    binding: Option<(Option<ContextId>, Vec<u64>, Option<PaintSlot>)>,
+    binding: Option<(Option<ContextId>, u64, Vec<ObjectId>, Option<PaintSlot>)>,
     width_preview: Option<f32>,
+    width_rail_press: Option<bool>,
+    preview_pass: Option<u64>,
+}
+
+#[derive(Clone, PartialEq)]
+pub(crate) struct StrokeWidthPreview {
+    pub(crate) ids: Vec<ObjectId>,
+    pub(crate) index: usize,
+    pub(crate) width: f32,
 }
 
 impl StrokePanel {
@@ -47,16 +56,23 @@ impl StrokePanel {
     }
 
     pub fn render(&mut self, ui: &mut egui::Ui, workspace: &Workspace) {
+        self.preview_pass = Some(ui.ctx().cumulative_pass_nr());
         self.sync_from_selection(workspace);
         let selected: Vec<_> = workspace.session().into_iter().flat_map(|session| {
             session.selection.ids.iter().filter_map(|id| session.document.get_object(*id))
         }).collect();
         let ids: Vec<_> = selected.iter().map(|object| object.id.0).collect();
         let focus = focused_slot(workspace);
-        let binding = (workspace.active(), ids.clone(), focus.map(|focus| focus.slot));
+        let binding = (
+            workspace.active(),
+            workspace.session().map_or(0, |session| session.generation),
+            selected.iter().map(|object| object.id).collect(),
+            focus.map(|focus| focus.slot),
+        );
         if self.binding.as_ref() != Some(&binding) {
             self.binding = Some(binding);
             self.width_preview = None;
+            self.width_rail_press = None;
             self.error_key = None;
         }
         let enabled = !selected.is_empty() && selected.iter().all(|object| !object.locked)
@@ -79,6 +95,22 @@ impl StrokePanel {
         } else {
             self.pending_commands.extend(commands);
         }
+    }
+
+    pub(crate) fn width_preview(&self, ctx: &egui::Context, session: &Session) -> Option<StrokeWidthPreview> {
+        let points = self.width_preview?;
+        let (owner, generation, ids, slot) = self.binding.as_ref()?;
+        if self.preview_pass != Some(ctx.cumulative_pass_nr())
+            || *owner != session.context || *generation != session.generation
+            || *ids != session.selection.ids || *slot != Focus::current(session).map(|focus| focus.slot)
+        {
+            return None;
+        }
+        Some(StrokeWidthPreview {
+            ids: ids.clone(),
+            index: slot.map_or(0, |slot| slot.index),
+            width: points * dtool_core::units::units_per_point(session.document.units, session.document.dpi),
+        })
     }
 
     fn draw_controls(&mut self, ui: &mut egui::Ui, selected: &[&Object], ids: &[u64], focus: Option<Focus>, units_per_point: f32, commands: &mut Vec<Command>) {
@@ -115,11 +147,24 @@ impl StrokePanel {
             patch["width"] = json!(width);
         }
 
-        let cap = common_value(&strokes, |stroke| stroke.cap);
-        if let Some(cap) = icon_choice(ui, "stroke.cap", cap, &[
-            (Cap::Butt, "stroke.cap.butt"), (Cap::Round, "stroke.cap.round"), (Cap::Square, "stroke.cap.square"),
-        ], paint_cap) {
-            patch["cap"] = json!(cap);
+        let extends = common_value(&strokes, |stroke| stroke.cap.extends());
+        let round = common_value(&strokes, |stroke| stroke.cap.is_round());
+        let (end_position, end_shape) = ui.horizontal_wrapped(|ui| {
+            let position = cap_buttons(ui, extends, ["stroke.cap.at_node", "stroke.cap.past_node"], paint_cap_position);
+            ui.separator();
+            let shape = cap_buttons(ui, round, ["stroke.cap.square", "stroke.cap.round"], paint_cap_shape);
+            (position, shape)
+        }).inner;
+        if end_position.is_some() || end_shape.is_some() {
+            for (object, stroke) in selected.iter().zip(&strokes) {
+                let cap = Cap::from_options(
+                    end_position.unwrap_or_else(|| stroke.cap.extends()),
+                    end_shape.unwrap_or_else(|| stroke.cap.is_round()),
+                );
+                if cap != stroke.cap {
+                    commands.push(stroke_command(json!({"cap": cap}), Some(object.id.0)));
+                }
+            }
         }
         let join = common_value(&strokes, |stroke| match stroke.join {
             Join::Miter { .. } => Join::Miter { limit: 10.0 },
@@ -139,7 +184,7 @@ impl StrokePanel {
                 let spec = NumericSpec::new("").range(1.0..=f64::from(f32::MAX)).width(52.0).decimals(2).enabled(ui.is_enabled());
                 let field = ui.make_persistent_id("miter_limit");
                 let (response, event) = dtool_design::numeric_field(ui, field, numeric_value(limit), &spec);
-                response.labelled_by(label);
+                response.labelled_by(label).on_hover_text(text("stroke.join.miter_hint"));
                 if let NumericEvent::Commit(limit) = event {
                     patch["join"] = json!(Join::Miter { limit: limit as f32 });
                 }
@@ -174,6 +219,18 @@ impl StrokePanel {
                 };
                 if let Some(parsed) = parsed { patch["dash"] = json!(parsed); }
             }
+            let has_dashes = strokes.iter().all(|stroke| !stroke.dash.is_empty());
+            let offset = common_value(&strokes, |stroke| stroke.dash_offset);
+            stroke_row(ui, text("stroke.dash_offset"), 64.0, |ui, label| {
+                let limit = f64::from(f32::MAX);
+                let spec = NumericSpec::new("").range(-limit..=limit).width(64.0).decimals(2).enabled(ui.is_enabled() && has_dashes);
+                let field = ui.make_persistent_id("dash_offset");
+                let (response, event) = dtool_design::numeric_field(ui, field, numeric_value(offset), &spec);
+                response.labelled_by(label);
+                if let NumericEvent::Commit(offset) = event {
+                    patch["dash_offset"] = json!(offset);
+                }
+            });
         });
 
         let arrows = egui::CollapsingHeader::new(text("stroke.arrow")).id_salt("arrow_details").show(ui, |ui| {
@@ -245,20 +302,40 @@ impl StrokePanel {
             if rail_width >= rail_minimum {
                 let upper = display.unwrap_or(0.0).max(100.0);
                 let rail = dtool_design::logarithmic_slider_rail(ui, &mut points, 0.0..=upper, rail_width, label, enabled, 0.1);
-                if rail.changed() {
+                // A quick field drag can cross the rail before egui sees the
+                // release. The control where the press began owns the edit.
+                let to_local = ui.ctx().layer_transform_from_global(rail.layer_id)
+                    .unwrap_or(egui::emath::TSTransform::IDENTITY);
+                if let Some(rail_press) = ui.input(|input| input.events.iter().rev().find_map(|event| {
+                    match event {
+                        egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, .. } =>
+                            Some(rail.interact_rect.contains(to_local * *pos)),
+                        _ => None,
+                    }
+                })) {
+                    self.width_rail_press = Some(rail_press);
+                }
+                if !enabled || (rail.dragged() && ui.input(|input| input.key_pressed(egui::Key::Escape))) {
+                    self.width_preview = None;
+                    if rail.dragged() { ui.ctx().stop_dragging(); }
+                } else if rail.changed() && self.width_rail_press != Some(false) {
                     if rail.dragged() && !rail.drag_stopped() {
                         self.width_preview = Some(points);
                     } else {
                         committed = Some(points);
                     }
                 }
-                if rail.drag_stopped() {
+                if rail.drag_stopped() && self.width_rail_press != Some(false) {
                     committed = committed.or(self.width_preview.take());
                 } else if !ui.input(|input| input.pointer.primary_down()) {
                     self.width_preview = None;
                 }
+                if !ui.input(|input| input.pointer.primary_down()) {
+                    self.width_rail_press = None;
+                }
             } else {
                 self.width_preview = None;
+                self.width_rail_press = None;
             }
             let id = ui.make_persistent_id("stroke_width_value");
             let spec = NumericSpec::new("").range(0.0..=f64::from(f32::MAX))
@@ -292,7 +369,7 @@ impl StrokePanel {
                         let label = arrow_label(name);
                         let row = ui.horizontal(|ui| {
                             let preview = stroke_button(ui, 30.0, selected, &label);
-                            let colour = ui.style().interact_selectable(&preview, selected).fg_stroke.color;
+                            let colour = stroke_icon_ink(ui, &preview, selected);
                             paint_arrow_preview(ui.painter(), preview.rect.center(), colour, name, start);
                             let label = ui.selectable_label(selected, label);
                             preview.clicked() || label.clicked()
@@ -340,7 +417,7 @@ impl StrokePanel {
 
 impl Default for StrokePanel {
     fn default() -> Self {
-        Self { width_value: 0.0, dash_values: Vec::new(), cap_value: Cap::Butt, join_value: Join::Miter { limit: 10.0 }, align_value: StrokeAlign::Centre, start_arrow_name: None, end_arrow_name: None, arrow_scale: 1.0, available_arrows: dtool_core::commands::stroke::ARROW_NAMES.iter().map(|name| name.to_string()).collect(), scale_with_object: true, pressure_profile: Vec::new(), paint_order_value: PaintOrder::StrokeOver, pending_commands: Vec::new(), error_key: None, binding: None, width_preview: None }
+        Self { width_value: 0.0, dash_values: Vec::new(), cap_value: Cap::Butt, join_value: Join::Miter { limit: 10.0 }, align_value: StrokeAlign::Centre, start_arrow_name: None, end_arrow_name: None, arrow_scale: 1.0, available_arrows: dtool_core::commands::stroke::ARROW_NAMES.iter().map(|name| name.to_string()).collect(), scale_with_object: true, pressure_profile: Vec::new(), paint_order_value: PaintOrder::StrokeOver, pending_commands: Vec::new(), error_key: None, binding: None, width_preview: None, width_rail_press: None, preview_pass: None }
     }
 }
 
@@ -406,7 +483,7 @@ fn icon_choice<T: Copy + PartialEq>(
         for &(value, key) in entries {
             let selected = current == Some(value);
             let response = stroke_button(ui, button_width, selected, text(key));
-            let colour = ui.style().interact_selectable(&response, selected).fg_stroke.color;
+            let colour = stroke_icon_ink(ui, &response, selected);
             paint(ui.painter(), response.rect.center(), colour, value);
             if response.clicked() { choice = Some(value); }
         }
@@ -414,11 +491,34 @@ fn icon_choice<T: Copy + PartialEq>(
     })
 }
 
-fn paint_cap(painter: &egui::Painter, at: egui::Pos2, colour: egui::Color32, cap: Cap) {
-    let end = match cap { Cap::Butt | Cap::Round => 4.0, Cap::Square => 7.0 };
-    painter.line_segment([at + egui::vec2(-8.0, 0.0), at + egui::vec2(end, 0.0)], egui::Stroke::new(5.0, colour));
-    if cap == Cap::Round { painter.circle_filled(at + egui::vec2(end, 0.0), 2.5, colour); }
-    painter.line_segment([at + egui::vec2(4.0, -6.0), at + egui::vec2(4.0, 6.0)], egui::Stroke::new(1.0, colour.gamma_multiply(0.65)));
+fn cap_buttons(ui: &mut egui::Ui, current: Option<bool>, labels: [&str; 2], paint: fn(&egui::Painter, egui::Pos2, egui::Color32, bool)) -> Option<bool> {
+    let width = stroke_icon_width(ui);
+    ui.horizontal(|ui| {
+        let mut picked = None;
+        for (value, key) in [false, true].into_iter().zip(labels) {
+            let selected = current == Some(value);
+            let button = stroke_button(ui, width, selected, text(key));
+            let colour = stroke_icon_ink(ui, &button, selected);
+            paint(ui.painter(), button.rect.center(), colour, value);
+            if button.clicked() && !selected { picked = Some(value); }
+        }
+        picked
+    }).inner
+}
+
+fn paint_cap_position(painter: &egui::Painter, at: egui::Pos2, colour: egui::Color32, extends: bool) {
+    let mark = 2.0;
+    let end = if extends { 7.0 } else { mark };
+    painter.rect_filled(egui::Rect::from_min_max(at + egui::vec2(-8.0, -2.5), at + egui::vec2(end, 2.5)), 0.0, colour);
+    for [top, bottom] in [[-7.0, -3.0], [3.0, 7.0]] {
+        painter.line_segment([at + egui::vec2(mark, top), at + egui::vec2(mark, bottom)], egui::Stroke::new(1.0, colour));
+    }
+}
+
+fn paint_cap_shape(painter: &egui::Painter, at: egui::Pos2, colour: egui::Color32, round: bool) {
+    let end = if round { 3.0 } else { 7.0 };
+    painter.rect_filled(egui::Rect::from_min_max(at + egui::vec2(-8.0, -4.0), at + egui::vec2(end, 4.0)), 0.0, colour);
+    if round { painter.circle_filled(at + egui::vec2(end, 0.0), 4.0, colour); }
 }
 
 fn paint_join(painter: &egui::Painter, at: egui::Pos2, colour: egui::Color32, join: Join) {
@@ -438,15 +538,13 @@ fn paint_align(painter: &egui::Painter, at: egui::Pos2, colour: egui::Color32, a
 }
 
 fn paint_order(painter: &egui::Painter, at: egui::Pos2, colour: egui::Color32, order: PaintOrder) {
-    let fill = egui::Rect::from_center_size(at + egui::vec2(-3.0, -2.0), egui::vec2(10.0, 9.0));
-    let outline = egui::Rect::from_center_size(at + egui::vec2(3.0, 2.0), egui::vec2(10.0, 9.0));
-    let stroke = egui::Stroke::new(1.25, colour);
-    if order == PaintOrder::StrokeUnder {
-        painter.rect_stroke(outline, 1.0, stroke, egui::StrokeKind::Inside);
-    }
-    painter.rect_filled(fill, 1.0, colour);
-    if order == PaintOrder::StrokeOver {
-        painter.rect_stroke(outline, 1.0, stroke, egui::StrokeKind::Inside);
+    let fill = egui::Rect::from_center_size(at + egui::vec2(-3.0, -2.0), egui::vec2(13.0, 12.0));
+    let outline = egui::Rect::from_center_size(at + egui::vec2(3.0, 2.0), egui::vec2(12.0, 11.0));
+    let paint_fill = || painter.rect_filled(fill, 1.0, colour.lerp_to_gamma(egui::Color32::from_gray(108), 0.65));
+    let paint_outline = || painter.rect_stroke(outline, 1.0, egui::Stroke::new(2.0, colour), egui::StrokeKind::Inside);
+    match order {
+        PaintOrder::StrokeOver => { paint_fill(); paint_outline(); }
+        PaintOrder::StrokeUnder => { paint_outline(); paint_fill(); }
     }
 }
 
@@ -508,15 +606,22 @@ fn update_arrow(patch: &mut Value, key: &str, current: &Option<Arrow>, change: O
 }
 
 fn stroke_button(ui: &mut egui::Ui, width: f32, selected: bool, label: &str) -> egui::Response {
-    let response = ui.add_sized(egui::vec2(width, 20.0), egui::Button::new("").selected(selected));
+    let response = dtool_design::with_icon_selection(ui, |ui| {
+        ui.add_sized(egui::vec2(width, 20.0), egui::Button::new("").selected(selected))
+    });
     response.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, ui.is_enabled(), selected, label));
     ControlState::enabled(ui.is_enabled()).tooltip(label).decorate(response)
+}
+
+fn stroke_icon_ink(ui: &egui::Ui, response: &egui::Response, selected: bool) -> egui::Color32 {
+    if selected && response.enabled() { dtool_design::selected_icon_ink(ui) }
+    else { ui.style().interact(response).fg_stroke.color }
 }
 
 pub(crate) fn line_style_button(ui: &mut egui::Ui, width: f32, style: LineStyle, selected: bool, label: &str) -> egui::Response {
     let response = stroke_button(ui, width, selected, label);
     let center = response.rect.center();
-    let stroke = ui.style().interact_selectable(&response, selected).fg_stroke;
+    let stroke = egui::Stroke::new(ui.style().interact(&response).fg_stroke.width, stroke_icon_ink(ui, &response, selected));
     let line = |from: f32, to: f32| {
         ui.painter().line_segment([center + egui::vec2(from, 0.0), center + egui::vec2(to, 0.0)], stroke);
     };

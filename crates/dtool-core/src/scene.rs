@@ -25,7 +25,7 @@ pub enum Prim {
     Fill { object: ObjectId, contours: Vec<Vec<[f32; 2]>>, origin: [f32; 2], paint: Paint, opacity: f32 },
     Appearance { object: ObjectId, inks: Vec<AppearanceInk>, origin: [f32; 2], opacity: f32, tint: Option<Colour> },
     Stroke { object: ObjectId, points: Vec<[f32; 2]>, closed: bool, width: f32, paint: Paint, opacity: f32 },
-    Image { object: ObjectId, quad: Quad, opacity: f32 },
+    Image { object: ObjectId, quad: Quad, opacity: f32, sample_in_quad: bool },
     Text { object: ObjectId, lines: Vec<TextLine>, opacity: f32 },
     Mark { object: ObjectId, rect: [f32; 4], role: String },
     Handle { object: ObjectId, at: [f32; 2] },
@@ -38,6 +38,8 @@ pub struct Scene {
     pub version: u64,
     pub prims: Vec<Prim>,
     pub quads: Vec<(ObjectId, Quad)>,
+    /// Rotation already applied to the ink geometry for canvas compositing.
+    pub display_rotation: f32,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -182,7 +184,7 @@ pub fn doc_contours(object: &Object, matrix: &[f32; 6]) -> Vec<(Vec<[f32; 2]>, b
 }
 
 fn display_contours(object: &Object, matrix: &[f32; 6], tolerance: f64) -> Vec<(Vec<[f32; 2]>, bool)> {
-    if tolerance < OUTLINE_TOLERANCE && let Some(path) = crate::outline::object_outline(object) {
+    if tolerance < OUTLINE_TOLERANCE && let Some(path) = crate::outline::object_outline_with_tolerance(object, tolerance) {
         let [x, y] = object.pos.map(f64::from);
         let path = kurbo::Affine::new(matrix.map(f64::from)) * kurbo::Affine::translate((x, y)) * path;
         return crate::outline::flatten_subpaths(&path, tolerance).into_iter()
@@ -193,14 +195,18 @@ fn display_contours(object: &Object, matrix: &[f32; 6], tolerance: f64) -> Vec<(
 }
 
 pub fn warped_contours(doc: &Document, object: &Object, matrix: &[f32; 6]) -> Option<Vec<(Vec<[f32; 2]>, bool)>> {
+    warped_contours_with_tolerance(doc, object, matrix, OUTLINE_TOLERANCE)
+}
+
+fn warped_contours_with_tolerance(doc: &Document, object: &Object, matrix: &[f32; 6], tolerance: f64) -> Option<Vec<(Vec<[f32; 2]>, bool)>> {
     if object.parent_id.is_none() || doc.export_defaults.get(crate::commands::warp::STORE_KEY).is_none() {
         return None;
     }
-    let outline = crate::outline::object_outline(object)?;
+    let outline = crate::outline::object_outline_with_tolerance(object, tolerance)?;
     let [x, y] = object.pos.map(f64::from);
     let world = kurbo::Affine::new(matrix.map(f64::from)) * kurbo::Affine::translate((x, y)) * outline;
-    let warped = crate::commands::warp::live_warp_outline(doc, object.id, &world)?;
-    Some(crate::outline::flatten_subpaths(&warped, OUTLINE_TOLERANCE).into_iter().map(|(points, closed)| {
+    let warped = crate::commands::warp::live_warp_outline_with_tolerance(doc, object.id, &world, tolerance)?;
+    Some(crate::outline::flatten_subpaths(&warped, tolerance).into_iter().map(|(points, closed)| {
         (points.into_iter().map(|[x, y]| [x as f32, y as f32]).collect(), closed)
     }).collect())
 }
@@ -240,6 +246,35 @@ pub fn clip_bounds(clip: [f32; 4], matrix: &[f32; 6]) -> [f32; 4] {
     [b[0], b[1], b[2] - b[0], b[3] - b[1]]
 }
 
+pub fn vector_crop_quad(object: &Object) -> Option<Quad> {
+    let [x, y, w, h] = object.vector_crop?.rect;
+    if ![x, y, w, h].iter().all(|value| value.is_finite()) || w <= 0.0 || h <= 0.0 {
+        return None;
+    }
+    let [ox, oy] = object.pos;
+    Some(crate::geometry::rect_quad([ox + x, oy + y, w, h], &crate::geometry::object_matrix(object)))
+}
+
+pub fn oriented_vector_crop(object: &Object) -> Option<Quad> {
+    let matrix = crate::geometry::object_matrix(object);
+    (matrix[1] != 0.0 || matrix[2] != 0.0).then(|| vector_crop_quad(object)).flatten()
+}
+
+pub fn vector_crop_contains(object: &Object, point: [f32; 2]) -> bool {
+    let Some(crop) = object.vector_crop else { return true };
+    let Some(inverse) = crate::geometry::invert_matrix(&crate::geometry::object_matrix(object)) else { return false };
+    let [x, y] = apply_matrix(&inverse, point);
+    let [left, top, width, height] = crop.rect;
+    crate::scene_hit::in_rect([object.pos[0] + left, object.pos[1] + top, width, height], [x, y])
+}
+
+pub fn vector_crop_bounds(object: &Object) -> Option<[f32; 4]> {
+    let [x, y, w, h] = object.vector_crop?.rect;
+    let rect = [object.pos[0] + x, object.pos[1] + y, w, h];
+    let bounds = clip_bounds(rect, &crate::geometry::object_matrix(object));
+    (bounds.iter().all(|v| v.is_finite()) && bounds[2] > 0.0 && bounds[3] > 0.0).then_some(bounds)
+}
+
 pub fn push_object(doc: &Document, object: &Object, paint: &ObjectPaint, matrix_of: &dyn Fn(&Object) -> [f32; 6], scene: &mut Scene) {
     push_object_with_tolerance(doc, object, paint, matrix_of, scene, OUTLINE_TOLERANCE);
 }
@@ -252,7 +287,11 @@ pub fn push_object_with_tolerance(doc: &Document, object: &Object, paint: &Objec
     if let Some(rect) = clip {
         scene.prims.push(Prim::Clip { object: object.id, rect: Some(rect) });
     }
+    let start = scene.prims.len();
     push_object_body(doc, object, paint, matrix_of, scene, tolerance);
+    if let Some(quad) = oriented_vector_crop(object) {
+        crate::clip_mask::clip_crop_ink(object, quad, start, &mut scene.prims);
+    }
     if clip.is_some() {
         scene.prims.push(Prim::Clip { object: object.id, rect: None });
     }
@@ -290,7 +329,7 @@ fn push_object_body(doc: &Document, object: &Object, paint: &ObjectPaint,
     let opacity = paint.opacity.clamp(0.0, 1.0);
     let outline_only = paint.outline_only;
     if !outline_only && let Some(ink) = crate::path_brush::Ink::new(doc, object) {
-        let image = Prim::Image { object: id, quad: ink.quad(), opacity };
+        let image = Prim::Image { object: id, quad: ink.quad(), opacity, sample_in_quad: false };
         let under = matches!(object.paint_order, PaintOrder::StrokeUnder);
         if under {
             scene.prims.push(image.clone());
@@ -332,26 +371,39 @@ fn push_object_body(doc: &Document, object: &Object, paint: &ObjectPaint,
                 }
             }
         }
-        push_text(doc, object, opacity, scene);
+        push_text(doc, object, opacity, scene, tolerance);
         return;
     }
-    if !outline_only && crate::commands::appearance::has_layers(object)
-        && let Some(paths) = crate::commands::appearance::vector_paths(doc, object, paint.fill.as_ref().unwrap_or(&Paint::None), false)
+    let styled_stroke = object.stroke.width > 0.0 && object.stroke.paint != Paint::None
+        && matches!(object.kind, ObjectKind::Shape | ObjectKind::Curve(_) | ObjectKind::Compound(_));
+    let stroke_tolerance = tolerance.min(crate::boolean::DEFAULT_TOLERANCE);
+    if !outline_only && (crate::commands::appearance::has_layers(object) || styled_stroke)
+        && let Some(paths) = crate::commands::appearance::vector_paths_with_tolerance(
+            doc, object, paint.fill.as_ref().unwrap_or(&Paint::None), false, tolerance,
+        )
     {
         let isolated = opacity < 1.0 || paths.iter().any(|path| !path.blend.is_normal());
         let mut inks = Vec::new();
         for path in paths {
-            let contours = if path.even_odd {
-                crate::outline::flatten_subpaths(&path.path, tolerance)
-                    .into_iter().map(|(points, _)| points.into_iter().map(|point| point.map(|value| value as f32)).collect()).collect()
+            let contours = if path.even_odd || path.slot.kind == crate::commands::appearance::Kind::Fill {
+                let rings = crate::outline::flatten_subpaths(&path.path, tolerance)
+                    .into_iter().filter(|(points, closed)| *closed && points.len() >= 3)
+                    .map(|(points, _)| points).collect();
+                let rule = if path.even_odd { crate::boolean::FillRule::EvenOdd } else { crate::boolean::FillRule::NonZero };
+                crate::boolean::parity_rings(rings, rule).into_iter()
+                    .map(|ring| ring.into_iter().map(|point| point.map(|value| value as f32)).collect()).collect()
             } else {
-                crate::boolean::stroke_outline_contours(&path.path).unwrap_or_default()
+                crate::boolean::stroke_outline_contours(&path.path, stroke_tolerance)
+                    .or_else(|| {
+                        (stroke_tolerance < crate::boolean::DEFAULT_TOLERANCE)
+                            .then(|| crate::boolean::stroke_outline_contours(&path.path, crate::boolean::DEFAULT_TOLERANCE)).flatten()
+                    }).unwrap_or_default()
             };
             if contours.is_empty() { continue; }
             let mut fill = path.paint;
-            if let Paint::Gradient { geom, .. } = &mut fill {
+            if matches!(fill, Paint::Gradient { .. } | Paint::Bitmap(_)) {
                 let [x, y] = object.pos.map(f64::from);
-                *geom = geom.transform(kurbo::Affine::translate((-x, -y)).as_coeffs());
+                crate::paint::transform_paint_matrix(&mut fill, kurbo::Affine::translate((-x, -y)).as_coeffs());
             }
             if isolated {
                 inks.push(AppearanceInk { contours, paint: fill, blend: path.blend });
@@ -365,8 +417,16 @@ fn push_object_body(doc: &Document, object: &Object, paint: &ObjectPaint,
         return;
     }
     let contours = frame_contours(doc, object, &paint.matrix)
-        .unwrap_or_else(|| warped_contours(doc, object, &paint.matrix).unwrap_or_else(|| display_contours(object, &paint.matrix, tolerance)));
-    let closed: Vec<Vec<[f32; 2]>> = contours.iter().filter(|(p, c)| *c && p.len() > 2).map(|(p, _)| p.clone()).collect();
+        .unwrap_or_else(|| warped_contours_with_tolerance(doc, object, &paint.matrix, tolerance)
+            .unwrap_or_else(|| display_contours(object, &paint.matrix, tolerance)));
+    let mut closed: Vec<Vec<[f32; 2]>> = contours.iter().filter(|(p, c)| *c && p.len() > 2).map(|(p, _)| p.clone()).collect();
+    if !outline_only && !object.fill_rule.is_even_odd()
+        && paint.fill.as_ref().is_some_and(|fill| *fill != Paint::None)
+    {
+        let rings = closed.into_iter().map(|ring| ring.into_iter().map(|point| point.map(f64::from)).collect()).collect();
+        closed = crate::boolean::parity_rings(rings, object.fill_rule).into_iter()
+            .map(|ring| ring.into_iter().map(|point| point.map(|value| value as f32)).collect()).collect();
+    }
     let mapped_paint = |mut value: Paint| {
         if paint.matrix != crate::geometry::IDENTITY {
             let origin = object.pos;
@@ -427,23 +487,23 @@ fn push_object_body(doc: &Document, object: &Object, paint: &ObjectPaint,
                 let frame = object_quad(object, &paint.matrix);
                 let b = contours_bounds(&[frame.to_vec()]).unwrap_or([frame[0][0], frame[0][1], frame[2][0], frame[2][1]]);
                 scene.prims.push(Prim::Clip { object: id, rect: Some([b[0], b[1], b[2] - b[0], b[3] - b[1]]) });
-                scene.prims.push(Prim::Image { object: id, quad, opacity });
+                scene.prims.push(Prim::Image { object: id, quad, opacity, sample_in_quad: false });
                 scene.prims.push(Prim::Clip { object: id, rect: None });
             }
-            None => scene.prims.push(Prim::Image { object: id, quad: object_quad(object, &paint.matrix), opacity }),
+            None => scene.prims.push(Prim::Image { object: id, quad: object_quad(object, &paint.matrix), opacity, sample_in_quad: false }),
         }
     }
     if is_text(&object.kind) {
-        push_text(doc, object, opacity, scene);
+        push_text(doc, object, opacity, scene, tolerance);
     }
     if !under {
         scene.prims.append(&mut strokes);
     }
 }
 
-fn push_text(doc: &Document, object: &Object, opacity: f32, scene: &mut Scene) {
+fn push_text(doc: &Document, object: &Object, opacity: f32, scene: &mut Scene, tolerance: f64) {
     let lines = text_lines(doc, object.id);
-    if let Some(ink) = warped_text_ink(doc, object, &lines, opacity) {
+    if let Some(ink) = warped_text_ink_with_tolerance(doc, object, &lines, opacity, tolerance) {
         scene.prims.extend(ink);
     }
     if !lines.is_empty() {
@@ -463,14 +523,20 @@ fn is_warpable_text(kind: &ObjectKind) -> bool {
 }
 
 pub fn warped_text_ink(doc: &Document, object: &Object, lines: &[crate::text_lines::TextLine], opacity: f32) -> Option<Vec<Prim>> {
+    warped_text_ink_with_tolerance(doc, object, lines, opacity, OUTLINE_TOLERANCE)
+}
+
+pub fn warped_text_ink_with_tolerance(
+    doc: &Document, object: &Object, lines: &[crate::text_lines::TextLine], opacity: f32, tolerance: f64,
+) -> Option<Vec<Prim>> {
     if !is_warpable_text(&object.kind) {
         return None;
     }
     let warp = crate::commands::warp::LiveWarp::for_object(doc, object.id)?;
     let mut ink = Vec::new();
     let mut push = |outline: kurbo::BezPath, paint: Paint| {
-        let warped = warp.outline(&outline);
-        let contours: Vec<Vec<_>> = crate::outline::flatten_subpaths(&warped, OUTLINE_TOLERANCE)
+        let warped = warp.outline_with_tolerance(&outline, tolerance);
+        let contours: Vec<Vec<_>> = crate::outline::flatten_subpaths(&warped, tolerance)
             .into_iter().map(|(points, _)| points.into_iter().map(|[x, y]| [x as f32, y as f32]).collect()).collect();
         if !contours.is_empty() {
             ink.push(Prim::Fill { object: object.id, contours, origin: object.pos, paint, opacity });
@@ -485,7 +551,8 @@ pub fn warped_text_ink(doc: &Document, object: &Object, lines: &[crate::text_lin
             push(matrix * kurbo::Rect::new(x, y, x + w, y + h).to_path(OUTLINE_TOLERANCE), decoration.paint.clone());
         }
         if under {
-            let ink = crate::text_lines::text_ink(doc, object.id).unwrap_or_else(|| {
+            let ink = crate::text_lines::precise_text_ink(doc, object.id, tolerance * 0.25)
+                .or_else(|| crate::text_lines::text_ink(doc, object.id)).unwrap_or_else(|| {
                 let outlines = crate::text_lines::text_outlines(doc, object.id).unwrap_or_default();
                 lines.iter().zip(glyph_groups(lines, outlines)).map(|(line, contours)| {
                     crate::text_lines::TextInk { paint: line.paint.clone(), contours }
@@ -512,6 +579,7 @@ pub fn scene_with_pages(doc: &Document) -> Scene {
         version: doc.version,
         prims: page_rects(doc).into_iter().enumerate().map(|(index, rect)| Prim::Page { index, rect }).collect(),
         quads: Vec::new(),
+        display_rotation: 0.0,
     }
 }
 
@@ -642,7 +710,7 @@ fn references_resource(paint: &Paint, id: &str) -> bool {
 }
 
 fn resource_source(doc: &Document, resource_id: &str) -> Option<([usize; 2], Vec<u8>)> {
-    let resource = doc.resources.iter().find(|r| r.id.0.to_string() == resource_id || (!r.name.is_empty() && r.name == resource_id))?;
+    let resource = doc.image_resource_by_ref(resource_id)?;
     crate::path_brush::resource_pixels(doc, resource)
 }
 
@@ -655,16 +723,63 @@ pub fn bitmap_source(doc: &Document, resource_id: &str) -> Option<([usize; 2], V
         .filter(|([w, h], data)| *w > 0 && *h > 0 && data.len() == w * h * 4)
 }
 
+pub(crate) struct BitmapSampler {
+    size: [usize; 2],
+    data: Vec<u8>,
+    matrix: kurbo::Affine,
+}
+
+impl BitmapSampler {
+    pub fn new(doc: &Document, bitmap: &crate::paint::BitmapPaint) -> Option<Self> {
+        let transform = kurbo::Affine::new(bitmap.matrix);
+        if !transform.is_finite() || transform.determinant().abs() < 1e-12 {
+            return None;
+        }
+        let (size, data) = bitmap_source(doc, &bitmap.resource_id)?;
+        Some(Self { size, data, matrix: transform })
+    }
+
+    pub fn pixel(&self, local: [f64; 2]) -> &[u8] {
+        let [a, b, c, d, e, f] = self.matrix.as_coeffs();
+        let det = self.matrix.determinant();
+        let lx = local[0] - e;
+        let ly = local[1] - f;
+        let [width, height] = self.size;
+        let x = (((d * lx - c * ly) / det).floor() as i64).rem_euclid(width as i64) as usize;
+        let y = (((-b * lx + a * ly) / det).floor() as i64).rem_euclid(height as i64) as usize;
+        let start = (y * width + x) * 4;
+        &self.data[start..start + 4]
+    }
+}
+
+pub(crate) enum TransparencySampler<'a> {
+    Gradient(&'a crate::paint::Transparency),
+    InverseBitmap(BitmapSampler),
+}
+
+impl<'a> TransparencySampler<'a> {
+    pub fn new(doc: &Document, transparency: &'a crate::paint::Transparency) -> Option<Self> {
+        use crate::paint::Transparency;
+        match transparency {
+            Transparency::None => None,
+            Transparency::Gradient { .. } => Some(Self::Gradient(transparency)),
+            Transparency::InverseBitmap(bitmap) => BitmapSampler::new(doc, bitmap).map(Self::InverseBitmap),
+        }
+    }
+
+    pub fn alpha_at(&self, local: [f64; 2]) -> f32 {
+        match self {
+            Self::Gradient(gradient) => gradient.alpha_at(local),
+            Self::InverseBitmap(bitmap) => f32::from(255 - bitmap.pixel(local)[3]) / 255.0,
+        }
+    }
+}
+
 pub fn rasterize_bitmap(doc: &Document, bitmap: &crate::paint::BitmapPaint, contours: &[Vec<[f32; 2]>], origin: [f32; 2], bounds: [f32; 4], size: [usize; 2]) -> Option<Vec<u8>> {
     if size[0] == 0 || size[1] == 0 {
         return None;
     }
-    let ([bw, bh], data) = bitmap_source(doc, &bitmap.resource_id)?;
-    let [a, b, c, d, e, f] = bitmap.matrix;
-    let det = a * d - b * c;
-    if !det.is_finite() || det.abs() < 1e-12 {
-        return None;
-    }
+    let bitmap = BitmapSampler::new(doc, bitmap)?;
     let [x0, y0, x1, y1] = bounds;
     let sx = (x1 - x0) / size[0] as f32;
     let sy = (y1 - y0) / size[1] as f32;
@@ -676,15 +791,9 @@ pub fn rasterize_bitmap(doc: &Document, bitmap: &crate::paint::BitmapPaint, cont
             if !inside(contours, x, y) {
                 continue;
             }
-            let lx = f64::from(x - origin[0]) - e;
-            let ly = f64::from(y - origin[1]) - f;
-            let u = (d * lx - c * ly) / det;
-            let v = (-b * lx + a * ly) / det;
-            let ix = (u.floor() as i64).rem_euclid(bw as i64) as usize;
-            let iy = (v.floor() as i64).rem_euclid(bh as i64) as usize;
-            let src = (iy * bw + ix) * 4;
+            let local = [f64::from(x - origin[0]), f64::from(y - origin[1])];
             let o = (py * size[0] + px) * 4;
-            rgba[o..o + 4].copy_from_slice(&data[src..src + 4]);
+            rgba[o..o + 4].copy_from_slice(bitmap.pixel(local));
         }
     }
     Some(rgba)
@@ -944,7 +1053,7 @@ fn sample_fill(
 
 pub(crate) fn blend_single_fill<'a>(
     doc: &Document, prims: impl Iterator<Item = &'a Prim>, bounds: [f32; 4], size: [u32; 2],
-    pixels: &mut [u8], blend: (crate::blend::BlendMode, Option<&crate::layer_style::BlendRanges>),
+    apply_clip: bool, mut composite: impl FnMut(usize, [u8; 4]),
 ) -> bool {
     if size.contains(&0) || bounds[2] <= 0.0 || bounds[3] <= 0.0 || !bounds.iter().all(|value| value.is_finite()) {
         return false;
@@ -966,12 +1075,15 @@ pub(crate) fn blend_single_fill<'a>(
         }
     }
     let Some((contours, origin, paint, opacity, clip)) = fill else { return false };
+    // Display-aligned ink was geometrically clipped before rotation.
+    let clip = if apply_clip { clip } else { None };
     sample_fill(doc, contours, origin, paint, bounds, size, None, clip, |offset, colour| {
-        // The regular compositor stores a rounded RGBA sample before blending.
-        // Use the same two operations here without allocating a viewport-sized layer.
+        // Match the rounded RGBA that rasterizing into a layer would produce.
         let mut source = [0; 4];
         crate::blend::blend_pixel_normal(&mut source, 0, [colour.r, colour.g, colour.b, colour.a], opacity);
-        crate::blend_composite::composite_sample(pixels, offset, &source, &blend, 1.0);
+        if source[3] != 0 {
+            composite(offset, source);
+        }
     });
     true
 }
@@ -981,12 +1093,14 @@ fn blit_image(
     doc: &Document,
     object: &Object,
     quad: Quad,
+    sample_in_quad: bool,
     opacity: f32,
     bounds: [f32; 4],
     width: u32,
     height: u32,
     view: Option<&crate::view_state::ViewState>,
     clip: Option<[f32; 4]>,
+    display: Option<kurbo::Affine>,
 ) {
     let frame = crate::commands::picture_frame::frame_geometry(doc, object);
     let brush = crate::path_brush::Ink::new(doc, object);
@@ -994,7 +1108,7 @@ fn blit_image(
     let h = object.size[1].abs();
     let x0 = object.pos[0].min(object.pos[0] + object.size[0]);
     let y0 = object.pos[1].min(object.pos[1] + object.size[1]);
-    let extent = if frame.is_some() {
+    let extent = if frame.is_some() || sample_in_quad {
         quad
     } else if let Some(ink) = &brush {
         let [x, y] = quad[0];
@@ -1005,7 +1119,10 @@ fn blit_image(
     } else {
         quad
     };
-    let [columns, rows] = image_window(extent, clip, bounds, [width, height], view);
+    let window_clip = clip.map(|rect| {
+        display.map_or(rect, |matrix| clip_bounds(rect, &matrix.as_coeffs().map(|v| v as f32)))
+    });
+    let [columns, rows] = image_window(extent, window_clip, bounds, [width, height], view);
     if columns.is_empty() || rows.is_empty() {
         return;
     }
@@ -1025,11 +1142,17 @@ fn blit_image(
     if rw == 0 || rh == 0 || data.len() != rw * rh * 4 {
         return;
     }
+    let inverse = display.map(|matrix| matrix.inverse().as_coeffs().map(|v| v as f32));
+    let in_image_clip = |point| {
+        let Some(clip) = clip else { return true; };
+        let [x, y] = inverse.map_or(point, |matrix| apply_matrix(&matrix, point));
+        in_clip(Some(clip), x, y)
+    };
     if let Some(geometry) = frame {
-        blit_framed(pixels, &data, [rw, rh], geometry, quad, opacity, bounds, width, height, view, clip, [columns, rows]);
+        blit_framed(pixels, &data, [rw, rh], geometry, quad, opacity, bounds, width, height, view, in_image_clip, [columns, rows]);
         return;
     }
-    let local_sampling = if view.is_none() && brush.is_none()
+    let local_sampling = if !sample_in_quad && view.is_none() && brush.is_none()
         && doc.pixel_layers.contains(object.id) && w > 0.0 && h > 0.0
     {
         // Sample in source coordinates so moving the image and its preview together
@@ -1049,7 +1172,7 @@ fn blit_image(
     for py in rows {
         for px in columns.clone() {
             let p = doc_point(bounds, width, height, px, py, view);
-            if !in_clip(clip, p[0], p[1]) {
+            if !in_image_clip(p) {
                 continue;
             }
             let (sx, sy) = if let Some((origin, step)) = local_sampling {
@@ -1063,6 +1186,9 @@ fn blit_image(
                 let uv = if let Some(brush) = &brush {
                     let [_, _, width, height] = brush.bounds;
                     [(p[0] - quad[0][0]) / width, (p[1] - quad[0][1]) / height]
+                } else if sample_in_quad {
+                    let Some(uv) = parallelogram_uv(&quad, p) else { return; };
+                    uv
                 } else if w > 0.0 && h > 0.0 {
                     [(p[0] - x0) / w, (p[1] - y0) / h]
                 } else {
@@ -1129,7 +1255,7 @@ fn blit_framed(
     width: u32,
     height: u32,
     view: Option<&crate::view_state::ViewState>,
-    clip: Option<[f32; 4]>,
+    in_image_clip: impl Fn([f32; 2]) -> bool,
     [columns, rows]: [std::ops::Range<u32>; 2],
 ) {
     let [_, _, cw, ch] = geometry.content;
@@ -1140,7 +1266,7 @@ fn blit_framed(
     for py in rows {
         for px in columns.clone() {
             let p = doc_point(bounds, width, height, px, py, view);
-            if !in_clip(clip, p[0], p[1]) {
+            if !in_image_clip(p) {
                 continue;
             }
             let Some(uv) = parallelogram_uv(&quad, p) else { return };
@@ -1171,13 +1297,17 @@ fn composite_text_glyphs(
     height: u32,
     view: Option<&crate::view_state::ViewState>,
     clip: Option<[f32; 4]>,
+    display: Option<kurbo::Affine>,
 ) -> bool {
     let Some(contours) = crate::text_lines::text_outlines(doc, object).filter(|_| !lines.is_empty()) else { return false };
     let Some(mut area) = contours_bounds(&contours) else { return true };
-    if let Some(view) = view {
+    if view.is_some() || display.is_some() {
         let [left, top, right, bottom] = area;
         let corners = [[left, top], [right, top], [right, bottom], [left, bottom]]
-            .map(|point| crate::view::doc_to_view(view, point));
+            .map(|point| {
+                let point = display_point(display, point);
+                view.map_or(point, |view| crate::view::doc_to_view(view, point))
+            });
         let Some(mapped) = contours_bounds(&[corners.to_vec()]) else { return true };
         area = mapped;
     }
@@ -1196,7 +1326,7 @@ fn composite_text_glyphs(
         size[0] as f32 * step[0],
         size[1] as f32 * step[1],
     ];
-    let Some(glyphs) = rasterize_glyphs(doc, object, lines, contours, window, size, view, clip) else { return false };
+    let Some(glyphs) = rasterize_glyphs(doc, object, lines, contours, window, size, view, clip, display) else { return false };
     for (row, y) in rows.enumerate() {
         for (column, x) in columns.clone().enumerate() {
             let src = (row * size[0] + column) * 4;
@@ -1205,6 +1335,13 @@ fn composite_text_glyphs(
         }
     }
     true
+}
+
+fn display_point(display: Option<kurbo::Affine>, [x, y]: [f32; 2]) -> [f32; 2] {
+    display.map_or([x, y], |matrix| {
+        let point = matrix * kurbo::Point::new(f64::from(x), f64::from(y));
+        [point.x as f32, point.y as f32]
+    })
 }
 
 pub fn text_glyph_bounds(doc: &Document, object: ObjectId) -> Option<[f32; 4]> {
@@ -1222,7 +1359,7 @@ pub fn text_glyph_image_from_outlines(doc: &Document, object: ObjectId, lines: &
     if w == 0 || h == 0 || !(bounds[2] > 0.0) || !(bounds[3] > 0.0) || !bounds.iter().all(|v| v.is_finite()) || lines.is_empty() {
         return None;
     }
-    rasterize_glyphs(doc, object, lines, contours, bounds, size, None, None)
+    rasterize_glyphs(doc, object, lines, contours, bounds, size, None, None, None)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1235,6 +1372,7 @@ fn rasterize_glyphs(
     size: [usize; 2],
     view: Option<&crate::view_state::ViewState>,
     clip: Option<[f32; 4]>,
+    display: Option<kurbo::Affine>,
 ) -> Option<Vec<u8>> {
     let pixel_count = size[0].checked_mul(size[1])?;
     // Subpixel coverage keeps thin glyphs and tab rules visible at low zoom.
@@ -1246,14 +1384,23 @@ fn rasterize_glyphs(
     let width = u32::try_from(size[0].checked_mul(samples)?).ok()?;
     let height = u32::try_from(size[1].checked_mul(samples)?).ok()?;
     let mut pixels = vec![0u8; pixel_count.checked_mul(samples * samples * 4)?];
-    let origin = doc.get_object(object).map_or([0.0, 0.0], |item| item.pos);
+    let origin = display_point(display, doc.get_object(object).map_or([0.0, 0.0], |item| item.pos));
+    let mut draw = |mut contours: Vec<Vec<[f32; 2]>>, mut paint: Paint| {
+        if let Some(display) = display {
+            for point in contours.iter_mut().flatten() {
+                *point = display_point(Some(display), *point);
+            }
+            crate::paint::transform_paint_matrix(&mut paint, display.as_coeffs());
+        }
+        fill_paint(doc, &mut pixels, &contours, origin, &paint, 1.0, bounds, width, height, view, clip, Default::default());
+    };
     if let Some(ink) = crate::text_lines::text_ink(doc, object) {
         for run in ink {
-            fill_paint(doc, &mut pixels, &run.contours, origin, &run.paint, 1.0, bounds, width, height, view, clip, Default::default());
+            draw(run.contours, run.paint);
         }
     } else {
         for (line, group) in lines.iter().zip(glyph_groups(lines, contours)) {
-            fill_paint(doc, &mut pixels, &group, origin, &line.paint, 1.0, bounds, width, height, view, clip, Default::default());
+            draw(group, line.paint.clone());
         }
     }
     if samples == 1 {
@@ -1351,6 +1498,7 @@ fn fill_text_decorations(
     height: u32,
     view: Option<&crate::view_state::ViewState>,
     clip: Option<[f32; 4]>,
+    display: Option<kurbo::Affine>,
 ) {
     if width == 0 || height == 0 || !(bounds[2] > 0.0) || !(bounds[3] > 0.0) {
         return;
@@ -1361,9 +1509,19 @@ fn fill_text_decorations(
         if ![x0, y0, w, h].iter().all(|v| v.is_finite()) || w <= 0.0 || h <= 0.0 {
             continue;
         }
-        if *matrix != crate::geometry::IDENTITY {
-            let contour = crate::geometry::rect_quad(decoration.rect, matrix).to_vec();
-            fill_paint(doc, pixels, &[contour], [x0, y0], &decoration.paint, opacity, bounds, width, height, view, clip, Default::default());
+        if display.is_some() || *matrix != crate::geometry::IDENTITY {
+            let contour = crate::geometry::rect_quad(decoration.rect, matrix)
+                .map(|point| display_point(display, point)).to_vec();
+            let mut paint = if *matrix == crate::geometry::IDENTITY {
+                Paint::Solid { colour }
+            } else {
+                decoration.paint.clone()
+            };
+            if let Some(display) = display {
+                crate::paint::transform_paint_matrix(&mut paint, display.as_coeffs());
+            }
+            let origin = display_point(display, [x0, y0]);
+            fill_paint(doc, pixels, &[contour], origin, &paint, opacity, bounds, width, height, view, clip, Default::default());
             continue;
         }
         let (x1, y1) = (x0 + w, y0 + h);
@@ -1474,14 +1632,14 @@ pub fn solid_stroke_contours(
         path.line_to((f64::from(x), f64::from(y)));
     }
     if closed { path.close_path(); }
-    if !style.pressure.is_empty() {
+    if !style.pressure.is_empty() || style.dash.contains(&0.0) {
         let outline = crate::outline::pressure_stroke_path(&path, style, f64::from(width))?;
-        return crate::boolean::stroke_outline_contours(&outline);
+        return crate::boolean::stroke_outline_contours(&outline, DEFAULT_TOLERANCE);
     }
     let mut style = style.clone();
     if !style.dash.is_empty() {
         let pattern: Vec<_> = style.dash.drain(..).map(f64::from).collect();
-        if pattern.iter().any(|dash| !dash.is_finite() || *dash <= 0.0) {
+        if !style.dash_offset.is_finite() || pattern.iter().any(|dash| !dash.is_finite() || *dash <= 0.0) {
             return None;
         }
         let shortest = pattern.iter().copied().fold(f64::INFINITY, f64::min);
@@ -1492,7 +1650,7 @@ pub fn solid_stroke_contours(
         if length / shortest > MAX_BOOLEAN_POINTS as f64 / 2.0 {
             return None;
         }
-        path = kurbo::dash(path.into_iter(), 0.0, &pattern).collect();
+        path = kurbo::dash(path.into_iter(), f64::from(style.dash_offset), &pattern).collect();
     }
     let curves = expand_stroke(&path, &style, DEFAULT_TOLERANCE).ok()?;
     let contours = curves.into_iter().flat_map(|curve| std::iter::once(curve.contour).chain(curve.holes))
@@ -1519,20 +1677,44 @@ fn distance_to_seg(p: [f32; 2], a: [f32; 2], b: [f32; 2]) -> f32 {
 fn draw_vector_masked_ink(
     doc: &Document, pixels: &mut [u8], object: ObjectId, rect: Option<[f32; 4]>,
     bounds: [f32; 4], size: [u32; 2], view: Option<&crate::view_state::ViewState>,
+    display: Option<kurbo::Affine>,
+    mask_rectangle: bool,
     draw: impl FnOnce(&mut [u8]),
 ) {
-    let Some(rings) = rect.and_then(|_| crate::clip_mask::clip_region(doc, object)) else {
+    let Some(mut contours) = rect.and_then(|[x, y, w, h]| {
+        if let Some(rings) = crate::clip_mask::clip_region(doc, object) {
+            return Some(rings.into_iter()
+                .map(|ring| ring.into_iter().map(|point| point.map(|value| value as f32)).collect())
+                .collect::<Vec<Vec<[f32; 2]>>>());
+        }
+        mask_rectangle.then(|| vec![vec![[x, y], [x + w, y], [x + w, y + h], [x, y + h]]])
+    }) else {
         draw(pixels);
         return;
     };
-    if rings.is_empty() {
+    if contours.is_empty() {
         return;
     }
     let [width, height] = size;
-    let contours: Vec<_> = rings.into_iter().map(|ring| ring.into_iter().map(|point| point.map(|value| value as f32)).collect()).collect();
+    let mut mask_rect = rect;
+    if let Some(display) = display {
+        // Rectangular clips stay in document coordinates even when ink is
+        // sampled in display coordinates. Intersect before rotating the mask.
+        if let Some(clip @ [x, y, w, h]) = rect
+            && contours_bounds(&contours).is_some_and(|[left, top, right, bottom]|
+                left < x || top < y || right > x + w || bottom > y + h)
+        {
+            contours = crate::clip_mask::clip_fill_rect(&contours, clip);
+        }
+        if contours.is_empty() { return; }
+        for point in contours.iter_mut().flatten() {
+            *point = display_point(Some(display), *point);
+        }
+        mask_rect = None;
+    }
     let mut mask = vec![0; pixels.len()];
     let white = Paint::Solid { colour: Colour::new(255, 255, 255, 255) };
-    fill_paint(doc, &mut mask, &contours, [0.0, 0.0], &white, 1.0, bounds, width, height, view, rect, Default::default());
+    fill_paint(doc, &mut mask, &contours, [0.0, 0.0], &white, 1.0, bounds, width, height, view, mask_rect, Default::default());
     let mut ink = vec![0; pixels.len()];
     draw(&mut ink);
     for (pixel, coverage) in ink.chunks_exact_mut(4).zip(mask.chunks_exact(4)) {
@@ -1558,6 +1740,8 @@ pub fn rasterize_scene(
         return blended;
     }
     let mut clips: Vec<Option<[f32; 4]>> = Vec::new();
+    let display = (scene.display_rotation != 0.0)
+        .then(|| kurbo::Affine::rotate(f64::from(scene.display_rotation).to_radians()));
     for prim in &scene.prims {
         match prim {
             Prim::Clip { rect, .. } => match rect {
@@ -1571,11 +1755,12 @@ pub fn rasterize_scene(
             },
             Prim::Page { .. } | Prim::Mark { .. } | Prim::Handle { .. } => {}
             Prim::Fill { contours, origin, paint, opacity, .. } => {
-                fill_paint(doc, &mut pixels, contours, *origin, paint, *opacity, bounds, width, height, view, clips.last().copied().flatten(), Default::default());
+                let clip = if display.is_none() { clips.last().copied().flatten() } else { None };
+                fill_paint(doc, &mut pixels, contours, *origin, paint, *opacity, bounds, width, height, view, clip, Default::default());
             }
             Prim::Appearance { inks, origin, opacity, tint, .. } => {
                 let mut layer = vec![0; pixels.len()];
-                let clip = clips.last().copied().flatten();
+                let clip = if display.is_none() { clips.last().copied().flatten() } else { None };
                 for ink in inks {
                     fill_paint(doc, &mut layer, &ink.contours, *origin, &ink.paint, 1.0, bounds, width, height, view, clip, ink.blend);
                 }
@@ -1591,28 +1776,33 @@ pub fn rasterize_scene(
                 }
                 crate::blend_composite::composite(&mut pixels, &layer, None, *opacity);
             }
-            Prim::Image { object, quad, opacity } => {
+            Prim::Image { object, quad, opacity, sample_in_quad } => {
                 if let Some(object) = doc.get_object(*object) {
                     let clip = clips.last().copied().flatten();
-                    draw_vector_masked_ink(doc, &mut pixels, object.id, clip, bounds, [width, height], view, |target| {
-                        blit_image(target, doc, object, *quad, *opacity, bounds, width, height, view, clip);
+                    draw_vector_masked_ink(doc, &mut pixels, object.id, clip, bounds, [width, height], view, display, false, |target| {
+                        blit_image(target, doc, object, *quad, *sample_in_quad, *opacity, bounds, width, height, view, clip, display);
                     });
                 }
             }
-            Prim::Text { object, lines, opacity, .. } => {
+            Prim::Text { object, lines, opacity } => {
                 if has_live_text_warp(doc, *object) { continue; }
                 let path_text = doc.get_object(*object).is_some_and(|item| matches!(item.kind, ObjectKind::PathText(_)));
                 let clip = clips.last().copied().flatten();
+                // In display space the rotated vector mask clips the complete
+                // text layer, including its decorations.
+                let ink_clip = if display.is_none() { clip } else { None };
                 let decorations = crate::text_lines::text_decorations(doc, *object);
                 let matrix = doc.get_object(*object).map_or(crate::geometry::IDENTITY, crate::geometry::text_matrix);
-                draw_vector_masked_ink(doc, &mut pixels, *object, clip, bounds, [width, height], view, |target| {
-                    fill_text_decorations(doc, target, &matrix, &decorations, true, *opacity, bounds, width, height, view, clip);
-                    if !composite_text_glyphs(doc, target, *object, lines, *opacity, bounds, width, height, view, clip) && !path_text {
+                draw_vector_masked_ink(doc, &mut pixels, *object, clip, bounds, [width, height], view, display, display.is_some(), |target| {
+                    fill_text_decorations(doc, target, &matrix, &decorations, true, *opacity, bounds, width, height, view, ink_clip, display);
+                    if !composite_text_glyphs(doc, target, *object, lines, *opacity, bounds, width, height, view, ink_clip, display)
+                        && !path_text && display.is_none()
+                    {
                         for line in lines {
                             fill_text_line(target, line, *opacity, bounds, width, height, view, clip);
                         }
                     }
-                    fill_text_decorations(doc, target, &matrix, &decorations, false, *opacity, bounds, width, height, view, clip);
+                    fill_text_decorations(doc, target, &matrix, &decorations, false, *opacity, bounds, width, height, view, ink_clip, display);
                 });
             }
             Prim::Stroke { object, points, closed, width: stroke_w, paint, opacity } => {

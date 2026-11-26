@@ -84,7 +84,7 @@ fn c07_b10_stroke_gradient_hatch_mesh_are_converted_rgb_unchanged() {
     let mut stroked = boxed(Paint::Solid { colour: Colour::new(10, 200, 30, 255) });
     stroked.stroke.paint = Paint::Solid { colour: a };
     stroked.stroke.width = 3.0;
-    let gradient = Paint::Gradient { kind: GradientKind::Linear, stops: vec![GradientStop { offset: 0.0, colour: a }, GradientStop { offset: 1.0, colour: Colour::new(0, 0, 255, 255) }], geom: GradientGeom { start: [0.0, 0.0], end: [20.0, 0.0], ratio: 1.0 } };
+    let gradient = Paint::Gradient { kind: GradientKind::Linear, stops: vec![GradientStop { offset: 0.0, colour: a }, GradientStop { offset: 1.0, colour: Colour::new(0, 0, 255, 255) }], geom: GradientGeom { start: [0.0, 0.0], end: [20.0, 0.0], ratio: 1.0, ..GradientGeom::default() } };
     let (doc, ids) = doc_with(vec![stroked, boxed(gradient)]);
     assert_eq!(rgb(solid(fill_of(&doc, ids[0]))), (10, 200, 30), "RGB fill unchanged");
     assert_eq!(rgb(solid(stroke_of(&doc, ids[0]))), expected(&a, &fogra));

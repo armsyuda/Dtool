@@ -1,19 +1,11 @@
 pub mod move_tool;
 pub use dtool_text;
 
-pub const ZOOM_MIN: f32 = 0.01;
-pub const ZOOM_MAX: f32 = 100.0;
+pub use dtool_core::{ZOOM_MIN, ZOOM_MAX, clamp_zoom};
 pub const WHEEL_ZOOM_RATE: f32 = 0.0015;
 
 pub fn crate_ready() -> bool {
     true
-}
-
-pub fn clamp_zoom(z: f32) -> f32 {
-    if z.is_nan() {
-        return 1.0;
-    }
-    z.clamp(ZOOM_MIN, ZOOM_MAX)
 }
 
 pub type ViewNav = dtool_core::ViewState;
@@ -111,21 +103,29 @@ impl HandNavigator {
 pub enum NavigationTool { #[default] View, Zoom }
 
 pub fn zoom_tool_click(view: &mut dtool_core::ViewState, point: [f32; 2], alt: bool) {
+    zoom_tool_click_with_limits(view, point, alt, dtool_core::view::ZoomLimits::default());
+}
+
+pub fn zoom_tool_click_with_limits(
+    view: &mut dtool_core::ViewState, point: [f32; 2], alt: bool, limits: dtool_core::view::ZoomLimits,
+) {
     let factor = if alt { 0.5 } else { 2.0 };
-    let anchor = dtool_core::view_to_doc(view, point);
-    view.zoom = dtool_core::clamp_zoom(view.zoom * factor);
-    let mapped = dtool_core::doc_to_view(view, anchor);
-    view.scroll[0] += point[0] - mapped[0];
-    view.scroll[1] += point[1] - mapped[1];
+    limits.zoom_about(view, view.zoom * factor, point);
 }
 
 pub fn zoom_tool_marquee(view: &mut dtool_core::ViewState, start: [f32; 2], end: [f32; 2], size: [f32; 2]) {
+    zoom_tool_marquee_with_limits(view, start, end, size, dtool_core::view::ZoomLimits::default());
+}
+
+pub fn zoom_tool_marquee_with_limits(
+    view: &mut dtool_core::ViewState, start: [f32; 2], end: [f32; 2], size: [f32; 2], limits: dtool_core::view::ZoomLimits,
+) {
     let width = (end[0] - start[0]).abs();
     let height = (end[1] - start[1]).abs();
     if width <= f32::EPSILON || height <= f32::EPSILON || !size.iter().all(|v| v.is_finite() && *v > 0.0) { return; }
     let midpoint = [(start[0] + end[0]) * 0.5, (start[1] + end[1]) * 0.5];
     let anchor = dtool_core::view_to_doc(view, midpoint);
-    view.zoom = dtool_core::clamp_zoom(view.zoom * (size[0] / width).min(size[1] / height));
+    view.zoom = limits.clamp(view.zoom * (size[0] / width).min(size[1] / height));
     let mapped = dtool_core::doc_to_view(view, anchor);
     view.scroll[0] += size[0] * 0.5 - mapped[0];
     view.scroll[1] += size[1] * 0.5 - mapped[1];

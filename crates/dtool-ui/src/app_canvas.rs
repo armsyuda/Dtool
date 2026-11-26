@@ -9,6 +9,7 @@ use dtool_core::layer_style::raster::{
 use dtool_core::object::ObjectId;
 use dtool_core::paint::Colour;
 use dtool_core::text_lines::TextLine;
+use dtool_core::view::ZoomLimits;
 use dtool_core::view_state::ViewState;
 use dtool_core::scene::{contours_bounds, object_quad, rasterize_fill, representative_colour, simple_solid, Prim, Scene, IDENTITY};
 use dtool_tools::dtool_text::decorations::{object_decorations, DecorationKind, DecorationRect};
@@ -23,7 +24,7 @@ const MAX_VECTOR_TEXTURE: f32 = 4096.0;
 const EFFECT_TEXTURE_START: usize = usize::MAX / 2 + 1;
 const PAN_MARGIN: usize = 96;
 const ZOOM_IDLE_SECONDS: f64 = 0.065;
-const ZOOM_PREVIEW_PIXELS: f32 = 170_000.0;
+const NAVIGATION_PREVIEW_PIXELS: f32 = 170_000.0;
 const INTERACTIVE_RENDER_BUDGET: std::time::Duration = std::time::Duration::from_millis(12);
 
 type TextureKey = (ObjectId, u64, usize, [usize; 2]);
@@ -39,6 +40,7 @@ struct GlyphTexture {
 }
 
 struct CompositeTexture {
+    rotation_deg: Option<f32>,
     bounds: [f32; 4],
     size: [usize; 2],
     filter: egui::TextureOptions,
@@ -47,11 +49,49 @@ struct CompositeTexture {
     tone_preview: Option<crate::dialogs::tone_blend::Preview>,
     brush_revision: Option<u64>,
     pan_scale: Option<(f32, Option<f32>)>,
-    zoom_preview: bool,
+    navigation_preview: bool,
     device_scale: f32,
+    detail: i32,
     render_time: std::time::Duration,
     texture: egui::TextureHandle,
     transform_preview: Option<CompositeTransformPreview>,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+struct CompositeRequest {
+    rotation_deg: Option<f32>,
+    revision: u64,
+    detail: i32,
+    bounds: [f32; 4],
+    size: [usize; 2],
+}
+
+struct CompositeJob {
+    request: CompositeRequest,
+    result: std::sync::mpsc::Receiver<(egui::ColorImage, std::time::Duration)>,
+}
+
+impl CompositeJob {
+    fn start(ctx: &egui::Context, request: CompositeRequest, document: dtool_core::Document,
+        flags: dtool_core::CanvasFlags, scene: Scene,
+    ) -> std::io::Result<Self> {
+        let (send, result) = std::sync::mpsc::channel();
+        let ctx = ctx.clone();
+        let viewport = ctx.viewport_id();
+        std::thread::Builder::new().name("dtool-canvas-composite".into()).spawn(move || {
+            let started = std::time::Instant::now();
+            let render = || dtool_render::scene::with_fill_antialiasing(|| render_scene_region(
+                &document, &flags, &[], &scene, request.bounds, request.size.map(|size| size as u32), 1.0,
+            ));
+            let pixels = if document.stories.is_empty() { render() } else {
+                dtool_text::frame::with_doc_layout_reuse(&document, &dtool_text::FontLibrary::shared(), render)
+            };
+            let image = egui::ColorImage::from_rgba_unmultiplied(request.size, &pixels);
+            let _ = send.send((image, started.elapsed()));
+            ctx.request_repaint_of(viewport);
+        })?;
+        Ok(Self { request, result })
+    }
 }
 
 struct CompositeTransformPreview {
@@ -74,9 +114,111 @@ fn canvas_detail(view: &ViewState) -> i32 {
     }
 }
 
+fn rotated_fill_scene(document: &dtool_core::Document, scene: &Scene, angle: f32) -> Option<Scene> {
+    use dtool_core::paint::{Paint, transform_paint_matrix};
+
+    // Geometry-dependent compositing needs the original document coordinate system.
+    if !document.layer_masks.is_empty() || document.objects.iter().any(|object| {
+        object.tone_blend.is_some() || object.effects.iter().any(|effect| effect.enabled)
+    }) {
+        return None;
+    }
+    let (sin, cos) = f64::from(angle).to_radians().sin_cos();
+    let matrix = [cos, sin, -sin, cos, 0.0, 0.0];
+    let rotate = |[x, y]: [f32; 2]| {
+        let [x, y] = [f64::from(x), f64::from(y)];
+        [(cos * x - sin * y) as f32, (sin * x + cos * y) as f32]
+    };
+    let mut clips = Vec::new();
+    let rotate_ink = |contours: &mut Vec<Vec<[f32; 2]>>, paint: &mut Paint, clips: &[[f32; 4]]| {
+        if !dtool_core::scene::paint_supported(paint) {
+            return None;
+        }
+        for &clip @ [x, y, w, h] in clips {
+            let Some([left, top, right, bottom]) = contours_bounds(contours) else { break; };
+            if left < x || top < y || right > x + w || bottom > y + h {
+                *contours = dtool_core::clip_mask::clip_fill_rect(contours, clip);
+            }
+        }
+        for point in contours.iter_mut().flatten() { *point = rotate(*point); }
+        transform_paint_matrix(paint, matrix);
+        Some(())
+    };
+    let mut prims = Vec::with_capacity(scene.prims.len());
+    for mut prim in scene.prims.iter().cloned() {
+        match &mut prim {
+            Prim::Fill { contours, origin, paint, .. } => {
+                rotate_ink(contours, paint, &clips)?;
+                if contours.is_empty() { continue; }
+                *origin = rotate(*origin);
+            }
+            Prim::Appearance { inks, origin, .. } => {
+                for ink in inks.iter_mut() { rotate_ink(&mut ink.contours, &mut ink.paint, &clips)?; }
+                inks.retain(|ink| !ink.contours.is_empty());
+                if inks.is_empty() { continue; }
+                *origin = rotate(*origin);
+            }
+            Prim::Stroke { object, points, closed, width, paint, opacity } => {
+                if !matches!(paint, Paint::Solid { .. } | Paint::Gradient { .. }) {
+                    return None;
+                }
+                let source = document.get_object(*object)?;
+                let mut contours = dtool_core::scene::solid_stroke_contours(source, points, *closed, *width)?;
+                rotate_ink(&mut contours, paint, &clips)?;
+                if contours.is_empty() { continue; }
+                prim = Prim::Fill {
+                    object: *object, contours, origin: rotate(source.pos), paint: paint.clone(), opacity: *opacity,
+                };
+            }
+            Prim::Image { object, quad, sample_in_quad, .. } => {
+                let source = document.get_object(*object)?;
+                if source.path_brush.is_some() {
+                    return None;
+                }
+                match source.kind {
+                    dtool_core::ObjectKind::Image => {
+                        // Ordinary images use the axis-aligned footprint of the compositor.
+                        let [left, top] = source.pos;
+                        let [right, bottom] = [left + source.size[0], top + source.size[1]];
+                        let [x0, y0, x1, y1] = [left.min(right), top.min(bottom), left.max(right), top.max(bottom)];
+                        if !(x0 < x1 && y0 < y1) {
+                            return None;
+                        }
+                        *quad = [[x0, y0], [x1, y0], [x1, y1], [x0, y1]];
+                        *sample_in_quad = true;
+                    }
+                    dtool_core::ObjectKind::PictureFrame => {
+                        dtool_core::commands::picture_frame::frame_geometry(document, source)?;
+                    }
+                    _ => return None,
+                }
+                *quad = quad.map(rotate);
+            }
+            Prim::Text { object, .. } => {
+                if dtool_core::scene::has_live_text_warp(document, *object) {
+                    // Its visible ink is already in the scene as fills.
+                    continue;
+                }
+                if dtool_core::text_lines::text_outlines(document, *object).is_none() {
+                    return None;
+                }
+            }
+            // The rasterizer still needs the clip in document coordinates for images and text.
+            Prim::Clip { rect: Some(rect), .. } => clips.push(*rect),
+            Prim::Clip { rect: None, .. } => { clips.pop()?; }
+            Prim::Page { .. } | Prim::Mark { .. } | Prim::Handle { .. } => continue,
+            _ => return None,
+        }
+        prims.push(prim);
+    }
+    Some(Scene { version: scene.version, prims, quads: Vec::new(), display_rotation: angle })
+}
+
 fn canvas_scene(document: &dtool_core::Document, view: &ViewState, detail: i32) -> Scene {
     let tolerance = dtool_core::outline::OUTLINE_TOLERANCE / 2.0_f64.powi(detail);
-    dtool_render::scene::build_scene_with_tolerance(document, &view.canvas_flags, tolerance)
+    let mut scene = dtool_render::scene::build_scene_with_tolerance(document, &view.canvas_flags, tolerance);
+    dtool_core::clip_mask::apply(document, &view.canvas_flags, &mut scene);
+    scene
 }
 
 fn composite_transform_patches(
@@ -203,18 +345,41 @@ impl FillRegion {
 
 struct FillTexture {
     region: FillRegion,
+    rotation_deg: Option<f32>,
     texture: egui::TextureHandle,
     used: bool,
 }
 
 pub fn wheel_view(view: &mut ViewState, scroll: [f32; 2], zoom_delta: f32, pointer: Option<[f32; 2]>) -> bool {
+    wheel_view_with_limits(view, scroll, zoom_delta, pointer, ZoomLimits::default())
+}
+
+fn wheel_view_with_limits(
+    view: &mut ViewState, scroll: [f32; 2], zoom_delta: f32, pointer: Option<[f32; 2]>, limits: ZoomLimits,
+) -> bool {
     use crate::canvas::CanvasViewCommand;
-    match CanvasViewCommand::from_wheel(view, scroll, zoom_delta, pointer) {
-        Some(CanvasViewCommand::ZoomSet { zoom, around: Some(point) }) => dtool_core::view::zoom_about(view, zoom, point),
+    match CanvasViewCommand::from_wheel(view, scroll, zoom_delta, pointer, limits) {
+        Some(CanvasViewCommand::ZoomSet { zoom, around: Some(point) }) => limits.zoom_about(view, zoom, point),
         Some(CanvasViewCommand::Pan { delta }) => dtool_core::command::view_pan_apply(view, delta),
         _ => return false,
     }
     true
+}
+
+#[derive(PartialEq)]
+struct CompositionKey {
+    revision: (dtool_core::document::DocInstance, u64, u64),
+    story: dtool_core::StoryId,
+    object: Option<ObjectId>,
+    range: [usize; 2],
+    text: String,
+    symbol_sync: bool,
+}
+
+struct CompositionDraft {
+    key: CompositionKey,
+    session: Session,
+    canvas: AppCanvas,
 }
 
 #[derive(Default)]
@@ -231,15 +396,23 @@ pub struct AppCanvas {
     effect_regions: HashMap<ObjectId, (u64, Option<[f32; 4]>)>,
     uses_blending: bool,
     composite: Option<CompositeTexture>,
+    rotated_fill_scene: Option<(f32, Option<Scene>)>,
+    composite_revision: u64,
+    settling_composite: bool,
+    composite_job: Option<CompositeJob>,
     panning: bool,
     zoom_preview_until: f64,
     mesh_preview: Option<crate::canvas_input::warp_mesh::MeshPreview>,
-    node_preview: Option<(ObjectId, Vec<dtool_core::curve::Contour>, Box<AppCanvas>)>,
+    node_preview: Option<(Vec<(ObjectId, Vec<dtool_core::curve::Contour>)>, Box<AppCanvas>)>,
+    composition_draft: Option<Box<CompositionDraft>>,
     transform_draft: Option<(ObjectId, dtool_core::command::TransformSelectionBoxArgs, Box<AppCanvas>)>,
     pub(crate) blend_preview: Option<Vec<BlendPreview>>,
     pub(crate) tone_preview: Option<crate::dialogs::tone_blend::Preview>,
     pub(crate) layer_opacity_preview: Option<LayerOpacityPreview>,
     painted_layer_opacity: Option<LayerOpacityPreview>,
+    pub(crate) stroke_width_preview: Option<crate::stroke_panel::StrokeWidthPreview>,
+    painted_stroke_width: Option<crate::stroke_panel::StrokeWidthPreview>,
+    painted_gradient: Option<crate::canvas_input::GradientPreview>,
     pub show_invisibles: bool,
     pub document_viewport: Option<[f32; 2]>,
     pub input: crate::canvas_input::CanvasInput,
@@ -387,15 +560,60 @@ impl AppCanvas {
     }
 
     fn refresh(&mut self, session: &Session) {
+        self.refresh_with_gradient(session, None);
+    }
+
+    fn refresh_with_gradient(&mut self, session: &Session, gradient: Option<&crate::canvas_input::GradientPreview>) {
         let flags = &session.view.canvas_flags;
         let detail = canvas_detail(&session.view);
         let key = (session.context, session.generation, session.document.version, flags.clone(), detail);
-        if self.key.as_ref() == Some(&key) {
+        let same_scene_key = self.key.as_ref() == Some(&key);
+        let previous = self.painted_gradient.as_ref();
+        if same_scene_key && previous == gradient {
             return;
         }
-        self.scene = canvas_scene(&session.document, &session.view, detail);
-        self.effect_prims.clear();
+        // Zoom can change the curve tessellation without changing the artwork.
+        // Retain the last composite so navigation can reuse it across that boundary.
+        let only_detail_changed = previous.is_none() && gradient.is_none()
+            && self.key.as_ref().is_some_and(|(context, generation, version, old_flags, _)| {
+                *context == session.context && *generation == session.generation
+                    && *version == session.document.version && old_flags == flags
+            });
+        let changing = [previous.map(|draft| draft.id), gradient.map(|draft| draft.id)];
+        let rebuild_scene = !same_scene_key || previous.into_iter().chain(gradient).any(|draft| draft.changes_scene_paint());
+        if rebuild_scene { self.rotated_fill_scene = None; }
+        let previous_prims = rebuild_scene.then(|| self.rebuild_scene(session, detail));
+        if same_scene_key {
+            // Fill textures belong to scene slots. Preserve only unchanged ink
+            // outside the draft targets, including when a paint changes the slot order.
+            self.fill_textures.retain(|index, _| {
+                self.scene.prims.get(*index).is_some_and(|prim| {
+                    !changing.contains(&prim_object(prim))
+                        && previous_prims.as_ref().is_none_or(|prims| prims.get(*index) == Some(prim))
+                })
+            });
+        } else {
+            self.fill_textures.clear();
+        }
+        if !only_detail_changed {
+            self.composite = None;
+            self.composite_revision = self.composite_revision.wrapping_add(1);
+            self.settling_composite = false;
+        }
+        self.key = Some(key);
+        self.painted_gradient = gradient.cloned();
+        // Undo can change the scene generation without changing the document version.
+        self.textures.clear();
+        self.glyph_ink.clear();
+        self.decorations.clear();
+        self.effects = Default::default();
         self.effect_regions.clear();
+    }
+
+    fn rebuild_scene(&mut self, session: &Session, detail: i32) -> Vec<Prim> {
+        let scene = canvas_scene(&session.document, &session.view, detail);
+        let previous_prims = std::mem::replace(&mut self.scene, scene).prims;
+        self.effect_prims.clear();
         for (index, prim) in self.scene.prims.iter().enumerate() {
             if let Some(id) = prim_object(prim) {
                 self.effect_prims.entry(id).or_default().push(index);
@@ -403,12 +621,14 @@ impl AppCanvas {
         }
         let flags = &session.view.canvas_flags;
         let doc = &session.document;
-        let masked_ink = dtool_core::clip_mask::has_roles(doc) && self.scene.prims.iter().any(|prim| {
-            match prim {
-                Prim::Image { object, .. } | Prim::Text { object, .. } => dtool_core::clip_mask::clip_region(doc, *object).is_some(),
-                _ => false,
-            }
-        });
+        let masked_ink = (dtool_core::clip_mask::has_roles(doc)
+            || doc.objects.iter().any(|object| dtool_core::scene::oriented_vector_crop(object).is_some()))
+            && self.scene.prims.iter().any(|prim| {
+                match prim {
+                    Prim::Image { object, .. } | Prim::Text { object, .. } => dtool_core::clip_mask::clip_region(doc, *object).is_some(),
+                    _ => false,
+                }
+            });
         self.uses_blending = flags.mask_view.is_none()
             && !matches!(flags.view_mode, dtool_core::ViewMode::Outline | dtool_core::ViewMode::Wireframe)
             && (masked_ink || dtool_core::blend_composite::scene_needs_canvas_composite(doc, &self.scene)
@@ -416,14 +636,7 @@ impl AppCanvas {
                     dtool_core::layer_style::raster::has_group_effect(object)
                         || object.effects.iter().any(effect_needs_backdrop)
                 }));
-        self.composite = None;
-        self.key = Some(key);
-        // Undo can change the scene generation without changing the document version.
-        self.textures.clear();
-        self.fill_textures.clear();
-        self.glyph_ink.clear();
-        self.decorations.clear();
-        self.effects = Default::default();
+        previous_prims
     }
 
     pub fn effect_cache(&self) -> &EffectCache {
@@ -478,6 +691,7 @@ impl AppCanvas {
                 version: self.scene.version,
                 prims: indices.iter().map(|&index| prims[index].clone()).collect(),
                 quads: self.scene.quads.clone(),
+                display_rotation: self.scene.display_rotation,
             };
             dtool_render::scene::with_fill_antialiasing(|| {
                 render_scene_region(doc, &view.canvas_flags, &live, &scene, bounds, px.map(|side| side as u32), 1.0)
@@ -595,7 +809,8 @@ impl AppCanvas {
         self.panning = ui.input(|state| {
             let space = state.key_down(egui::Key::Space);
             let middle = state.pointer.middle_down();
-            let wheel = response.hovered() && state.smooth_scroll_delta != egui::Vec2::ZERO;
+            let wheel = response.hovered() && state.zoom_delta() == 1.0
+                && state.smooth_scroll_delta != egui::Vec2::ZERO;
             let pointer_drag = response.dragged() || (response.hovered() && (middle || state.pointer.primary_down()));
             wheel || (!input && pointer_drag
                 && crate::canvas_input::nav_mode(&session.active_tool, space, middle) == crate::canvas_input::NavMode::Pan)
@@ -604,8 +819,9 @@ impl AppCanvas {
             if self.panning {
                 self.zoom_preview_until = 0.0;
             }
-            if self.wheel(ui, response, &mut session.view) {
-                self.zoom_preview_until = ui.input(|state| state.time) + ZOOM_IDLE_SECONDS;
+            let limits = session.zoom_limits();
+            if self.wheel(ui, response, &mut session.view, limits) {
+                self.preview_zoom(ui);
             }
         }
         let node_input = input && session.has_document
@@ -633,7 +849,10 @@ impl AppCanvas {
         // before handling input, saving, or serving the next MCP request.
         let original_mesh = mesh_preview.as_ref().and_then(|preview| preview.install(session));
         let vector_draft = move_input.then(|| self.direct_vector_transform(session)).flatten();
-        if input && let Some(id) = self.input.live_text_resize(session).or(vector_draft)
+        if self.paint_composition_preview(ui, rect, session, input, !frame_tool) {
+            self.transform_draft = None;
+            self.node_preview = None;
+        } else if input && let Some(id) = self.input.live_text_resize(session).or(vector_draft)
             && let Some(args) = self.input.preview.as_ref()
         {
             let mut draft = session.document.clone();
@@ -674,7 +893,7 @@ impl AppCanvas {
             self.transform_draft = None;
             if !node_input || !self.paint_node_preview(ui, rect, session) {
                 self.node_preview = None;
-                self.paint_layers_with_opacity(ui, rect, session, !frame_tool);
+                self.paint_layers_with_style_preview(ui, rect, session, !frame_tool);
             }
         }
         if let (Some(preview), Some(original)) = (mesh_preview, original_mesh) {
@@ -690,6 +909,9 @@ impl AppCanvas {
                 }
             } else {
                 self.input.handle(ui, response, session, &self.scene);
+                if self.input.gradient_preview(session) != self.painted_gradient.as_ref() {
+                    ui.ctx().request_repaint();
+                }
             }
             self.paint_selection(&ui.painter_at(rect), rect, &session.view, session, true);
             crate::canvas::frame_text_input::paint_text_selection(ui, session, response, &session.view);
@@ -702,6 +924,72 @@ impl AppCanvas {
         }
     }
 
+    fn paint_composition_preview(
+        &mut self, ui: &Ui, rect: Rect, session: &Session, input: bool, overlay: bool,
+    ) -> bool {
+        use crate::canvas::frame_text_input::{TextRangeMark, composition_text, paint_text_range};
+        use crate::canvas_input::{ToolKind, tool_kind};
+
+        let active = input && session.has_document
+            && matches!(tool_kind(&session.active_tool), ToolKind::ArtText | ToolKind::FrameText | ToolKind::Table);
+        if !active {
+            self.composition_draft = None;
+            return false;
+        }
+        let (Some(edit), Some(text)) = (session.text_edit.as_ref(), composition_text(session)) else {
+            self.composition_draft = None;
+            return false;
+        };
+        let start = edit.anchor.min(edit.caret);
+        let key = CompositionKey {
+            revision: (session.document.instance, session.generation, session.document.version),
+            story: edit.story,
+            object: edit.object,
+            range: [start, edit.anchor.max(edit.caret)],
+            text,
+            symbol_sync: session.symbol_sync,
+        };
+
+        if self.composition_draft.as_ref().is_none_or(|current| current.key != key) {
+            let mut document = session.document.clone();
+            // Keep temporary glyph and layout caches separate from the saved document.
+            document.instance = Default::default();
+            let mut draft = Session::new(document);
+            draft.text_edit = Some(dtool_core::command::TextEditState {
+                story: edit.story,
+                object: edit.object,
+                caret: edit.caret,
+                anchor: edit.anchor,
+                before: None,
+            });
+            draft.symbol_sync = session.symbol_sync;
+            if draft.run_named("text.edit.type", serde_json::json!({"text": &key.text})).is_err() {
+                self.composition_draft = None;
+                return false;
+            }
+            if let Some(edit) = draft.text_edit.as_mut() { edit.anchor = start; }
+            draft.text_composing = Some(key.text.clone());
+            if let Some(current) = self.composition_draft.as_mut() {
+                current.key = key;
+                current.session = draft;
+                current.canvas.invalidate();
+            } else {
+                self.composition_draft = Some(Box::new(CompositionDraft { key, session: draft, canvas: Self::new() }));
+            }
+        }
+
+        // Input and hit testing still use the committed document.
+        self.refresh(session);
+        let Some(draft) = self.composition_draft.as_mut() else { return false; };
+        draft.session.view = session.view.clone();
+        draft.session.active_tool.clone_from(&session.active_tool);
+        draft.canvas.show_invisibles = self.show_invisibles;
+        draft.canvas.paint_layers(ui, rect, &draft.session, overlay);
+        let mark = TextRangeMark::Composition(egui::Stroke::new(1.0, dtool_design::color("accent")));
+        paint_text_range(ui, &draft.session, rect, &draft.session.view, mark);
+        true
+    }
+
     fn direct_vector_transform(&self, session: &Session) -> Option<ObjectId> {
         use dtool_core::object::ObjectKind;
         use dtool_tools::move_tool::GestureKind;
@@ -711,7 +999,8 @@ impl AppCanvas {
         let needs_preview = args.scale != [1.0, 1.0] || args.rotation_deg != 0.0 || args.shear_deg != 0.0;
         if !needs_preview || !matches!(self.input.move_tool.gesture, Some(GestureKind::Scale(_) | GestureKind::Rotate | GestureKind::Shear(_)))
             || self.uses_blending || self.blend_preview.is_some() || self.tone_preview.is_some()
-            || self.layer_opacity_preview.is_some() || session.view.rotation_deg != 0.0
+            || self.layer_opacity_preview.is_some() || self.stroke_width_preview.is_some()
+            || session.view.rotation_deg != 0.0
             || session.view.canvas_flags.mask_view.is_some()
             || dtool_render::scene::pixel_step(&session.document, &session.view.canvas_flags).is_some()
             || !dtool_core::commands::layer_style::snapshot_staged(session).is_empty()
@@ -726,35 +1015,41 @@ impl AppCanvas {
     fn paint_node_preview(&mut self, ui: &Ui, rect: Rect, session: &mut Session) -> bool {
         use dtool_core::commands::curve_edit::edited_curve;
 
-        let nodes = &self.input.nodes;
-        let (Some(id), Some(live)) = (nodes.target, nodes.live.as_ref()) else { return false };
-        let Some(source) = session.document.find_object_mut(id.0) else { return false };
-        if source.locked || source.curve().is_none() {
-            return false;
+        let Some(overrides) = self.input.nodes.live_curve_overrides() else { return false };
+        let mut originals = Vec::new();
+        for (id, contours) in &overrides {
+            if let Some(source) = session.document.find_object_mut(id.0)
+                && !source.locked && source.curve().is_some()
+                && let Ok(Some(edited)) = edited_curve(source, contours, true)
+            {
+                originals.push((*id, std::mem::replace(source, edited)));
+            }
         }
-        let Some(contours) = nodes.live_edit_contours() else { return false };
-        let Ok(Some(edited)) = edited_curve(source, &contours, true) else { return false };
-        let (last_id, last, canvas) = self.node_preview.get_or_insert_with(|| (id, live.clone(), Box::new(Self::new())));
-        if *last_id != id || last != live {
-            *last_id = id;
-            last.clone_from(live);
+        if originals.is_empty() { return false; }
+        let (last, canvas) = self.node_preview.get_or_insert_with(|| (Vec::new(), Box::new(Self::new())));
+        if *last != overrides {
+            *last = overrides;
             canvas.invalidate();
         }
         // Use normal scene order, masks and paint while keeping the committed document for input and undo.
-        let original = std::mem::replace(source, edited);
         canvas.show_invisibles = self.show_invisibles;
         canvas.paint_layers(ui, rect, session, true);
-        if let Some(source) = session.document.find_object_mut(id.0) {
-            *source = original;
+        for (id, original) in originals {
+            if let Some(source) = session.document.find_object_mut(id.0) {
+                *source = original;
+            }
         }
         true
     }
 
-    fn paint_layers_with_opacity(&mut self, ui: &Ui, rect: Rect, session: &mut Session, overlay: bool) {
+    fn paint_layers_with_style_preview(&mut self, ui: &Ui, rect: Rect, session: &mut Session, overlay: bool) {
         let preview = self.layer_opacity_preview.clone();
-        if self.painted_layer_opacity != preview {
+        let stroke_preview = self.stroke_width_preview.clone();
+        let gradient = self.input.gradient_preview(session).cloned();
+        if self.painted_layer_opacity != preview || self.painted_stroke_width != stroke_preview {
             self.invalidate();
             self.painted_layer_opacity = preview.clone();
+            self.painted_stroke_width = stroke_preview.clone();
         }
         let originals = if let Some(preview) = preview {
             preview.ids.into_iter().filter_map(|id| {
@@ -764,7 +1059,39 @@ impl AppCanvas {
         } else {
             Vec::new()
         };
-        self.paint_layers(ui, rect, session, overlay);
+        let stroke_widths = if let Some(preview) = stroke_preview {
+            preview.ids.into_iter().filter_map(|id| {
+                let object = session.document.find_object_mut(id.0)?;
+                let stroke = match preview.index {
+                    0 => &mut object.stroke,
+                    index => object.additional_strokes.get_mut(index - 1)?,
+                };
+                Some((id, preview.index, std::mem::replace(&mut stroke.width, preview.width)))
+            }).collect()
+        } else {
+            Vec::new()
+        };
+        let restore_gradient = gradient.clone().and_then(|mut preview| {
+            let object = session.document.find_object_mut(preview.id.0)?;
+            preview.swap_with_object(object).then_some(preview)
+        });
+        // The drag paints through the regular scene; only its final command is recorded in history.
+        let active_gradient = restore_gradient.as_ref().and(gradient.as_ref());
+        self.paint_layers_with_gradient(ui, rect, session, overlay, active_gradient);
+        if let Some(mut preview) = restore_gradient
+            && let Some(object) = session.document.find_object_mut(preview.id.0)
+        {
+            preview.swap_with_object(object);
+        }
+        for (id, index, width) in stroke_widths {
+            if let Some(object) = session.document.find_object_mut(id.0) {
+                let stroke = match index {
+                    0 => &mut object.stroke,
+                    index => &mut object.additional_strokes[index - 1],
+                };
+                stroke.width = width;
+            }
+        }
         for (id, opacity) in originals {
             if let Some(object) = session.document.find_object_mut(id.0) {
                 object.opacity = opacity;
@@ -780,7 +1107,12 @@ impl AppCanvas {
         crate::canvas::frame_text_input::text_entry_active(session)
     }
 
-    fn wheel(&self, ui: &Ui, response: &egui::Response, view: &mut ViewState) -> bool {
+    pub(crate) fn preview_zoom(&mut self, ui: &Ui) {
+        self.zoom_preview_until = ui.input(|state| state.time) + ZOOM_IDLE_SECONDS;
+        ui.ctx().request_repaint();
+    }
+
+    fn wheel(&self, ui: &Ui, response: &egui::Response, view: &mut ViewState, limits: ZoomLimits) -> bool {
         if !response.hovered() {
             return false;
         }
@@ -788,7 +1120,7 @@ impl AppCanvas {
         let rect = response.rect;
         let (scroll, zoom, pos) = ui.input(|i| (i.smooth_scroll_delta, i.zoom_delta(), i.pointer.hover_pos()));
         let pointer = pos.map(|p| [p.x - rect.min.x, p.y - rect.min.y]);
-        if wheel_view(view, [scroll.x, scroll.y], zoom, pointer) {
+        if wheel_view_with_limits(view, [scroll.x, scroll.y], zoom, pointer, limits) {
             ui.ctx().request_repaint();
         }
         view.zoom != before
@@ -800,7 +1132,10 @@ impl AppCanvas {
         self.paint_selection(&ui.painter_at(rect), rect, &session.view, session, false);
     }
 
-    fn paint_composite(&mut self, ui: &Ui, painter: &Painter, rect: Rect, view: &ViewState, session: &Session) -> bool {
+    fn paint_composite(
+        &mut self, ui: &Ui, painter: &Painter, rect: Rect, view: &ViewState, session: &Session,
+        staged: Vec<StagedEffect>,
+    ) -> bool {
         let show_previews = view.canvas_flags.mask_view.is_none()
             && !matches!(view.canvas_flags.view_mode, dtool_core::ViewMode::Outline | dtool_core::ViewMode::Wireframe);
         let preview = self.blend_preview.as_ref().filter(|_| show_previews);
@@ -813,17 +1148,37 @@ impl AppCanvas {
         let pixel_step = show_previews.then(|| {
             dtool_render::scene::pixel_step(&session.document, &view.canvas_flags)
         }).flatten().filter(|step| step * device_scale >= 1.0);
-        let staged = dtool_core::commands::layer_style::snapshot_staged(session);
         let staged_composite_effect = show_previews && staged.iter().any(|item| {
             effect_needs_backdrop(&item.effect)
-                || (dtool_core::layer_style::raster::group_effect_enabled(&item.effect)
+                || ((dtool_core::layer_style::raster::group_effect_enabled(&item.effect)
+                    || dtool_core::layer_style::raster::group_blur_params(&item.effect).is_some())
                     && session.document.get_object(item.object).is_some_and(dtool_core::layer_style::raster::group_effect_target))
         });
         if (!self.uses_blending && !staged_composite_effect && preview.is_none() && tone_preview.is_none()
             && brush_draft.is_none() && pixel_step.is_none()) || !rect.is_positive() {
             return false;
         }
-        let visible = dtool_core::view::visible_doc_quad(view, [rect.width(), rect.height()]);
+        let align_fill = show_previews && view.rotation_deg != 0.0
+            && view.canvas_flags.view_mode == dtool_core::ViewMode::Normal
+            && staged.is_empty() && preview.is_none() && tone_preview.is_none() && brush_draft.is_none()
+            && self.painted_gradient.is_none() && self.painted_layer_opacity.is_none()
+            && self.painted_stroke_width.is_none();
+        if align_fill && self.rotated_fill_scene.as_ref().is_none_or(|(angle, _)| *angle != view.rotation_deg) {
+            let document = &session.document;
+            let rotate = || rotated_fill_scene(document, &self.scene, view.rotation_deg);
+            let aligned = if document.stories.is_empty() {
+                rotate()
+            } else {
+                dtool_text::frame::with_doc_layout_reuse(document, &dtool_text::FontLibrary::shared(), rotate)
+            };
+            self.rotated_fill_scene = Some((view.rotation_deg, aligned));
+        }
+        let aligned = self.rotated_fill_scene.as_ref().filter(|(angle, _)| align_fill && *angle == view.rotation_deg)
+            .and_then(|(_, scene)| scene.as_ref());
+        let rotation_deg = aligned.map(|_| view.rotation_deg);
+        let unrotated = aligned.map(|_| ViewState { rotation_deg: 0.0, ..view.clone() });
+        let sample_view = unrotated.as_ref().unwrap_or(view);
+        let visible = dtool_core::view::visible_doc_quad(sample_view, [rect.width(), rect.height()]);
         let Some(edges) = contours_bounds(&[visible.to_vec()]) else {
             return false;
         };
@@ -839,28 +1194,32 @@ impl AppCanvas {
                 .map(|length| (length / step).round().max(1.0) as usize);
             (aligned, size, egui::TextureOptions::NEAREST)
         } else {
-            let Some(region) = FillRegion::for_display(edges, rect, view, ui.ctx().pixels_per_point(), texture_limit.min(MAX_VECTOR_TEXTURE)) else {
+            let Some(region) = FillRegion::for_display(edges, rect, sample_view, ui.ctx().pixels_per_point(), texture_limit.min(MAX_VECTOR_TEXTURE)) else {
                 return false;
             };
             (region.edges, region.size, region.filter)
         };
-        let pan_scale = (self.panning && view.rotation_deg == 0.0 && filter == egui::TextureOptions::NEAREST)
-            .then_some((device_scale, pixel_step));
         let remaining_zoom_preview = self.zoom_preview_until - ui.input(|state| state.time);
-        let use_zoom_preview = remaining_zoom_preview > 0.0 && !self.panning
+        let use_navigation_preview = (self.panning || remaining_zoom_preview > 0.0)
             && pixel_step.is_none() && view.canvas_flags.view_mode == dtool_core::ViewMode::Normal
             && staged.is_empty() && preview.is_none() && tone_preview.is_none() && brush_revision.is_none()
             && !self.input.busy()
             && self.composite.as_ref().is_some_and(|cached| {
-                cached.zoom_preview || cached.render_time > INTERACTIVE_RENDER_BUDGET
+                cached.navigation_preview || cached.render_time > INTERACTIVE_RENDER_BUDGET
             });
+        let pan_scale = (self.panning && !use_navigation_preview
+            && view.rotation_deg == 0.0 && filter == egui::TextureOptions::NEAREST)
+            .then_some((device_scale, pixel_step));
         let mut reused_bounds = None;
-        let mut zoom_preview = false;
-        if use_zoom_preview {
-            ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(remaining_zoom_preview));
+        let mut navigation_preview = false;
+        if use_navigation_preview {
+            self.settling_composite = true;
+            if remaining_zoom_preview > 0.0 {
+                ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(remaining_zoom_preview));
+            }
             let buffered = self.composite.as_ref().filter(|cached| {
                 let [x, y, width, height] = cached.bounds;
-                cached.pan_scale.is_none() && cached.staged.is_empty()
+                cached.rotation_deg == rotation_deg && cached.pan_scale.is_none() && cached.staged.is_empty()
                     && cached.blend_preview.is_none() && cached.tone_preview.is_none()
                     && cached.brush_revision.is_none() && cached.transform_preview.is_none()
                     && edges[0] >= x && edges[1] >= y
@@ -872,26 +1231,27 @@ impl AppCanvas {
                 edges = [x, y, x + width, y + height];
                 size = cached.size;
                 filter = cached.filter;
-                zoom_preview = cached.zoom_preview;
+                navigation_preview = cached.navigation_preview;
                 reused_bounds = Some(cached.bounds);
             } else {
-                // Leave a little room for the next outward zoom. While the
-                // wheel is moving, reserve the full sample grid for the idle frame.
+                // Leave room for the next pan or outward zoom. Restore the
+                // display sample grid when the gesture ends.
+                let margin_ratio = if self.panning { 0.25 } else { 0.12 };
                 for axis in 0..2 {
-                    let margin = (edges[axis + 2] - edges[axis]) * 0.12;
+                    let margin = (edges[axis + 2] - edges[axis]) * margin_ratio;
                     edges[axis] -= margin;
                     edges[axis + 2] += margin;
                 }
-                let factor = (ZOOM_PREVIEW_PIXELS / (size[0] * size[1]) as f32).sqrt().min(1.0);
+                let factor = (NAVIGATION_PREVIEW_PIXELS / (size[0] * size[1]) as f32).sqrt().min(1.0);
                 size = size.map(|side| (side as f32 * factor).ceil().max(1.0) as usize);
                 filter = egui::TextureOptions::LINEAR;
-                zoom_preview = true;
+                navigation_preview = true;
             }
         }
         if let Some(scale) = pan_scale {
             let buffered = self.composite.as_ref().filter(|cached| {
                 let [x, y, width, height] = cached.bounds;
-                cached.pan_scale == Some(scale) && edges[0] >= x && edges[1] >= y
+                cached.rotation_deg == rotation_deg && cached.pan_scale == Some(scale) && edges[0] >= x && edges[1] >= y
                     && edges[2] <= x + width && edges[3] <= y + height
             });
             if let Some(cached) = buffered {
@@ -915,40 +1275,87 @@ impl AppCanvas {
         if bounds[2] <= 0.0 || bounds[3] <= 0.0 {
             return false;
         }
+        let detail = canvas_detail(view);
+        let reusing_navigation_texture = use_navigation_preview && reused_bounds.is_some();
+        let completed = self.composite_job.as_ref().and_then(|job| match job.result.try_recv() {
+            Err(std::sync::mpsc::TryRecvError::Empty) => None,
+            result => Some((job.request, result.ok())),
+        });
+        if completed.is_some() {
+            self.composite_job = None;
+        }
         if self.composite.as_ref().is_none_or(|cached| {
-            cached.bounds != bounds || cached.size != size || cached.filter != filter || cached.pan_scale != pan_scale
-                || cached.zoom_preview != zoom_preview || cached.staged != staged
+            (!reusing_navigation_texture && cached.detail != detail)
+                || cached.rotation_deg != rotation_deg || cached.bounds != bounds || cached.size != size || cached.filter != filter || cached.pan_scale != pan_scale
+                || cached.navigation_preview != navigation_preview || cached.staged != staged
                 || cached.blend_preview.as_ref() != preview || cached.tone_preview != tone_preview
                 || cached.brush_revision != brush_revision
         }) {
-            let draft_document = brush_draft.as_ref().map_or(&session.document, |draft| draft.document.as_ref());
-            let preview_document = (preview.is_some() || tone_preview.is_some()).then(|| {
-                let mut document = draft_document.clone();
-                for draft in preview.into_iter().flatten() {
-                    if let Some(object) = document.find_object_mut(draft.id.0) {
-                        object.blend_mode = draft.mode;
-                        object.blend_ranges = draft.ranges.clone();
+            let request = CompositeRequest { rotation_deg, revision: self.composite_revision, detail, bounds, size };
+            let fallback = self.composite.as_ref().filter(|cached| {
+                self.settling_composite && !use_navigation_preview && !self.panning && pixel_step.is_none()
+                    && view.canvas_flags.view_mode == dtool_core::ViewMode::Normal
+                    && staged.is_empty() && preview.is_none() && tone_preview.is_none() && brush_revision.is_none()
+                    && !self.input.busy() && self.input.preview.is_none() && self.painted_gradient.is_none()
+                    && self.painted_layer_opacity.is_none() && self.painted_stroke_width.is_none()
+                    && cached.rotation_deg == rotation_deg && cached.pan_scale.is_none() && cached.staged.is_empty()
+                    && cached.blend_preview.is_none() && cached.tone_preview.is_none()
+                    && cached.brush_revision.is_none() && cached.transform_preview.is_none()
+                    && left >= cached.bounds[0] && top >= cached.bounds[1]
+                    && right <= cached.bounds[0] + cached.bounds[2] && bottom <= cached.bounds[1] + cached.bounds[3]
+            });
+            let mut finished_image = None;
+            if let Some(cached) = fallback {
+                let worker_failed = matches!(&completed, Some((stamp, None)) if *stamp == request);
+                finished_image = completed.and_then(|(stamp, image)| (stamp == request).then_some(image).flatten());
+                if finished_image.is_none() && !worker_failed {
+                    if self.composite_job.is_none() {
+                        self.composite_job = CompositeJob::start(
+                            ui.ctx(), request, session.document.clone(), view.canvas_flags.clone(), aligned.unwrap_or(&self.scene).clone(),
+                        ).ok();
+                    }
+                    if self.composite_job.is_some() {
+                        // Also poll if the worker exits before requesting a repaint.
+                        ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
+                        let [x, y, w, h] = cached.bounds;
+                        Self::paint_composite_texture(painter, rect, sample_view, &cached.texture, [x, y, x + w, y + h]);
+                        return true;
                     }
                 }
-                if let Some(draft) = tone_preview && let Some(object) = document.find_object_mut(draft.id.0) {
-                    object.tone_blend = Some(draft.tone);
-                }
-                document
+            }
+            let (image, render_time) = finished_image.unwrap_or_else(|| {
+                let draft_document = brush_draft.as_ref().map_or(&session.document, |draft| draft.document.as_ref());
+                let preview_document = (preview.is_some() || tone_preview.is_some()).then(|| {
+                    let mut document = draft_document.clone();
+                    for draft in preview.into_iter().flatten() {
+                        if let Some(object) = document.find_object_mut(draft.id.0) {
+                            object.blend_mode = draft.mode;
+                            object.blend_ranges = draft.ranges.clone();
+                        }
+                    }
+                    if let Some(draft) = tone_preview && let Some(object) = document.find_object_mut(draft.id.0) {
+                        object.tone_blend = Some(draft.tone);
+                    }
+                    document
+                });
+                let document = preview_document.as_ref().unwrap_or(draft_document);
+                let draft_scene = brush_draft.as_ref().map(|_| canvas_scene(document, &view, canvas_detail(&view)));
+                let started = std::time::Instant::now();
+                let render = || render_scene_region(
+                    document, &view.canvas_flags, &staged, draft_scene.as_ref().or(aligned).unwrap_or(&self.scene), bounds,
+                    size.map(|length| length as u32), 1.0,
+                );
+                let pixels = if pixel_step.is_none() { dtool_render::scene::with_fill_antialiasing(render) } else { render() };
+                (egui::ColorImage::from_rgba_unmultiplied(size, &pixels), started.elapsed())
             });
-            let document = preview_document.as_ref().unwrap_or(draft_document);
-            let draft_scene = brush_draft.as_ref().map(|_| canvas_scene(document, &view, canvas_detail(&view)));
-            let started = std::time::Instant::now();
-            let render = || render_scene_region(
-                document, &view.canvas_flags, &staged, draft_scene.as_ref().unwrap_or(&self.scene), bounds,
-                size.map(|length| length as u32), 1.0,
-            );
-            let pixels = if pixel_step.is_none() { dtool_render::scene::with_fill_antialiasing(render) } else { render() };
-            let image = egui::ColorImage::from_rgba_unmultiplied(size, &pixels);
             let texture = ui.ctx().load_texture("canvas composite", image, filter);
             self.composite = Some(CompositeTexture {
-                bounds, size, filter, staged, blend_preview: preview.cloned(), tone_preview, brush_revision,
-                pan_scale, zoom_preview, device_scale, render_time: started.elapsed(), texture, transform_preview: None,
+                rotation_deg, bounds, size, filter, staged, blend_preview: preview.cloned(), tone_preview, brush_revision,
+                pan_scale, navigation_preview, device_scale, detail, render_time, texture, transform_preview: None,
             });
+        }
+        if !use_navigation_preview && !self.panning {
+            self.settling_composite = false;
         }
         let Some(composite) = &mut self.composite else { return false };
         use dtool_tools::move_tool::GestureKind;
@@ -990,7 +1397,15 @@ impl AppCanvas {
             return true;
         }
 
-        let mut mesh = egui::Mesh::with_texture(composite.texture.id());
+        Self::paint_composite_texture(painter, rect, sample_view, &composite.texture, edges);
+        true
+    }
+
+    fn paint_composite_texture(
+        painter: &Painter, rect: Rect, view: &ViewState, texture: &egui::TextureHandle,
+        [left, top, right, bottom]: [f32; 4],
+    ) {
+        let mut mesh = egui::Mesh::with_texture(texture.id());
         for (point, uv) in [[left, top], [right, top], [right, bottom], [left, bottom]].into_iter()
             .zip([[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]])
         {
@@ -999,10 +1414,16 @@ impl AppCanvas {
         mesh.add_triangle(0, 1, 2);
         mesh.add_triangle(0, 2, 3);
         painter.add(egui::Shape::mesh(mesh));
-        true
     }
 
     fn paint_layers(&mut self, ui: &Ui, rect: Rect, session: &Session, overlay: bool) {
+        self.paint_layers_with_gradient(ui, rect, session, overlay, None);
+    }
+
+    fn paint_layers_with_gradient(
+        &mut self, ui: &Ui, rect: Rect, session: &Session, overlay: bool,
+        gradient: Option<&crate::canvas_input::GradientPreview>,
+    ) {
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, 0.0, dtool_design::theme::surface(ui.ctx(), "pasteboard"));
         if !session.has_document {
@@ -1011,11 +1432,11 @@ impl AppCanvas {
             return;
         }
         if session.document.stories.is_empty() {
-            self.paint_document_layers(ui, rect, session, overlay, painter);
+            self.paint_document_layers(ui, rect, session, overlay, painter, gradient);
         } else {
             let fonts = dtool_text::FontLibrary::shared();
             dtool_text::frame::with_doc_layout_reuse(&session.document, &fonts, || {
-                self.paint_document_layers(ui, rect, session, overlay, painter);
+                self.paint_document_layers(ui, rect, session, overlay, painter, gradient);
             });
         }
         // Keep one texture per text object painted in the current viewport.
@@ -1023,10 +1444,10 @@ impl AppCanvas {
         self.fill_textures.retain(|_, texture| std::mem::take(&mut texture.used));
     }
 
-    fn paint_document_layers(&mut self, ui: &Ui, rect: Rect, session: &Session, overlay: bool, painter: Painter) {
+    fn paint_document_layers(&mut self, ui: &Ui, rect: Rect, session: &Session, overlay: bool, painter: Painter, gradient: Option<&crate::canvas_input::GradientPreview>) {
         dtool_tools::frame_text::install_flow_ranges();
         dtool_tools::frame_text::install_canvas_text();
-        self.refresh(session);
+        self.refresh_with_gradient(session, gradient);
         let view = session.view.clone();
         for prim in &self.scene.prims {
             if let Prim::Page { index, rect: page } = prim
@@ -1050,7 +1471,18 @@ impl AppCanvas {
                     egui::FontId::proportional(11.0), ui.visuals().text_color());
             }
         }
-        let composited = self.paint_composite(ui, &painter, rect, &view, session);
+        let staged = dtool_core::commands::layer_style::snapshot_staged(session);
+        let staged_ids: std::collections::HashSet<_> = staged.iter().map(|item| item.object).collect();
+        let composited = self.paint_composite(ui, &painter, rect, &view, session, staged);
+        // Several primitives can refer to the same object. Resolve the owner
+        // without scanning the entire document for each primitive.
+        let mut objects = HashMap::new();
+        if !composited {
+            objects.reserve(session.document.objects().len());
+            for object in session.document.objects() {
+                objects.entry(object.id).or_insert(object);
+            }
+        }
         let moved = (!composited).then(|| self.translated_ink(session, &view)).flatten();
         let prims = std::mem::take(&mut self.scene.prims);
         let mut clip_stack: Vec<Rect> = Vec::new();
@@ -1074,16 +1506,21 @@ impl AppCanvas {
             if composited {
                 match prim {
                     Prim::Text { object, lines, opacity } => self.paint_text_annotations(&clipped, rect, &view, session, *object, lines, *opacity),
-                    Prim::Handle { .. } => self.paint_prim(ui, &clipped, rect, &view, session, index, prim),
+                    Prim::Handle { .. } => self.paint_prim(ui, &clipped, rect, &view, session, index, prim, None),
                     _ => {}
                 }
                 continue;
             }
+            let id = prim_object(prim);
+            let source = id.and_then(|id| objects.get(&id).copied());
             let object_view = moved.as_ref().filter(|(ids, _)| {
-                dtool_core::layer_style::raster::prim_object(prim).is_some_and(|id| ids.contains(&id))
+                id.is_some_and(|id| ids.contains(&id))
             }).map_or(&view, |(_, moved_view)| moved_view);
             if view.canvas_flags.mask_view.is_none()
-                && let Some(object) = dtool_core::layer_style::raster::prim_object(prim).filter(|_| {
+                && let Some(object) = id.filter(|id| {
+                    staged_ids.contains(id)
+                        || source.is_some_and(|object| object.effects.iter().any(|effect| effect.enabled))
+                }).filter(|_| {
                 matches!(prim, Prim::Fill { .. } | Prim::Stroke { .. } | Prim::Text { .. })
                     || dtool_core::layer_style::raster::is_path_brush_image(&session.document, prim)
             }) {
@@ -1098,23 +1535,22 @@ impl AppCanvas {
                     continue;
                 }
             }
-            if let Some(id) = dtool_core::layer_style::raster::prim_object(prim)
+            if let Some(object) = source
                 && !matches!(prim, Prim::Handle { .. })
                 && view.canvas_flags.mask_view.is_none()
                 && !matches!(view.canvas_flags.view_mode, dtool_core::ViewMode::Outline | dtool_core::ViewMode::Wireframe)
-                && let Some(object) = session.document.get_object(id)
                 && (!matches!(object.transparency, dtool_core::paint::Transparency::None)
                     || matches!(object.stroke.paint, dtool_core::paint::Paint::Gradient { .. }))
             {
-                if graded.insert(id) {
+                if graded.insert(object.id) {
                     self.paint_graded_object(ui, &clipped, rect, object_view, session, object, index);
                 }
                 if let Prim::Text { lines, opacity, .. } = prim {
-                    self.paint_text_annotations(&clipped, rect, object_view, session, id, lines, *opacity);
+                    self.paint_text_annotations(&clipped, rect, object_view, session, object.id, lines, *opacity);
                 }
                 continue;
             }
-            self.paint_prim(ui, &clipped, rect, object_view, session, index, prim);
+            self.paint_prim(ui, &clipped, rect, object_view, session, index, prim, source);
         }
         self.scene.prims = prims;
         if !view.canvas_flags.preview_mode && view.canvas_flags.mask_view.is_none() {
@@ -1287,14 +1723,17 @@ impl AppCanvas {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn paint_prim(&mut self, ui: &Ui, painter: &Painter, rect: Rect, view: &ViewState, session: &Session, index: usize, prim: &Prim) {
+    fn paint_prim(
+        &mut self, ui: &Ui, painter: &Painter, rect: Rect, view: &ViewState, session: &Session,
+        index: usize, prim: &Prim, source: Option<&dtool_core::Object>,
+    ) {
         let zoom = view.zoom.max(1e-4);
         let version = session.document.version;
         match prim {
             Prim::Page { .. } => {}
-            Prim::Fill { object, contours, origin, paint, opacity } => {
+            Prim::Fill { contours, origin, paint, opacity, .. } => {
                 let transparency = view.canvas_flags.mask_view.is_none()
-                    .then(|| session.document.get_object(*object))
+                    .then_some(source)
                     .flatten()
                     .map(|source| source.transparency.clone())
                     .unwrap_or_default();
@@ -1303,7 +1742,7 @@ impl AppCanvas {
                     let points: Vec<Pos2> = contours[0].iter().map(|p| screen(rect, view, *p)).collect();
                     let fill = colour32(colour, *opacity);
                     if points.len() == 4
-                        && session.document.get_object(*object).is_some_and(|object| matches!(object.kind, dtool_core::ObjectKind::Table(_)))
+                        && source.is_some_and(|object| matches!(object.kind, dtool_core::ObjectKind::Table(_)))
                         && paint_thin_table_rect(painter, &points, fill, ui.ctx().pixels_per_point())
                     {
                         return;
@@ -1314,32 +1753,68 @@ impl AppCanvas {
                 let Some([left, top, right, bottom]) = contours_bounds(contours) else { return };
                 let clip = painter.clip_rect().intersect(rect);
                 if !clip.is_positive() { return; }
+                let rotation_deg = (view.rotation_deg != 0.0
+                    && view.canvas_flags.view_mode == dtool_core::ViewMode::Normal
+                    && dtool_core::scene::paint_supported(paint)).then_some(view.rotation_deg);
+                let rotation = rotation_deg.map(|angle| egui::emath::Rot2::from_angle(angle.to_radians()));
+                // Build coverage in view-aligned document axes, then sample the
+                // original paint using the inverse rotation.
+                let unrotated = rotation.map(|_| ViewState { rotation_deg: 0.0, ..view.clone() });
+                let sample_view = unrotated.as_ref().unwrap_or(view);
+                let rotate_point = |rotation: egui::emath::Rot2, [x, y]: [f32; 2]| {
+                    let point = rotation * egui::vec2(x, y);
+                    [point.x, point.y]
+                };
+                let [left, top, right, bottom] = if let Some(rotation) = rotation {
+                    let corners = [[left, top], [right, top], [right, bottom], [left, bottom]]
+                        .map(|point| rotate_point(rotation, point));
+                    let Some(bounds) = contours_bounds(&[corners.to_vec()]) else { return };
+                    bounds
+                } else {
+                    [left, top, right, bottom]
+                };
                 let [vw, vh] = [clip.width(), clip.height()];
-                let mut clipped_view = view.clone();
+                let mut clipped_view = sample_view.clone();
                 clipped_view.scroll[0] -= clip.min.x - rect.min.x;
                 clipped_view.scroll[1] -= clip.min.y - rect.min.y;
                 let visible = dtool_core::view::visible_doc_quad(&clipped_view, [vw, vh]);
                 let Some([vx0, vy0, vx1, vy1]) = contours_bounds(&[visible.to_vec()]) else { return };
                 let edges = [left.max(vx0), top.max(vy0), right.min(vx1), bottom.min(vy1)];
                 let limit = (ui.input(|input| input.max_texture_side) as f32).min(MAX_VECTOR_TEXTURE);
-                let Some(region) = FillRegion::for_display(edges, rect, view, ui.ctx().pixels_per_point(), limit) else { return };
+                let Some(region) = FillRegion::for_display(edges, rect, sample_view, ui.ctx().pixels_per_point(), limit) else { return };
                 let [x0, y0, x1, y1] = region.edges;
-                let corners = [[x0, y0], [x1, y0], [x1, y1], [x0, y1]].map(|point| screen(rect, view, point));
+                let corners = [[x0, y0], [x1, y0], [x1, y1], [x0, y1]].map(|point| screen(rect, sample_view, point));
                 let fallback = representative_colour(paint);
-                let id = if let Some(cached) = self.fill_textures.get_mut(&index).filter(|cached| cached.region == region) {
+                let id = if let Some(cached) = self.fill_textures.get_mut(&index)
+                    .filter(|cached| cached.region == region && cached.rotation_deg == rotation_deg)
+                {
                     cached.used = true;
                     Some(cached.texture.id())
                 } else {
-                    let pixels = dtool_render::scene::with_fill_antialiasing(|| match paint {
-                        dtool_core::paint::Paint::Bitmap(bitmap) => dtool_core::scene::rasterize_bitmap(&session.document, bitmap, contours, *origin, region.edges, region.size),
-                        _ if graded => dtool_render::scene::rasterize_fill_with_transparency(paint, &transparency, 1.0, contours, *origin, region.edges, region.size),
-                        _ => rasterize_fill(paint, contours, *origin, region.edges, region.size),
+                    let pixels = dtool_render::scene::with_fill_antialiasing(|| {
+                        if let Some(rotation) = rotation {
+                            let rotated: Vec<Vec<_>> = contours.iter()
+                                .map(|contour| contour.iter().map(|point| rotate_point(rotation, *point)).collect())
+                                .collect();
+                            let inverse = rotation.inverse();
+                            return dtool_render::scene::rasterize_fill_mapped(
+                                paint, &transparency, 1.0, &rotated, region.edges, region.size, |point| {
+                                    let [x, y] = rotate_point(inverse, point);
+                                    [f64::from(x - origin[0]), f64::from(y - origin[1])]
+                                },
+                            );
+                        }
+                        match paint {
+                            dtool_core::paint::Paint::Bitmap(bitmap) => dtool_core::scene::rasterize_bitmap(&session.document, bitmap, contours, *origin, region.edges, region.size),
+                            _ if graded => dtool_render::scene::rasterize_fill_with_transparency(paint, &transparency, 1.0, contours, *origin, region.edges, region.size),
+                            _ => rasterize_fill(paint, contours, *origin, region.edges, region.size),
+                        }
                     });
                     pixels.map(|rgba| {
                         let image = egui::ColorImage::from_rgba_unmultiplied(region.size, &rgba);
                         let texture = ui.ctx().load_texture("canvas fill", image, region.filter);
                         let id = texture.id();
-                        self.fill_textures.insert(index, FillTexture { region, texture, used: true });
+                        self.fill_textures.insert(index, FillTexture { region, rotation_deg, texture, used: true });
                         id
                     })
                 };
@@ -1364,8 +1839,8 @@ impl AppCanvas {
                     painter.add(egui::Shape::line(pts, stroke));
                 }
             }
-            Prim::Image { object, quad, opacity } => {
-                let Some(source) = session.document.get_object(*object) else { return };
+            Prim::Image { object, quad, opacity, .. } => {
+                let Some(source) = source else { return };
                 let doc = &session.document;
                 let texture = if source.path_brush.is_some() {
                     let [top_left, _, bottom_right, _] = *quad;
@@ -1390,7 +1865,7 @@ impl AppCanvas {
                     return;
                 }
                 let decorations = self.text_decorations(session, *object);
-                let matrix = session.document.get_object(*object).map_or(dtool_core::geometry::IDENTITY, dtool_core::geometry::text_matrix);
+                let matrix = source.map_or(dtool_core::geometry::IDENTITY, dtool_core::geometry::text_matrix);
                 Self::paint_decorations(painter, rect, view, &matrix, &decorations, true, *opacity);
                 let ink = self.glyph_ink.entry(*object).or_insert_with(|| {
                     let contours = dtool_core::text_lines::text_outlines(&session.document, *object)?;

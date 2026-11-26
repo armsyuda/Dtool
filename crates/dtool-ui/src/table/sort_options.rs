@@ -47,7 +47,7 @@ pub(crate) fn show(ctx: &egui::Context, workspace: &mut Workspace) -> Option<Str
                     &mut options.treat_numbers_as_text,
                 ),
             ] {
-                if ui.checkbox(value, text(label)).changed() {
+                if dtool_design::toggle(ui, value, text(label)).changed() {
                     patch[key] = json!(*value);
                 }
             }

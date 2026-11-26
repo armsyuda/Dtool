@@ -1,6 +1,9 @@
 use dtool_core::clipboard::{os_text_for_payload, take_os_text, ClipboardKind};
 use dtool_core::Session;
 
+#[cfg(windows)]
+mod native_vector;
+
 pub const PASTE_SPECIAL_MENU: &str = "edit.paste.paste_special";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -65,11 +68,11 @@ pub fn before_shortcuts(session: &mut Session, events: &OsClipboardEvents) -> Op
     if session.text_edit.is_some() {
         return None;
     }
-    if (events.paste_image || events.key_paste || events.paste.is_some()) && refresh_native_image(&session.clipboard) {
+    if (events.paste_image || events.key_paste || events.paste.is_some()) && refresh_native_graphic(&session.clipboard) {
         return (!events.key_paste).then_some("edit.paste");
     }
     if let Some(text) = events.paste.as_deref() {
-        take_os_text(session, text);
+        if !accept_svg_text(&session.clipboard, text) { take_os_text(session, text); }
         if events.key_paste || session.clipboard.get_payload().kind == ClipboardKind::Empty {
             return None;
         }
@@ -91,7 +94,7 @@ pub fn after_shortcuts(session: &Session, events: &OsClipboardEvents) -> Option<
     Some(os_text_for_payload(&session.clipboard.get_payload()))
 }
 
-pub const MAX_CLIPBOARD_IMAGE_BYTES: usize = 64 * 1024 * 1024;
+pub const MAX_CLIPBOARD_IMAGE_BYTES: usize = dtool_core::clipboard::flattened::MAX_IMAGE_BYTES;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NativeImage {
@@ -143,8 +146,49 @@ pub fn refresh_native_image(clipboard: &dtool_core::clipboard::AppClipboard) -> 
     accept_native_image(clipboard, NativeImage { width, height, rgba: image.bytes.into_owned() }).is_ok()
 }
 
+pub(crate) fn refresh_native_graphic(clipboard: &dtool_core::clipboard::AppClipboard) -> bool {
+    if std::env::var_os("DTOOL_DISABLE_OS_CLIPBOARD").is_some() { return false; }
+    #[cfg(windows)]
+    if native_vector::refresh(clipboard) { return true; }
+    refresh_native_image(clipboard)
+}
+
+pub(crate) fn native_graphic_available() -> bool {
+    if std::env::var_os("DTOOL_DISABLE_OS_CLIPBOARD").is_some() { return false; }
+    #[cfg(windows)]
+    if native_vector::available() { return true; }
+    native_image_available()
+}
+
 #[cfg(windows)]
-pub(crate) fn native_image_available() -> bool {
+pub fn native_vector_format_available() -> bool {
+    std::env::var_os("DTOOL_DISABLE_OS_CLIPBOARD").is_none() && native_vector::has_registered_format()
+}
+
+fn looks_like_svg(text: &str) -> bool {
+    let text = text.trim_start_matches(|c: char| c.is_whitespace() || c == '\u{feff}');
+    text.starts_with('<') && text.contains("<svg") && text.contains("http://www.w3.org/2000/svg")
+}
+
+fn accept_svg_text(clipboard: &dtool_core::clipboard::AppClipboard, text: &str) -> bool {
+    if !looks_like_svg(text) { return false; }
+    let payload = clipboard.get_payload();
+    if payload.kind == ClipboardKind::Objects && os_text_for_payload(&payload) == text.replace("\r\n", "\n") {
+        return false;
+    }
+    let Ok((document, _)) = dtool_io::import_svg::import_clipboard_svg(text) else { return false; };
+    accept_vector(clipboard, &document)
+}
+
+fn accept_vector(clipboard: &dtool_core::clipboard::AppClipboard, document: &dtool_core::Document) -> bool {
+    let roots: Vec<_> = document.objects.iter().filter(|object| object.parent_id.is_none()).map(|object| object.id).collect();
+    if roots.is_empty() { return false; }
+    clipboard.share().set_imported_objects(document, &roots);
+    true
+}
+
+#[cfg(windows)]
+fn native_image_available() -> bool {
     use std::sync::OnceLock;
     use windows_sys::Win32::System::{DataExchange::{IsClipboardFormatAvailable, RegisterClipboardFormatW}, Ole::CF_DIBV5};
 
@@ -157,7 +201,7 @@ pub(crate) fn native_image_available() -> bool {
 }
 
 #[cfg(not(windows))]
-pub(crate) fn native_image_available() -> bool {
+fn native_image_available() -> bool {
     false
 }
 
@@ -195,14 +239,22 @@ pub(crate) fn write_native_image(ctx: &egui::Context, image: NativeImage) -> Res
 pub fn image_for_copy(session: &Session) -> Result<Option<NativeImage>, dtool_core::CommandError> {
     let payload = session.clipboard.get_payload();
     if payload.kind != ClipboardKind::Objects || !os_text_for_payload(&payload).is_empty() { return Ok(None); }
+    if let Some(png) = &payload.image_png {
+        let pixels = dtool_export::raster::decode(png, dtool_export::ExportFormat::Png).map_err(|e| e.to_command_error())?;
+        return remember_copy(pixels, &payload).map(Some);
+    }
     let Some(bundle) = dtool_core::clipboard::payload_bundle(&payload) else { return Ok(None) };
     let mut doc = dtool_core::Document::new([1.0, 1.0], session.document.units, session.document.dpi, 1);
     let roots = dtool_core::clipboard::paste_bundle(&mut doc, &bundle, None, [0.0, 0.0]);
     let Some(bounds) = dtool_core::command::selection_bounds(&doc, &roots) else { return Ok(None) };
     let options = dtool_export::raster::ExportOptions { area: dtool_export::ExportArea::Rect(bounds), transparent: true, ..Default::default() };
     let pixels = dtool_export::raster::render_preview(&doc, &options).map_err(|e| e.to_command_error())?;
+    remember_copy(pixels, &payload).map(Some)
+}
+
+fn remember_copy(pixels: dtool_export::raster::RgbaImage, payload: &std::sync::Arc<dtool_core::clipboard::ClipboardPayload>) -> Result<NativeImage, dtool_core::CommandError> {
     let image = NativeImage { width: pixels.width(), height: pixels.height(), rgba: pixels.into_raw() };
     image.validate()?;
-    COPIED_IMAGE.with(|cache| *cache.borrow_mut() = Some((image.fingerprint(), std::sync::Arc::downgrade(&payload))));
-    Ok(Some(image))
+    COPIED_IMAGE.with(|cache| *cache.borrow_mut() = Some((image.fingerprint(), std::sync::Arc::downgrade(payload))));
+    Ok(image)
 }

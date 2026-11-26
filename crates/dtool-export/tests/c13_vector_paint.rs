@@ -13,7 +13,7 @@ fn gradient(kind: GradientKind, ratio: f64) -> Paint {
             GradientStop { offset: 0.0, colour: Colour::new(255, 0, 0, 255) },
             GradientStop { offset: 1.0, colour: Colour::new(0, 0, 255, 128) },
         ],
-        geom: GradientGeom { start: [10.0, 10.0], end: [50.0, 10.0], ratio },
+        geom: GradientGeom { start: [10.0, 10.0], end: [50.0, 10.0], ratio, ..GradientGeom::default() },
     }
 }
 
@@ -65,7 +65,7 @@ fn contains(bytes: &[u8], needle: &str) -> bool {
 fn svg_linear_gradient_is_a_real_gradient_in_document_space() {
     let (text, receipt) = svg(&doc_with(gradient(GradientKind::Linear, 1.0)), "linear");
     assert!(text.contains("<defs><linearGradient id=\"dtool-paint-7\" gradientUnits=\"userSpaceOnUse\""), "{text}");
-    assert!(text.contains("x1=\"10\"") || text.contains("x1=\"10.0"), "{text}");
+    assert!(text.contains("x1=\"20\"") || text.contains("x1=\"20.0"), "{text}");
     assert!(text.contains("fill=\"url(#dtool-paint-7)\""), "{text}");
     assert!(text.contains("stop-color=\"#ff0000\""), "{text}");
     assert!(text.contains("stop-color=\"#0000ff\" stop-opacity=\"0.50\""), "{text}");
@@ -86,10 +86,11 @@ fn svg_radial_and_elliptical_gradients_use_radial_gradient() {
 }
 
 #[test]
-fn svg_paint_without_svg_equivalent_is_flattened_with_a_warning() {
+fn svg_conical_paint_uses_a_pattern_and_unsupported_hatch_warns() {
     let (text, receipt) = svg(&doc_with(gradient(GradientKind::Conical, 1.0)), "conical");
-    assert!(!text.contains("Gradient id="), "{text}");
-    assert!(receipt.warnings.iter().any(|w| w == "export.svg.paint_flattened:7"), "{:?}", receipt.warnings);
+    assert!(text.contains("<pattern id=\"dtool-appearance-7-0\""), "{text}");
+    assert!(text.contains("fill=\"url(#dtool-appearance-7-0)\""), "{text}");
+    assert!(receipt.warnings.is_empty(), "{:?}", receipt.warnings);
     let (text, receipt) = svg(&doc_with(hatch()), "hatch");
     assert!(text.contains("fill=\"#008000\""), "{text}");
     assert!(receipt.warnings.iter().any(|w| w == "export.svg.paint_flattened:7"), "{:?}", receipt.warnings);

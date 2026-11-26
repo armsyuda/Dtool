@@ -21,7 +21,7 @@ pub fn near_polyline(points: &[[f32; 2]], closed: bool, p: [f32; 2], reach: f32)
     (0..count).any(|i| segment_distance(p, points[i], points[(i + 1) % n]) <= reach)
 }
 
-fn in_rect(rect: [f32; 4], p: [f32; 2]) -> bool {
+pub(crate) fn in_rect(rect: [f32; 4], p: [f32; 2]) -> bool {
     p[0] >= rect[0] && p[0] <= rect[0] + rect[2] && p[1] >= rect[1] && p[1] <= rect[1] + rect[3]
 }
 
@@ -154,7 +154,7 @@ fn hit_test_scoped(
             }
             _ => prim_hit(scene, prim, p, tolerance),
         };
-        if hit {
+        if hit && doc.get_object(object).is_some_and(|source| crate::scene::vector_crop_contains(source, p)) {
             if let Some(target) = pick_target_in(doc, object, scope) {
                 return Some(target);
             }
@@ -162,6 +162,9 @@ fn hit_test_scoped(
     }
     scene.quads.iter().rev().find_map(|(id, quad)| {
         let object = doc.get_object(*id)?;
+        if !crate::scene::vector_crop_contains(object, p) {
+            return None;
+        }
         if matches!(object.kind, ObjectKind::PictureFrame) {
             use crate::commands::picture_frame::{contains_point, frame_image_size};
             let frame = doc.picture_frames.iter().find(|frame| frame.object == *id)?;

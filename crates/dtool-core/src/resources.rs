@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
@@ -482,6 +483,12 @@ impl Document {
         self.resources.iter().find(|r| r.id == id)
     }
 
+    pub fn image_resource_by_ref(&self, reference: &str) -> Option<&ImageResource> {
+        reference.parse::<u64>().ok().and_then(|id| self.image_resource(ResourceId(id))).or_else(|| {
+            (!reference.is_empty()).then(|| self.resources.iter().find(|image| image.name == reference)).flatten()
+        })
+    }
+
     pub fn image_resource_mut(&mut self, id: ResourceId) -> Option<&mut ImageResource> {
         self.resources.iter_mut().find(|r| r.id == id)
     }
@@ -524,10 +531,69 @@ impl Document {
             .collect()
     }
 
+    pub fn paint_image_uses(&self) -> HashMap<ResourceId, Vec<ObjectId>> {
+        use crate::paint::{PaintResourceKind, ResourceCollector, visit_object_resources};
+        let mut by_resource: HashMap<ResourceId, Vec<ObjectId>> = HashMap::new();
+        if self.resources.is_empty() {
+            return by_resource;
+        }
+        for object in &self.objects {
+            let mut collector = ResourceCollector::new();
+            visit_object_resources(&mut collector, object);
+            for reference in collector.resources {
+                if matches!(reference.kind, PaintResourceKind::Bitmap | PaintResourceKind::Pattern)
+                    && let Some(image) = self.image_resource_by_ref(&reference.id)
+                {
+                    let uses = by_resource.entry(image.id).or_default();
+                    if uses.last() != Some(&object.id) {
+                        uses.push(object.id);
+                    }
+                }
+            }
+        }
+        by_resource
+    }
+
+    pub(crate) fn preserve_paint_images_on_detach(&mut self, doomed: &std::collections::HashSet<ObjectId>) {
+        let removed: std::collections::HashSet<_> = self.placed_images.iter()
+            .filter(|placement| doomed.contains(&placement.object_id))
+            .map(|placement| placement.resource)
+            .collect();
+        if removed.is_empty() {
+            return;
+        }
+        for (id, uses) in self.paint_image_uses() {
+            if !removed.contains(&id)
+                || uses.iter().all(|id| doomed.contains(id))
+                || self.placed_images.iter().any(|placement| placement.resource == id && !doomed.contains(&placement.object_id))
+            {
+                continue;
+            }
+            let Some(resource) = self.image_resource(id).filter(|resource| resource.embedded) else {
+                continue;
+            };
+            // Bitmap paints can read the live pixels from an image placement.
+            // Keep those pixels in the resource before its last placement disappears.
+            let Some((size, pixels)) = crate::path_brush::resource_pixels(self, resource) else {
+                continue;
+            };
+            let Some(image) = crate::path_brush::encode_resource(size, &pixels, resource.dpi) else {
+                continue;
+            };
+            if let Some(resource) = self.image_resource_mut(id) {
+                resource.pixel_size = image.pixel_size;
+                resource.format = image.format;
+                resource.data = image.data;
+                resource.hash = None;
+            }
+        }
+    }
+
     pub fn unused_resources(&self) -> Vec<ResourceId> {
+        let paint_uses = self.paint_image_uses();
         self.resources
             .iter()
-            .filter(|r| !self.placed_images.iter().any(|p| p.resource == r.id))
+            .filter(|r| !paint_uses.contains_key(&r.id) && !self.placed_images.iter().any(|p| p.resource == r.id))
             .map(|r| r.id)
             .collect()
     }
@@ -596,11 +662,19 @@ fn resource_location(doc: &Document, id: ObjectId) -> Option<ResourceLocation> {
 }
 
 pub fn resource_rows(doc: &Document, doc_dir: Option<&Path>) -> Vec<ResourceRow> {
+    let paint_uses = doc.paint_image_uses();
     doc.resources.iter().map(|r| {
         let (status, file_size_bytes) = r.status_and_file_size(doc_dir);
-        let uses = doc.resource_uses(r.id);
+        let mut uses = doc.resource_uses(r.id);
         let placed_size = uses.first().and_then(|id| doc.get_object(*id))
             .map(|object| object.size.map(|length| crate::units::px_to_pt(length.abs(), doc.dpi)));
+        if let Some(painted) = paint_uses.get(&r.id) {
+            for &id in painted {
+                if !uses.contains(&id) {
+                    uses.push(id);
+                }
+            }
+        }
         let placed_dpi = placed_size.map_or_else(|| r.effective_dpi(), |size| r.placed_dpi(size));
         let mut locations: Vec<_> = uses.iter().filter_map(|&id| resource_location(doc, id)).collect();
         locations.sort_by_key(|location| match location {
@@ -630,9 +704,19 @@ pub fn resource_rows(doc: &Document, doc_dir: Option<&Path>) -> Vec<ResourceRow>
 }
 
 pub fn embed_resource(doc: &mut Document, id: ResourceId, doc_dir: Option<&Path>) -> Result<(), dtool_protocol::CommandError> {
+    let for_paint = doc.paint_image_uses().contains_key(&id);
     let resource = doc.image_resource_mut(id).ok_or_else(|| resource_not_found(id))?;
     
     if resource.embedded && resource.data.is_some() {
+        return Ok(());
+    }
+
+    if for_paint && let Some(path) = resource.resolved_path(doc_dir) {
+        let decoded = crate::commands::image_place::decode_path(&path)?;
+        let mut embedded = embedded_paint_resource(decoded.resource, &decoded.rgba)?;
+        embedded.id = id;
+        embedded.name.clone_from(&resource.name);
+        *resource = embedded;
         return Ok(());
     }
 
@@ -715,6 +799,7 @@ pub(crate) fn collect_linked_resources(doc: &mut Document, ids: &[ResourceId], f
 }
 
 pub fn make_linked_resource(doc: &mut Document, id: ResourceId, folder: &Path) -> Result<(), dtool_protocol::CommandError> {
+    let for_paint = doc.paint_image_uses().contains_key(&id);
     let resource = doc.image_resource_mut(id).ok_or_else(|| resource_not_found(id))?;
 
     if !resource.embedded && resource.path.is_some() {
@@ -729,13 +814,17 @@ pub fn make_linked_resource(doc: &mut Document, id: ResourceId, folder: &Path) -
         resource.name.clone()
     };
 
-    let target_path = folder.join(&name);
+    let folder = std::path::absolute(folder).map_err(|_| dtool_protocol::CommandError::invalid_params())?;
+    let mut target_path = folder.join(&name);
+    if for_paint && resource.format == ImageFormat::Png {
+        target_path.set_extension("png");
+    }
 
     if target_path.exists() {
         return Err(dtool_protocol::CommandError::validation("rm.replace_existing"));
     }
 
-    std::fs::create_dir_all(folder).map_err(|_| dtool_protocol::CommandError::not_found())?;
+    std::fs::create_dir_all(&folder).map_err(|_| dtool_protocol::CommandError::not_found())?;
     std::fs::write(&target_path, &data).map_err(|_| dtool_protocol::CommandError::not_found())?;
 
     let hash = compute_sha256(&data);
@@ -790,6 +879,21 @@ pub(crate) fn replace_shared_image(
         return Err(dtool_protocol::CommandError::invalid_params());
     }
 
+    if doc.paint_image_uses().contains_key(&id) {
+        if resource.embedded {
+            resource = embedded_paint_resource(resource, rgba)?;
+        }
+        // A legacy paint can point to the resource by name instead of ID.
+        if let Some(previous) = doc.image_resource(id)
+            && !previous.name.is_empty()
+            && crate::paint::collect_document_resources(doc).iter().any(|reference| {
+                matches!(reference.kind, crate::paint::PaintResourceKind::Bitmap | crate::paint::PaintResourceKind::Pattern)
+                    && reference.id == previous.name
+            })
+        {
+            resource.name.clone_from(&previous.name);
+        }
+    }
     resource.id = id;
     *doc.image_resource_mut(id).ok_or_else(|| resource_not_found(id))? = resource;
     let raster = crate::pixel::PixelLayer::from_rgba(width, height, rgba);
@@ -801,6 +905,14 @@ pub(crate) fn replace_shared_image(
         }
     }
     Ok(())
+}
+
+fn embedded_paint_resource(resource: ImageResource, rgba: &[u8]) -> Result<ImageResource, dtool_protocol::CommandError> {
+    let mut encoded = crate::path_brush::encode_resource(resource.pixel_size.map(|side| side as usize), rgba, resource.dpi)
+        .ok_or_else(dtool_protocol::CommandError::invalid_params)?;
+    encoded.name = resource.name;
+    encoded.path = resource.path;
+    Ok(encoded)
 }
 
 pub fn as_linked_resource(resource: ImageResource, path: std::path::PathBuf) -> ImageResource {

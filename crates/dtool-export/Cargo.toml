@@ -15,6 +15,7 @@ dtool-render.workspace = true
 dtool-protocol.workspace = true
 dtool-text.workspace = true
 krilla.workspace = true
+lopdf.workspace = true
 kurbo.workspace = true
 lcms2.workspace = true
 libwebp-sys.workspace = true
@@ -28,4 +29,5 @@ serde.workspace = true
 serde_json.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+hayro = "0.9.0"
 windows = { version = "=0.62.2", features = ["Data_Pdf", "Graphics_Imaging", "Storage_Streams", "Win32_System_WinRT"] }

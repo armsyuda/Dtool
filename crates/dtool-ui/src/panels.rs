@@ -25,22 +25,23 @@ mod constraints;
 pub mod styles;
 pub mod text_wrap;
 
-struct ThumbnailJob<Revision, Images> {
-    revision: Revision,
-    result: std::sync::mpsc::Receiver<Images>,
+pub(crate) struct ThumbnailJob<Revision, Images> {
+    pub(crate) revision: Revision,
+    pub(crate) result: std::sync::mpsc::Receiver<Images>,
 }
 
 impl<Revision, Images: Send + 'static> ThumbnailJob<Revision, Images> {
-    fn start(
+    pub(crate) fn start(
         ctx: &egui::Context, name: &str, revision: Revision,
         render: impl FnOnce() -> Images + Send + 'static,
     ) -> std::io::Result<Self> {
         let (sender, result) = std::sync::mpsc::channel();
         let wake = ctx.clone();
+        let viewport = ctx.viewport_id();
         std::thread::Builder::new().name(name.into()).spawn(move || {
             let images = render();
             let _ = sender.send(images);
-            wake.request_repaint();
+            wake.request_repaint_of(viewport);
         })?;
         Ok(Self { revision, result })
     }
@@ -186,26 +187,20 @@ pub fn workspace_panel(ui: &mut egui::Ui, id: &PanelId, registry: &mut PanelRegi
             true
         }
         PanelId::Navigator => {
+            let commands = std::cell::RefCell::new(Vec::new());
+            let view_size = workspace.session().and_then(|session| session.view_canvas_size)
+                .unwrap_or(registry.canvas_size).map(|n| n.max(1.0));
+            registry.navigator.show(ui, workspace.session(), view_size,
+                &|delta| commands.borrow_mut().push(dtool_core::Command::with_params("view.pan", json!({"delta":delta}))),
+                &|zoom| commands.borrow_mut().push(dtool_core::Command::with_params("view.zoom.set", json!({"zoom":zoom, "view_size":view_size}))),
+                &|show| commands.borrow_mut().push(dtool_core::Command::with_params("guides.show", json!({"show":show}))),
+                &|show| commands.borrow_mut().push(dtool_core::Command::with_params("view.flags.set", json!({"show_bleed":show}))));
             if let Some(session) = workspace.session_mut() {
-                let commands = std::cell::RefCell::new(Vec::new());
-                let view_size = registry.canvas_size.map(|n| n.max(1.0));
-                let page_size = session.document.pages.first().map(|p| p.size).unwrap_or([800.0,600.0]);
-                registry.navigator.show(ui, &session.view, &session.document, page_size, view_size, session.actual_zoom(),
-                    session.guides.show, session.view.canvas_flags.show_bleed,
-                    &|delta| commands.borrow_mut().push(dtool_core::Command::with_params("view.pan", json!({"delta":delta}))),
-                    &|zoom| commands.borrow_mut().push(dtool_core::Command::with_params("view.zoom.set", json!({"zoom":zoom, "view_size":view_size}))),
-                    &|show| commands.borrow_mut().push(dtool_core::Command::with_params("guides.show", json!({"show":show}))),
-                    &|show| commands.borrow_mut().push(dtool_core::Command::with_params("view.flags.set", json!({"show_bleed":show}))));
+                let before = (session.view.zoom, session.view.scroll);
                 for command in commands.into_inner() {
                     if let Err(error) = session.run(&command) { ui.label(dtool_strings::text(&error.message_key)); }
                 }
-            } else {
-                ui.add_enabled_ui(false, |ui| {
-                    let (rect,_) = ui.allocate_exact_size(egui::vec2(ui.available_width().min(180.0),80.0), egui::Sense::hover());
-                    ui.painter().rect_filled(rect, 0.0, dtool_design::color("navigator.thumb.bg"));
-                    let mut zoom = 100.0;
-                    dtool_design::slider(ui, &mut zoom, 1.0..=1000.0, "%");
-                });
+                registry.navigator.navigation_changed |= before != (session.view.zoom, session.view.scroll);
             }
             true
         }

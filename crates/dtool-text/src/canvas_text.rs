@@ -149,13 +149,13 @@ fn overset_shared(doc: &Document, id: ObjectId) -> Option<Option<(usize, usize)>
 
 pub(crate) fn line_outlines(lib: &FontLibrary, story: &crate::story::Story, lines: &[Line], pos: [f32; 2], include: impl Fn(usize, usize, &Line) -> bool) -> Vec<Vec<[f32; 2]>> {
     let mut out = Vec::new();
-    visit_outline_contours(lib, story, lines, pos, false, include, |_, contour| out.push(contour));
+    visit_outline_contours(lib, story, lines, pos, false, None, include, |_, contour| out.push(contour));
     out
 }
 
 fn visit_outline_contours(
     lib: &FontLibrary, story: &crate::story::Story, lines: &[Line], pos: [f32; 2],
-    vertical: bool,
+    vertical: bool, tolerance: Option<f64>,
     include: impl Fn(usize, usize, &Line) -> bool,
     mut add: impl FnMut(&crate::story::CharStyle, Vec<[f32; 2]>),
 ) {
@@ -203,7 +203,12 @@ fn visit_outline_contours(
             } else {
                 None
             };
-            for contour in lib.shared_glyph_contours(glyph.font, alternate.unwrap_or(glyph.gid), style.size_pt).iter() {
+            let glyph_tolerance = tolerance.map(|value| {
+                let [a, c, d] = [a, c, d].map(f64::from);
+                let scale = ((a + d).hypot(c) + (a - d).hypot(c)) * 0.5;
+                value / scale.max(1.0)
+            });
+            for contour in lib.glyph_contours_with_tolerance(glyph.font, alternate.unwrap_or(glyph.gid), style.size_pt, glyph_tolerance).iter() {
                 add(style, contour.iter().map(|p| {
                     let [x, y] = [origin[0] + a * p[0] + c * p[1], origin[1] - d * p[1]];
                     pivot.map_or([x, y], |[cx, cy]| [cx + (y - cy), cy - (x - cx)])
@@ -215,14 +220,15 @@ fn visit_outline_contours(
 
 fn line_ink(
     lib: &FontLibrary, story: &crate::story::Story, lines: &[Line], pos: [f32; 2],
-    default: &dtool_core::paint::Paint, vertical: bool, include: impl Fn(usize, usize, &Line) -> bool,
+    default: &dtool_core::paint::Paint, vertical: bool, tolerance: Option<f64>,
+    include: impl Fn(usize, usize, &Line) -> bool,
 ) -> Option<Vec<dtool_core::text_lines::TextInk>> {
     use dtool_core::text_lines::TextInk;
-    if !vertical && !story.chars.iter().any(|run| run.style.fill.as_ref().is_some_and(|paint| paint != default)) {
+    if tolerance.is_none() && !vertical && !story.chars.iter().any(|run| run.style.fill.as_ref().is_some_and(|paint| paint != default)) {
         return None;
     }
     let mut ink: Vec<TextInk> = Vec::new();
-    visit_outline_contours(lib, story, lines, pos, vertical, include, |style, contour| {
+    visit_outline_contours(lib, story, lines, pos, vertical, tolerance, include, |style, contour| {
         let paint = style.fill.as_ref().unwrap_or(default);
         TextInk::append(&mut ink, paint, contour);
     });
@@ -397,7 +403,7 @@ pub fn text_outlines_with(lib: &FontLibrary, doc: &Document, id: ObjectId) -> Op
     let layout = straight_text_layout(lib, doc, object)?;
     let (story, lines) = layout.as_ref();
     let mut out = Vec::new();
-    visit_outline_contours(lib, story, lines, object.pos, object.is_vertical_art_text(), |_, _, _| true, |_, contour| out.push(contour));
+    visit_outline_contours(lib, story, lines, object.pos, object.is_vertical_art_text(), None, |_, _, _| true, |_, contour| out.push(contour));
     let matrix = dtool_core::geometry::text_matrix(object);
     if matrix != dtool_core::geometry::IDENTITY {
         for point in out.iter_mut().flatten() {
@@ -432,7 +438,7 @@ pub struct TextExportLayout {
 }
 
 /// Export the lines owned by this layer in layout coordinates, with their document transform.
-pub fn text_export_layout(lib: &FontLibrary, doc: &Document, object: &dtool_core::Object, outlined: bool, tabbed_only: bool) -> Option<TextExportLayout> {
+pub fn text_export_layout(lib: &FontLibrary, doc: &Document, object: &dtool_core::Object, outlined: bool) -> Option<TextExportLayout> {
     if matches!(object.kind, ObjectKind::PathText(_)) {
         let outline_ink = crate::path_text::path_text_ink(lib, doc, object);
         let contours = if outline_ink.is_some() {
@@ -456,18 +462,13 @@ pub fn text_export_layout(lib: &FontLibrary, doc: &Document, object: &dtool_core
     let paint = story_paint(core);
     let vertical = object.is_vertical_art_text();
     let outlined = outlined || vertical;
-    if tabbed_only && !vertical && !core.text.contains('\t') && !has_local_text_fill(core, &paint)
-        && !core.paras.iter().any(|range| range["paragraph_decorations"].as_array().is_some_and(|items| !items.is_empty()))
-    {
-        return None;
-    }
     let layout = straight_text_layout(lib, doc, object)?;
     let (story, lines) = layout.as_ref();
     let chars: Vec<char> = story.text.chars().collect();
     let include = |cluster, index, line: &Line| {
         outlined || index < line.list_marker_len || chars.get(cluster) == Some(&'\t')
     };
-    let outline_ink = line_ink(lib, story, lines, object.pos, &paint, vertical, include);
+    let outline_ink = line_ink(lib, story, lines, object.pos, &paint, vertical, None, include);
     let contours = if outline_ink.is_none() { line_outlines(lib, story, lines, object.pos, include) } else { Vec::new() };
     let spans = if outlined { Vec::new() } else { export_text_spans(story, &chars, lines, object.pos) };
     Some(TextExportLayout { spans, contours, outline_ink, paint, matrix: dtool_core::geometry::text_matrix(object) })
@@ -560,20 +561,31 @@ pub(crate) fn has_local_text_fill(core: &dtool_core::Story, default: &dtool_core
 }
 
 fn text_ink_shared(doc: &Document, id: ObjectId) -> Option<Vec<dtool_core::text_lines::TextInk>> {
+    text_ink_with_tolerance(doc, id, None)
+}
+
+fn precise_text_ink_shared(doc: &Document, id: ObjectId, tolerance: f64) -> Option<Vec<dtool_core::text_lines::TextInk>> {
+    let object = doc.get_object(id)?;
+    let [a, b, c, d, _, _] = dtool_core::geometry::text_matrix(object).map(f64::from);
+    let scale = ((a + d).hypot(b - c) + (a - d).hypot(b + c)) * 0.5;
+    text_ink_with_tolerance(doc, id, Some(tolerance / scale.max(1.0)))
+}
+
+fn text_ink_with_tolerance(doc: &Document, id: ObjectId, tolerance: Option<f64>) -> Option<Vec<dtool_core::text_lines::TextInk>> {
     let object = doc.get_object(id)?;
     let core = doc.stories.iter().find(|core| Some(core.id) == object.story_id())?;
     if object.is_path_text() {
-        return crate::path_text::path_text_ink(&FontLibrary::shared(), doc, object);
+        return crate::path_text::path_text_ink_with_tolerance(&FontLibrary::shared(), doc, object, tolerance);
     }
     let paint = story_paint(core);
     let vertical = object.is_vertical_art_text();
-    if !vertical && !has_local_text_fill(core, &paint) {
+    if tolerance.is_none() && !vertical && !has_local_text_fill(core, &paint) {
         return None;
     }
     let lib = FontLibrary::shared();
     let layout = straight_text_layout(&lib, doc, object)?;
     let (story, lines) = layout.as_ref();
-    let mut ink = line_ink(&lib, story, lines, object.pos, &paint, vertical, |_, _, _| true)?;
+    let mut ink = line_ink(&lib, story, lines, object.pos, &paint, vertical, tolerance, |_, _, _| true)?;
     let matrix = dtool_core::geometry::text_matrix(object);
     for point in ink.iter_mut().flat_map(|run| run.contours.iter_mut().flatten()) {
         *point = dtool_core::geometry::apply_matrix(&matrix, *point);
@@ -585,11 +597,13 @@ pub fn install() -> bool {
     let lines = register_text_lines(text_lines_shared);
     let outlines = dtool_core::text_lines::register_text_outlines(text_outlines_shared);
     let ink = dtool_core::text_lines::register_text_ink(text_ink_shared);
+    let precise_ink = dtool_core::text_lines::register_precise_text_ink(precise_text_ink_shared);
     let tables = dtool_core::query::register_table_overflow(crate::table_layout::table_overflow_shared);
     let table_lines = dtool_core::table::query::register_table_lines(crate::table_layout::table_lines_shared);
     let table_fit = dtool_core::table::fit::register_measure(crate::table_layout::measure_for_fit);
     let decorations = dtool_core::text_lines::register_text_decorations(crate::decorations::text_decorations_shared);
     let faces = crate::text_faces::install();
     let breaks = dtool_core::text_lines::register_text_break_marks(break_marks_shared);
-    register_overset(overset_shared) && lines && tables && table_lines && table_fit && outlines && ink && decorations && faces && breaks
+    register_overset(overset_shared) && lines && tables && table_lines && table_fit && outlines
+        && ink && precise_ink && decorations && faces && breaks
 }

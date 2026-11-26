@@ -10,6 +10,8 @@ use std::sync::Arc;
 
 #[cfg(windows)]
 mod windows_ink;
+#[cfg(windows)]
+mod windows_clipboard;
 
 const HOST_DRAIN_BUDGET: usize = 32;
 
@@ -39,6 +41,11 @@ impl App {
 }
 
 impl eframe::App for App {
+    #[cfg(windows)]
+    fn raw_input_hook(&mut self, ctx: &eframe::egui::Context, input: &mut eframe::egui::RawInput) {
+        windows_clipboard::forward_vector_paste(input, self.shell.accepts_vector_paste_shortcut(ctx));
+    }
+
     fn logic(&mut self, ctx: &eframe::egui::Context, _frame: &mut eframe::Frame) {
         self.shell.handle_window_close(ctx);
     }
@@ -164,10 +171,13 @@ fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport,
         #[cfg(windows)]
-        event_loop_builder: use_windows_ink.then(|| {
-            Box::new(|builder: &mut winit::event_loop::EventLoopBuilder<_>| {
+        event_loop_builder: Some({
+            Box::new(move |builder: &mut winit::event_loop::EventLoopBuilder<_>| {
                 use winit::platform::windows::EventLoopBuilderExtWindows;
-                builder.with_msg_hook(windows_ink::observe_message);
+                builder.with_msg_hook(move |message| {
+                    windows_clipboard::observe_message(message);
+                    use_windows_ink && windows_ink::observe_message(message)
+                });
             }) as eframe::EventLoopBuilderHook
         }),
         ..Default::default()

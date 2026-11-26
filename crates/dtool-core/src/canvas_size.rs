@@ -763,9 +763,7 @@ fn resize_canvas_with_offset(doc: &mut Document, w: u32, h: u32, anchor: u8) -> 
     ];
     if new_page.iter().any(|v| !v.is_finite() || *v <= 0.0)
         || doc.objects.iter().any(|object| {
-            std::iter::once(object.pos).chain(object.transform_origin).any(|point| {
-                translate(point).iter().any(|v| !v.is_finite())
-            })
+            translate(object.pos).iter().any(|v| !v.is_finite())
         })
     {
         return Err(CommandError::invalid_params());
@@ -777,7 +775,7 @@ fn resize_canvas_with_offset(doc: &mut Document, w: u32, h: u32, anchor: u8) -> 
     doc.pixel_selection = selection;
     for object in &mut doc.objects {
         object.pos = translate(object.pos);
-        object.transform_origin = object.transform_origin.map(translate);
+        // The transform origin is stored as a fraction of the object size.
     }
 
     for slice in &mut doc.slices {
@@ -884,9 +882,17 @@ pub fn turn_canvas(doc: &mut Document, t: CanvasTurn) -> Result<(), CommandError
             CanvasTurn::FlipV => flip_layer_vertical(&layer),
         };
         let coverage = layer.to_rgba().chunks_exact(4).map(|p| p[0]).collect();
+        let transform = kurbo::Affine::new(match t {
+            CanvasTurn::RotateLeft => [0.0, 1.0, -1.0, 0.0, 1.0, 0.0],
+            CanvasTurn::RotateRight => [0.0, -1.0, 1.0, 0.0, 0.0, 1.0],
+            CanvasTurn::FlipH => [-1.0, 0.0, 0.0, 1.0, 1.0, 0.0],
+            CanvasTurn::FlipV => [1.0, 0.0, 0.0, -1.0, 0.0, 1.0],
+        });
         Ok(crate::raster_source::LayerMask {
             object: mask.object,
             coverage: PixelSelection::from_coverage(layer.width, layer.height, coverage),
+            vector_outline: mask.vector_outline.as_ref()
+                .map(|outline| crate::curve::Curve::from_kurbo(&(transform * outline.to_kurbo()))),
         })
     }).collect::<Result<Vec<_>, CommandError>>()?;
 

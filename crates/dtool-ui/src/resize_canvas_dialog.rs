@@ -17,6 +17,8 @@ pub(super) enum Action {
 pub(super) struct ResizeCanvasDialog {
     pub owner: ContextId,
     size: [f64; 2],
+    aspect: Option<f64>,
+    icons: crate::icon_cache::IconCache,
     units: Units,
     dpi: f32,
     anchor: u8,
@@ -35,11 +37,27 @@ impl ResizeCanvasDialog {
         Some(Self {
             owner,
             size: [w, h].map(|pixels| f64::from(px_to_unit(pixels as f32, doc.units, doc.dpi))),
+            aspect: None,
+            icons: Default::default(),
             units: doc.units,
             dpi: doc.dpi,
             anchor: 4,
             error: None,
         })
+    }
+
+    fn dimension(&mut self, ui: &mut egui::Ui, axis: usize, label: &str) {
+        let label = ui.label(text(label));
+        let scale = self.aspect.map_or(1.0, |ratio| if axis == 0 { ratio } else { ratio.recip() });
+        let minimum = 0.001_f64.max(0.001 / scale);
+        let maximum = 1_000_000_000.0_f64.min(1_000_000_000.0 / scale);
+        let spec = dtool_design::NumericSpec::new("")
+            .range(minimum..=maximum).step(0.1).decimals(3).width(78.0);
+        let id = ui.scope_id().with(axis);
+        let response = dtool_design::numeric_value(ui, id, &mut self.size[axis], &spec).labelled_by(label.id);
+        if response.changed() && self.aspect.is_some() {
+            self.size[1 - axis] = self.size[axis] * scale;
+        }
     }
 
     fn pixels(&self) -> Option<[u32; 2]> {
@@ -54,12 +72,18 @@ impl ResizeCanvasDialog {
             ctx, "dtool.resize_canvas", text("resize.canvas.title"), ClosePolicy::CancelOnly, can_confirm, |ui| {
                 ui.set_min_width(290.0);
                 egui::Grid::new("resize_canvas_fields").spacing([12.0, 6.0]).show(ui, |ui| {
-                    for (axis, label) in ["dialog.new_document.width", "dialog.new_document.height"].into_iter().enumerate() {
-                        let caption = ui.label(text(label));
-                        dtool_design::number_drag(ui, ui.scope_id().with(axis), &mut self.size[axis], 0.001..=1_000_000_000.0, 0.1)
-                            .labelled_by(caption.id);
-                        ui.end_row();
-                    }
+                    ui.label(text("menu.text.size"));
+                    ui.horizontal(|ui| {
+                        self.dimension(ui, 0, "dialog.new_document.width");
+                        let locked = self.aspect.is_some();
+                        let icon = if locked { "panel-aspect-linked" } else { "panel-aspect-unlinked" };
+                        let toggle = self.icons.studio_button(ui, icon, text("panel.transform.aspect_lock"), locked).clicked();
+                        self.dimension(ui, 1, "dialog.new_document.height");
+                        if toggle {
+                            self.aspect = (!locked).then(|| self.size[1] / self.size[0]);
+                        }
+                    });
+                    ui.end_row();
                     ui.label(text("dialog.new_document.units"));
                     let mut units = self.units;
                     let options = [

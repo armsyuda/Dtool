@@ -118,7 +118,7 @@ fn apply_gradient(session: &mut Session, cmd: &Command, record: bool) -> Command
         return Err(CommandError::invalid_params());
     }
     let in_pixels = |point: [f32; 2]| surface.doc_to_pixel(point).map(f64::from);
-    let geom = GradientGeom { start: in_pixels(args.start), end: in_pixels(args.end), ratio: f64::from(ratio) };
+    let geom = GradientGeom { start: in_pixels(args.start), end: in_pixels(args.end), ratio: f64::from(ratio), ..GradientGeom::default() };
     let kind = args.kind.unwrap_or(GradientKind::Linear);
     let from = f32::from(args.from.unwrap_or(session.quick_mask.ink));
     let to = f32::from(args.to.unwrap_or(0));

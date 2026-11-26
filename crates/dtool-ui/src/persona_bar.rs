@@ -33,7 +33,7 @@ fn cached_texture(ui: &egui::Ui, icons: &mut Option<&mut IconCache>, icon: Optio
     let icon = icon?;
     let cache = icons.as_deref_mut()?;
     let px = dtool_design::icon_texture_px(ui);
-    let colour = if selected { ui.visuals().selection.stroke.color } else { dtool_design::icons::current_icon_colour() };
+    let colour = if selected { dtool_design::selected_icon_ink(ui) } else { dtool_design::icons::current_icon_colour() };
     cache.texture(ui.ctx(), icon, colour, px)
 }
 
@@ -352,7 +352,7 @@ fn switch_icon_tint(selected: bool) -> egui::Color32 {
 fn toolbar_button(ui: &mut egui::Ui, icons: &mut IconCache, icon: Option<&str>, label: &str, enabled: bool, selected: bool) -> egui::Response {
     let icon_size = dtool_design::size("icon.size.tool");
     let px = (icon_size * ui.ctx().pixels_per_point()).ceil() as u32;
-    let colour = if selected { ui.visuals().selection.stroke.color } else { dtool_design::icons::current_icon_colour() };
+    let colour = if selected { dtool_design::selected_icon_ink(ui) } else { dtool_design::icons::current_icon_colour() };
     let texture = icon.and_then(|id| icons.texture(ui.ctx(), id, colour, px));
     let button = match &texture {
         Some(texture) => egui::Button::new(egui::Image::new(texture).fit_to_exact_size(egui::Vec2::splat(icon_size))
@@ -360,7 +360,9 @@ fn toolbar_button(ui: &mut egui::Ui, icons: &mut IconCache, icon: Option<&str>, 
         None => egui::Button::new(label),
     };
     let size = egui::Vec2::splat(dtool_design::size("bar.toolbar.control.height"));
-    let response = dtool_design::tooltip(ui.add_enabled(enabled, button.selected(selected).min_size(size)), label);
+    let response = dtool_design::with_icon_selection(ui, |ui| {
+        dtool_design::tooltip(ui.add_enabled(enabled, button.selected(selected).min_size(size)), label)
+    });
     response.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, enabled && ui.is_enabled(), selected, label));
     response
 }
@@ -414,7 +416,9 @@ fn pick_with(ui: &mut egui::Ui, current: Option<&serde_json::Value>, mut icons: 
                         )),
                         None => egui::Button::new(name),
                     };
-                    let response = ui.add(button.selected(selected_persona).min_size(egui::vec2(72.0, control_height)));
+                    let response = dtool_design::with_icon_selection(ui, |ui| {
+                        ui.add(button.selected(selected_persona).min_size(egui::vec2(72.0, control_height)))
+                    });
                     if dtool_design::tooltip(response, tooltip).clicked() {
                         selected = Some(if id == PersonaId::AiImage { format!("enter_sub:{key}") } else { key });
                     }

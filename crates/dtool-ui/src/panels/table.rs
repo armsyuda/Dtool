@@ -296,7 +296,9 @@ impl TablePanel {
                     Some(texture) => egui::Button::image(egui::Image::new(&texture).fit_to_exact_size(egui::Vec2::splat(14.0))),
                     None => egui::Button::new(label).truncate(),
                 };
-                let response = ui.add_sized([22.0, 22.0], button.selected(selected)).labelled_by(caption).on_hover_text(label);
+                let response = dtool_design::with_icon_selection(ui, |ui| {
+                    ui.add_sized([22.0, 22.0], button.selected(selected)).labelled_by(caption).on_hover_text(label)
+                });
                 response.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, ui.is_enabled(), selected, label));
                 if response.clicked() { chosen = Some(align); }
             }
@@ -524,7 +526,9 @@ pub(super) fn paint_choice_with(ui: &mut Ui, key: &str, paint: Option<&Paint>, d
 
 fn edge_button(ui: &mut Ui, mask: &Edge, key: &str, selected: bool, width: f32) -> Response {
     let label = text(key);
-    let response = ui.add_sized([width, 23.0], egui::Button::new("").selected(selected)).on_hover_text(label);
+    let response = dtool_design::with_icon_selection(ui, |ui| {
+        ui.add_sized([width, 23.0], egui::Button::new("").selected(selected)).on_hover_text(label)
+    });
     response.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, ui.is_enabled(), selected, label));
     let box_rect = egui::Rect::from_center_size(response.rect.center(), egui::vec2(14.0, 14.0));
     let left = box_rect.left_center();
@@ -536,7 +540,8 @@ fn edge_button(ui: &mut Ui, mask: &Edge, key: &str, selected: bool, width: f32) 
         [top, bottom], [box_rect.left_top(), box_rect.right_top()],
         [box_rect.left_bottom(), box_rect.right_bottom()], [left, right],
     ];
-    let foreground = ui.style().interact(&response).fg_stroke.color;
+    let foreground = if selected && response.enabled() { dtool_design::selected_icon_ink(ui) }
+        else { ui.style().interact(&response).fg_stroke.color };
     for (index, segment) in segments.into_iter().enumerate() {
         let chosen = mask.0 & (1 << index) != 0;
         let stroke = if chosen { egui::Stroke::new(1.5, foreground) }

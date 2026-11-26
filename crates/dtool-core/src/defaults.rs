@@ -190,5 +190,5 @@ impl ObjectDefaults {
 }
 
 fn convert_stroke(stroke: &StrokeStyle, convert: impl Fn(f32) -> f32) -> StrokeStyle {
-    StrokeStyle { width: convert(stroke.width), dash: stroke.dash.iter().map(|value| convert(*value)).collect(), ..stroke.clone() }
+    StrokeStyle { width: convert(stroke.width), dash: stroke.dash.iter().map(|value| convert(*value)).collect(), dash_offset: convert(stroke.dash_offset), ..stroke.clone() }
 }

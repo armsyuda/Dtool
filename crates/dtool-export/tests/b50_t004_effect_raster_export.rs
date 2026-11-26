@@ -10,7 +10,7 @@ fn shadow() -> LayerEffect {
     let mut effect = default_effect(EffectKind::OuterShadow);
     effect.opacity = 1.0;
     effect.blend = BlendMode::Normal;
-    effect.params = EffectParams::Shadow { radius: 3.0, offset: 12.0, angle: 135.0, intensity: 0.0, colour: Colour::new(0, 0, 255, 255), knock_out: true };
+    effect.params = EffectParams::Shadow { radius_y: None, blur_angle: None, radius: 3.0, offset: 12.0, angle: 135.0, intensity: 0.0, colour: Colour::new(0, 0, 255, 255), knock_out: true };
     effect
 }
 

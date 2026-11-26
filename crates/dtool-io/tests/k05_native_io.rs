@@ -139,10 +139,7 @@ fn sample_document() -> (Document, ObjectId) {
     doc.pixel_layers.insert(pixel_id, PixelLayer::from_rgba(2, 2, &[
         255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255,
     ]));
-    doc.layer_masks.push(LayerMask {
-        object: pixel_id,
-        coverage: PixelSelection::all(2, 2),
-    });
+    doc.layer_masks.push(LayerMask::new(pixel_id, PixelSelection::all(2, 2)));
 
     let resource = ImageResource {
         id: ResourceId(0),

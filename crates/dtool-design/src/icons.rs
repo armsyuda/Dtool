@@ -8,7 +8,7 @@ use crate::theme::ThemeStyle;
 const ICONS_JSON: &str = include_str!("../assets/icons.json");
 const ICON_APP_MAIN: &[u8] = include_bytes!("../assets/icons/dtool-256.png");
 
-pub const SVG_ICONS: [(&str, &str); 206] = [
+pub const SVG_ICONS: [(&str, &str); 220] = [
     ("app-update", include_str!("../assets/icons/app-update.svg")),
     ("ctx-transform-separately", include_str!("../assets/icons/ctx-transform-separately.svg")),
     ("tool-shape-star", include_str!("../assets/icons/tool-shape-star.svg")),
@@ -38,6 +38,20 @@ pub const SVG_ICONS: [(&str, &str); 206] = [
     ("ctx-zoom-fit", include_str!("../assets/icons/ctx-zoom-fit.svg")),
     ("ctx-zoom-actual", include_str!("../assets/icons/ctx-zoom-actual.svg")),
     ("ctx-close-curve", include_str!("../assets/icons/ctx-close-curve.svg")),
+    ("ctx-break-curve", include_str!("../assets/icons/ctx-break-curve.svg")),
+    ("ctx-split-after-node", include_str!("../assets/icons/ctx-split-after-node.svg")),
+    ("ctx-node-direction", include_str!("../assets/icons/ctx-node-direction.svg")),
+    ("ctx-node-align", include_str!("../assets/icons/ctx-node-align.svg")),
+    ("ctx-node-snap-geometry", include_str!("../assets/icons/ctx-node-snap-geometry.svg")),
+    ("ctx-node-align-all", include_str!("../assets/icons/ctx-node-align-all.svg")),
+    ("ctx-node-handle-global", include_str!("../assets/icons/ctx-node-handle-global.svg")),
+    ("ctx-node-handle-construction", include_str!("../assets/icons/ctx-node-handle-construction.svg")),
+    ("ctx-node-hide-transform-box", include_str!("../assets/icons/ctx-node-hide-transform-box.svg")),
+    ("ctx-node-alignment-handles", include_str!("../assets/icons/ctx-node-alignment-handles.svg")),
+    ("ctx-node-box-from-curves", include_str!("../assets/icons/ctx-node-box-from-curves.svg")),
+    ("ctx-smooth-curve", include_str!("../assets/icons/ctx-smooth-curve.svg")),
+    ("ctx-join-curves", include_str!("../assets/icons/ctx-join-curves.svg")),
+    ("ctx-reverse-curve", include_str!("../assets/icons/ctx-reverse-curve.svg")),
     ("ctx-text-bold", include_str!("../assets/icons/ctx-text-bold.svg")),
     ("ctx-text-italic", include_str!("../assets/icons/ctx-text-italic.svg")),
     ("ctx-text-underline", include_str!("../assets/icons/ctx-text-underline.svg")),

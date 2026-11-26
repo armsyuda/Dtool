@@ -232,8 +232,8 @@ impl FillStrokeWells {
             }
             WellState::Single(paint) => {
                 match &paint {
-                    Paint::Solid { .. } => {
-                        paint_well_in(ui, &paint, "fill.well", &self.display, self.display_icc.as_ref());
+                    Paint::Solid { .. } | Paint::Gradient { .. } => {
+                        edit_well_colours(ui, &mut self.fill_state, &self.display, self.display_icc.as_ref());
                     }
                     Paint::Mesh(mesh) => {
                         ui.add_enabled_ui(false, |ui| self.show_mesh_controls(ui, mesh));
@@ -256,13 +256,7 @@ impl FillStrokeWells {
 
         dtool_design::panel_header(ui, text("fill.kind.header"));
 
-        for key in FILL_MENU_KINDS {
-            if dtool_design::menu_item(ui, text(key)).clicked() {
-                if let Some(paint) = default_fill_for_kind(key) {
-                    self.fill_state = WellState::Single(paint);
-                }
-            }
-        }
+        show_paint_kinds(ui, &mut self.fill_state, &FILL_MENU_KINDS);
     }
 
     pub fn edit_hatch(&mut self, hatch: dtool_core::paint::Hatch) -> bool {
@@ -351,8 +345,8 @@ impl FillStrokeWells {
                 mixed_well(ui, "stroke.well", text("stroke.mixed"));
             }
             WellState::Single(paint) => {
-                if let Paint::Solid { .. } = paint {
-                    paint_well_in(ui, paint, "stroke.well", &self.display, self.display_icc.as_ref());
+                if matches!(paint, Paint::Solid { .. } | Paint::Gradient { .. }) {
+                    edit_well_colours(ui, &mut self.stroke_state, &self.display, self.display_icc.as_ref());
                 } else {
                     ui.label(text("paint.type.other"));
                 }
@@ -361,6 +355,8 @@ impl FillStrokeWells {
                 ui.label(text("paint.none"));
             }
         }
+        dtool_design::panel_header(ui, text("fill.kind.header"));
+        show_paint_kinds(ui, &mut self.stroke_state, &FILL_MENU_KINDS[..2]);
     }
 
     pub fn close_popup(&mut self) {
@@ -475,10 +471,24 @@ impl FillStrokeWells {
         let mut updates = Vec::new();
         for id in ids {
             let object = document.get_object(*id)?;
+            if object.locked { continue; }
+            let original = if role == PaintRole::Edge { &object.stroke.paint } else { &object.fill };
+            let mut paint = paint.clone();
+            if let Paint::Gradient { geom, .. } = &mut paint
+                && *geom == dtool_core::paint::GradientGeom::default()
+                && !matches!(original, Paint::Gradient { .. })
+            {
+                let [width, height] = object.size.map(f64::from);
+                let angle = if width.abs() > 0.001 { 0.0 } else { 270.0 };
+                *geom = dtool_core::paint::GradientGeom::from_legacy_angle(angle, [0.0, 0.0, width.max(0.001), height.max(0.001)]);
+            }
             let update = match role {
                 PaintRole::SourceObject if object.fill != paint => serde_json::json!({ "id": id.0, "fill": paint }),
                 PaintRole::Edge if object.stroke.paint != paint => {
                     let mut stroke = object.stroke.clone();
+                    if matches!(stroke.paint, Paint::None) && !matches!(paint, Paint::None) && stroke.width == 0.0 {
+                        stroke.width = dtool_core::units::units_per_point(document.units, document.dpi);
+                    }
                     stroke.paint = paint.clone();
                     serde_json::json!({ "id": id.0, "stroke": stroke })
                 }
@@ -549,6 +559,74 @@ fn rand_seed() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos() as u64
 }
 
+fn show_paint_kinds(ui: &mut egui::Ui, state: &mut WellState, kinds: &[&str]) {
+    ui.horizontal_wrapped(|ui| {
+        for &key in kinds {
+            let current = matches!((&*state, key),
+                (WellState::Single(Paint::Solid { .. }), "fill.kind.solid")
+                | (WellState::Single(Paint::Gradient { .. }), "fill.kind.gradient")
+                | (WellState::Single(Paint::Hatch(_)), "fill.kind.hatch")
+            );
+            if ui.selectable_label(current, text(key)).clicked() && !current
+                && let Some(mut paint) = default_fill_for_kind(key)
+            {
+                if let (WellState::Single(previous), Paint::Solid { colour }) = (&*state, &mut paint)
+                    && let Some(previous) = dtool_core::scene::representative_colour(previous)
+                {
+                    *colour = previous;
+                }
+                if let (WellState::Single(Paint::Solid { colour }), Paint::Gradient { stops, .. }) = (&*state, &mut paint) {
+                    stops[0].colour = *colour;
+                    if stops[1].colour == *colour {
+                        stops[1].colour = dtool_core::paint::Colour::new(255, 255, 255, 255);
+                    }
+                }
+                *state = WellState::Single(paint);
+            }
+        }
+        let none = matches!(state, WellState::None | WellState::Single(Paint::None));
+        if ui.selectable_label(none, text("paint.none")).clicked() {
+            *state = WellState::None;
+        }
+    });
+}
+
+fn edit_well_colours(
+    ui: &mut egui::Ui,
+    state: &mut WellState,
+    display: &dtool_core::paint::DisplayColourCtx,
+    icc: Option<&dtool_core::colour::model::ObjectIcc>,
+) {
+    let WellState::Single(paint) = state else { return };
+    let edit = |ui: &mut egui::Ui, colour: &mut dtool_core::paint::Colour| {
+        let solid = Paint::Solid { colour: *colour };
+        let mut rgba = paint_well_colour_in(&solid, display, icc).unwrap_or_else(|| colour_to_egui(colour));
+        let button = dtool_design::colour_well(ui, rgba, "edit-paint-colour");
+        egui::Popup::menu(&button)
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+            .show(|ui| {
+                if egui::color_picker::color_picker_color32(ui, &mut rgba, egui::color_picker::Alpha::BlendOrAdditive) {
+                    let [r, g, b, a] = rgba.to_srgba_unmultiplied();
+                    *colour = dtool_core::paint::Colour::new(r, g, b, a);
+                }
+            });
+    };
+    match paint {
+        Paint::Solid { colour } => edit(ui, colour),
+        Paint::Gradient { stops, .. } => {
+            for (index, stop) in stops.iter_mut().enumerate() {
+                ui.push_id(index, |ui| {
+                    ui.horizontal(|ui| {
+                        edit(ui, &mut stop.colour);
+                        ui.label(format!("{} {}  ·  {:.0}%", text("ctx.gradient.stop"), index + 1, stop.offset * 100.0));
+                    });
+                });
+            }
+        }
+        _ => {}
+    }
+}
+
 fn colour_to_egui(colour: &dtool_core::paint::Colour) -> egui::Color32 {
     let hex = format!(
         "#{:02X}{:02X}{:02X}{:02X}",
@@ -568,6 +646,30 @@ pub fn paint_well_colour_in(paint: &Paint, display: &dtool_core::paint::DisplayC
         Paint::Hatch(hatch) => Some(colour_to_egui(&hatch.colour)),
         _ => None,
     }
+}
+
+pub(crate) fn paint_gradient_well(painter: &egui::Painter, rect: egui::Rect, paint: &Paint, display: &dtool_core::paint::DisplayColourCtx) -> bool {
+    if !matches!(paint, Paint::Gradient { .. }) { return false; }
+    let Paint::Gradient { stops, .. } = dtool_core::paint::display_paint(paint, None, display) else { return false };
+    if stops.is_empty() { return false; }
+    let mut mesh = egui::Mesh::default();
+    for (index, t) in std::iter::once(0.0)
+        .chain(stops.iter().map(|stop| stop.offset.clamp(0.0, 1.0)))
+        .chain(std::iter::once(1.0))
+        .enumerate()
+    {
+        let x = egui::lerp(rect.left()..=rect.right(), t);
+        let colour = colour_to_egui(&dtool_core::paint::interpolate_stops(&stops, t));
+        mesh.colored_vertex(egui::pos2(x, rect.top()), colour);
+        mesh.colored_vertex(egui::pos2(x, rect.bottom()), colour);
+        if index > 0 {
+            let current = index as u32 * 2;
+            mesh.add_triangle(current - 2, current - 1, current);
+            mesh.add_triangle(current, current - 1, current + 1);
+        }
+    }
+    painter.add(egui::Shape::mesh(mesh));
+    true
 }
 
 pub fn well_value(state: &WellState) -> dtool_design::WellValue {

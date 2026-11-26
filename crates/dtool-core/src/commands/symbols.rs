@@ -1,4 +1,5 @@
 pub(crate) mod curves;
+pub(crate) mod clipboard;
 pub(crate) mod structure;
 pub mod constraints;
 pub(crate) mod page_import;
@@ -11,11 +12,18 @@ use crate::paint::{Paint, StrokeStyle, paint_from_param};
 use crate::{Command, CommandError, CommandResult, Document, Object, ObjectId, ObjectKind, Session};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Symbols {
     pub definitions: Vec<Definition>,
     pub instances: Vec<Instance>,
+    #[serde(default, skip_serializing_if = "reserved_id_is_zero")]
+    last_removed_id: u64,
+}
+
+fn reserved_id_is_zero(id: &u64) -> bool {
+    *id == 0
 }
 
 impl Symbols {
@@ -31,7 +39,32 @@ impl Symbols {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.definitions.is_empty() && self.instances.is_empty()
+        self.definitions.is_empty() && self.instances.is_empty() && self.last_removed_id == 0
+    }
+
+    pub(crate) fn convert_units(&mut self, factor: f32) -> Result<(), CommandError> {
+        for definition in &mut self.definitions {
+            crate::doc_setup::transform_object_dimensions(
+                &mut definition.bundle.objects, factor, [factor; 2],
+                |pos, size, _| (pos * factor, size * factor),
+            )?;
+            definition.origin = definition.origin.map(|value| value * factor);
+            definition.size = definition.size.map(|value| value * factor);
+        }
+        for instance in &mut self.instances {
+            for entry in &mut instance.curve_overrides {
+                // Reference and edited frames store a relative change. Canvas
+                // placement is applied later when that change is projected.
+                entry.relocate(factor, [0.0; 2], [0.0; 2]);
+            }
+        }
+        Ok(())
+    }
+
+    fn next_definition_id(&self) -> Result<u64, CommandError> {
+        self.definitions.iter().map(|definition| definition.id)
+            .fold(self.last_removed_id, u64::max)
+            .checked_add(1).ok_or_else(CommandError::invalid_params)
     }
 }
 
@@ -50,6 +83,13 @@ pub struct Definition {
 impl Definition {
     pub fn size(&self) -> [f32; 2] {
         self.size
+    }
+
+    /// Reconstruct the shared artwork without any instance-specific edits.
+    pub fn preview_document(&self, units: crate::document::Units, dpi: f32) -> (Document, Vec<ObjectId>) {
+        let mut doc = Document::new(self.size.map(|side| side.max(1.0)), units, dpi, 1);
+        let roots = crate::clipboard::paste_bundle(&mut doc, &self.bundle, None, [0.0, 0.0]);
+        (doc, roots)
     }
 }
 
@@ -77,6 +117,7 @@ pub struct Instance {
 const COMMANDS: &[&str] = &[
     "symbol.create", "symbol.place", "symbol.query", "symbol.edit",
     "symbol.override", "symbol.revert", "symbol.detach", "symbol.instance", "symbol.sync",
+    "symbol.rename", "symbol.delete",
 ];
 
 fn id(value: &Value) -> Result<ObjectId, CommandError> {
@@ -100,6 +141,52 @@ fn is_descendant(doc: &Document, node: ObjectId, root: ObjectId) -> bool {
 
 fn live_instance(doc: &Document, instance: &Instance) -> bool {
     doc.get_object(instance.root).is_some_and(|object| matches!(object.kind, ObjectKind::Group))
+}
+
+#[derive(Clone, Copy)]
+pub struct LayerLink {
+    pub is_root: bool,
+    pub modified: bool,
+}
+
+/// Index the live links for layer rows, including the state of a collapsed root.
+pub fn layer_links(doc: &Document) -> HashMap<ObjectId, LayerLink> {
+    let mut links = HashMap::new();
+    if doc.symbols.instances.is_empty() {
+        return links;
+    }
+    let objects: HashMap<_, _> = doc.objects.iter().map(|object| (object.id, object)).collect();
+    for instance in &doc.symbols.instances {
+        let Some(definition) = doc.symbols.definitions.iter().find(|entry| entry.id == instance.definition) else { continue };
+        if !objects.get(&instance.root).is_some_and(|root| root.kind == ObjectKind::Group) {
+            continue;
+        }
+        let mut local: HashSet<_> = instance.fill_overrides.iter()
+            .chain(&instance.stroke_overrides).chain(&instance.corner_overrides)
+            .chain(&instance.constraint_overrides).copied().collect();
+        local.extend(instance.curve_overrides.iter().map(|entry| entry.node));
+        if !instance.text_overrides.is_empty() {
+            local.extend(definition.bundle.objects.iter().filter(|object| {
+                crate::clipboard::object_stories(object).iter().any(|id| instance.text_overrides.contains(id))
+            }).map(|object| object.id));
+        }
+        let mut modified_root = instance.structure_override;
+        for &(canonical, actual) in &instance.links {
+            let mut parent = objects.get(&actual).and_then(|object| object.parent_id);
+            for _ in 0..objects.len() {
+                let Some(id) = parent else { break };
+                if id == instance.root {
+                    let modified = local.contains(&canonical);
+                    modified_root |= modified;
+                    links.entry(actual).or_insert(LayerLink { is_root: false, modified });
+                    break;
+                }
+                parent = objects.get(&id).and_then(|object| object.parent_id);
+            }
+        }
+        links.insert(instance.root, LayerLink { is_root: true, modified: modified_root });
+    }
+    links
 }
 
 fn linked_node(doc: &Document, instance: &Instance, canonical: ObjectId) -> Option<ObjectId> {
@@ -157,6 +244,7 @@ pub fn can_execute(session: &Session, command: &Command) -> Option<bool> {
         "symbol.create" => source_ids(session, &command.params).is_ok(),
         "symbol.place" | "symbol.instance" => !session.document.symbols.definitions.is_empty(),
         "symbol.detach" => command.params.get("instance").is_some() || selection_link(session).is_some(),
+        "symbol.rename" | "symbol.delete" => definition_index(&session.document, &command.params).is_ok(),
         _ => true,
     })
 }
@@ -180,6 +268,7 @@ pub fn run(session: &mut Session, command: &Command) -> Option<CommandResult> {
                 Ok(json!({"enabled": session.symbol_sync}))
             }
             "symbol.detach" => detach(session, command),
+            "symbol.rename" | "symbol.delete" => manage_definition(session, command),
             _ => edit_style(session, command),
         }
     })
@@ -220,7 +309,7 @@ fn create(session: &mut Session, command: &Command) -> CommandResult {
     let params = &command.params;
     let ids = source_ids(session, params)?;
     let mut doc = session.document.clone();
-    let definition_id = doc.symbols.definitions.last().map_or(1, |definition| definition.id + 1);
+    let definition_id = doc.symbols.next_definition_id()?;
     let bundle = collect_bundle(&doc, &ids);
     if bundle.roots.len() != ids.len() || bundle.roots.iter().any(|id| !ids.contains(id)) {
         return Err(CommandError::invalid_params());
@@ -356,6 +445,45 @@ fn detach(session: &mut Session, command: &Command) -> CommandResult {
     let mut doc = session.document.clone();
     let instance = doc.symbols.instances.remove(index);
     super::document_change::commit(session, &command.name, doc, session.selection.ids.clone(), json!({"instance": instance.root}))
+}
+
+fn definition_index(doc: &Document, params: &Value) -> Result<usize, CommandError> {
+    let definition = params["definition"].as_u64().ok_or_else(CommandError::invalid_params)?;
+    doc.symbols.definitions.iter().position(|entry| entry.id == definition)
+        .ok_or_else(CommandError::not_found)
+}
+
+fn manage_definition(session: &mut Session, command: &Command) -> CommandResult {
+    let index = definition_index(&session.document, &command.params)?;
+    let mut doc = session.document.clone();
+    let definition = &doc.symbols.definitions[index];
+    let definition_id = definition.id;
+    let result = if command.name == "symbol.rename" {
+        let name = command.params["name"].as_str().map(str::trim)
+            .filter(|name| !name.is_empty()).ok_or_else(CommandError::invalid_params)?;
+        if definition.name == name {
+            return Ok(json!({"definition": definition_id, "name": name, "changes": []}));
+        }
+        let old_name = std::mem::replace(&mut doc.symbols.definitions[index].name, name.to_owned());
+        let roots: Vec<_> = doc.symbols.instances.iter()
+            .filter(|instance| instance.definition == definition_id && live_instance(&doc, instance))
+            .map(|instance| instance.root).collect();
+        for root in roots {
+            if let Some(object) = doc.find_object_mut(root.0) && object.name == old_name {
+                object.name = name.to_owned();
+            }
+        }
+        json!({"definition": definition_id, "name": name})
+    } else {
+        let detached: Vec<_> = doc.symbols.instances.iter()
+            .filter(|instance| instance.definition == definition_id && live_instance(&doc, instance))
+            .map(|instance| instance.root).collect();
+        doc.symbols.instances.retain(|instance| instance.definition != definition_id);
+        doc.symbols.definitions.remove(index);
+        doc.symbols.last_removed_id = doc.symbols.last_removed_id.max(definition_id);
+        json!({"definition": definition_id, "detached": detached})
+    };
+    super::document_change::commit(session, &command.name, doc, session.selection.ids.clone(), result)
 }
 
 pub(crate) fn fill_link(doc: &Document, actual: ObjectId, paint: &Paint) -> Option<(ObjectId, u64, ObjectId)> {

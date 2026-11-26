@@ -92,6 +92,17 @@ pub fn text_ink(doc: &Document, id: ObjectId) -> Option<Vec<TextInk>> {
     TEXT_INK.get().and_then(|provider| provider(doc, id))
 }
 
+type PreciseTextInkProvider = fn(&Document, ObjectId, f64) -> Option<Vec<TextInk>>;
+static PRECISE_TEXT_INK: OnceLock<PreciseTextInkProvider> = OnceLock::new();
+
+pub fn register_precise_text_ink(provider: PreciseTextInkProvider) -> bool {
+    PRECISE_TEXT_INK.set(provider).is_ok() || PRECISE_TEXT_INK.get().is_some()
+}
+
+pub(crate) fn precise_text_ink(doc: &Document, id: ObjectId, tolerance: f64) -> Option<Vec<TextInk>> {
+    PRECISE_TEXT_INK.get().and_then(|provider| provider(doc, id, tolerance))
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct TextDecoration {
     pub rect: [f32; 4],
