@@ -4,6 +4,7 @@ pub mod pdf_paint;
 pub mod svg;
 pub mod gif;
 pub mod raster;
+pub mod slices;
 mod blend_range_mask;
 mod effect_image;
 pub mod jpeg;
@@ -321,7 +322,8 @@ pub fn selection_region(doc: &Document, ids: &[dtool_core::ObjectId]) -> Option<
     dtool_core::command::selection_bounds(doc, ids).and_then(|[x, y, w, h]| valid_region((x, y, w, h)))
 }
 
-fn selection_output_region(doc: &Document, ids: &[dtool_core::ObjectId]) -> Option<(f32, f32, f32, f32)> {
+/// Output region including visible strokes and effects from the selected subtrees.
+pub fn selection_output_region(doc: &Document, ids: &[dtool_core::ObjectId]) -> Option<(f32, f32, f32, f32)> {
     use kurbo::{Rect, Shape};
 
     let [x, y, width, height] = dtool_core::command::selection_bounds(doc, ids)?;
@@ -685,7 +687,8 @@ pub(crate) fn arrowheads_for(doc: Option<&Document>, object: &Object) -> Vec<dto
 
 pub(crate) use dtool_core::scene::vector_crop_bounds;
 
-pub(crate) fn vector_object_bounds(doc: &Document, object: &Object) -> [f32; 4] {
+/// Conservative vector ink bounds, as left, top, right and bottom in document units.
+pub fn vector_object_bounds(doc: &Document, object: &Object) -> [f32; 4] {
     let [x, y, w, h] = dtool_core::geometry::object_world_bounds(object);
     let mut bounds = [x, y, x + w, y + h];
     let mut include = |[left, top, right, bottom]: [f32; 4]| {

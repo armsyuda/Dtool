@@ -187,6 +187,15 @@ pub struct Dialog {
 impl Dialog {
     pub fn new(owner: ContextId, action: Action, session: &Session) -> Self {
         let number = pages::viewed_index(session).unwrap_or(0) + 1;
+        Self::at_number(owner, action, session, number)
+    }
+
+    pub(crate) fn add_at_page(session: &Session, page: PageId) -> Option<Self> {
+        let index = session.document.pages.iter().position(|item| item.id == page)?;
+        Some(Self::at_number(session.context?, Action::Add, session, index + 1))
+    }
+
+    fn at_number(owner: ContextId, action: Action, session: &Session, number: usize) -> Self {
         Self {
             owner, action, number, count: 1, end: number, placement: Placement::After,
             spread: SpreadInsertion::Automatic,
@@ -221,10 +230,9 @@ impl Dialog {
         };
         let inserts = matches!(self.action, Action::Add | Action::Import);
         let import_count = self.import.as_ref().map_or(1, ImportSource::selected_count);
-        let setup = &session.document.setup;
         let anchor = if self.placement == Placement::End { pages.len() } else { self.number };
         let extend_cover = self.action == Action::Add && self.spread == SpreadInsertion::Extend
-            && anchor == 1 && setup.facing_pages && setup.start_on_right;
+            && anchor == 1 && dtool_core::data_merge::layout::has_right_cover(&session.document);
         let valid = !extend_cover && import_count > 0 && match self.action {
             Action::Delete => self.end <= pages.len() && self.end >= self.number && self.end - self.number + 1 < pages.len(),
             _ if inserts && self.placement == Placement::End => true,
@@ -313,7 +321,7 @@ impl Dialog {
                     let label = self.master.and_then(|id| doc.get_object(id)).map_or(text("panel.pages.no_master"), masters::master_name);
                     egui::ComboBox::from_id_salt("page.add.master").selected_text(label).show_ui(ui, |ui| {
                         ui.selectable_value(&mut self.master, None, text("panel.pages.no_master"));
-                        for root in doc.master_pages.roots.iter().filter_map(|id| doc.get_object(*id)) {
+                        for root in doc.master_pages.spread_roots().filter_map(|id| doc.get_object(id)) {
                             ui.selectable_value(&mut self.master, Some(root.id), masters::master_name(root));
                         }
                     });
@@ -396,7 +404,7 @@ pub fn new_page(session: &Session) -> Command {
     if let Some(id) = pages::viewed_page(session) {
         params["after_id"] = json!(id);
         if let Some(assignment) = session.document.master_pages.for_page(id) {
-            params["master_id"] = json!(assignment.master);
+            params["master_id"] = json!(session.document.master_pages.spread_id(assignment.master));
         }
     }
     Command::with_params("page.add", params)

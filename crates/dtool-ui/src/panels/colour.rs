@@ -999,12 +999,12 @@ impl ColourPanel {
         let mut alpha = f32::from(self.colour.a) / 255.0 * 100.0;
         let opacity_label = format!("{} %", text("context.brush.opacity"));
         let (changed, reset) = if inline {
-            let label = ui.add(egui::Label::new("%").sense(egui::Sense::click())).on_hover_text(&opacity_label);
+            let label = ui.add(dtool_design::numeric_caption("%")).on_hover_text(&opacity_label);
             let response = dtool_design::slider(ui, &mut alpha, 0.0..=100.0, "")
                 .labelled_by(label.id).on_hover_text(&opacity_label);
             (response.changed(), label.double_clicked())
         } else {
-            let label = ui.add(egui::Label::new(&opacity_label).sense(egui::Sense::click()));
+            let label = ui.add(dtool_design::numeric_caption(&opacity_label));
             let response = ui.horizontal(|ui| dtool_design::slider(ui, &mut alpha, 0.0..=100.0, "")).inner;
             (response.labelled_by(label.id).changed(), label.double_clicked())
         };
@@ -1140,7 +1140,7 @@ fn channel_slider(
 ) -> bool {
     ui.horizontal(|ui| {
         let sense = if reset.is_some() { egui::Sense::click() } else { egui::Sense::hover() };
-        let label = ui.add_sized([16.0, ui.spacing().interact_size.y], egui::Label::new(name).sense(sense));
+        let label = ui.add_sized([16.0, ui.spacing().interact_size.y], dtool_design::numeric_caption(name).sense(sense));
         let available = ui.available_width().min(ui.clip_rect().right() - ui.cursor().min.x).max(0.0);
         let numeric_width = available.min(if available < 100.0 { 44.0 } else { 48.0 });
         let slider_width = available - numeric_width - ui.spacing().item_spacing.x;

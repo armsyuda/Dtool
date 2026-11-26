@@ -205,6 +205,7 @@ pub fn run(session: &mut Session, command: &Command) -> Option<CommandResult> {
     if let Some(value) = crate::text_lines::run(session, command) { return Some(value); }
     if let Some(value) = crate::table::selection::run(session, command) { return Some(value); }
     if let Some(value) = image_place::run(session, command) { return Some(value); }
+    if let Some(value) = crate::ai_image::run(session, command) { return Some(value); }
     if let Some(value) = layer_mask::run(session, command) { return Some(value); }
     if let Some(value) = crate::clip_mask::run(session, command) { return Some(value); }
     if let Some(value) = crate::effect_raster::run(session, command) { return Some(value); }

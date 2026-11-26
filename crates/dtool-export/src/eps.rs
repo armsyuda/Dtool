@@ -563,7 +563,7 @@ mod tests {
         assert!(text.contains("30 40 lineto\n"));
         assert!(text.contains("30 30 lineto\n"));
         assert!(text.contains("10 30 lineto\nclosepath\n"));
-        assert!(text.contains("gsave\n1 0 0 setrgbcolor\nfill\ngrestore\n"));
+        assert!(text.contains("gsave\n1 0 0 setrgbcolor\neofill\ngrestore\n"));
         assert!(text.contains("10 setmiterlimit\n0 0 1 setrgbcolor\n2 setlinewidth\n0 setlinecap\n0 setlinejoin\n[] 0 setdash\nstroke\n"));
     }
 

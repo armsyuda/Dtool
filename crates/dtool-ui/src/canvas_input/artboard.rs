@@ -269,7 +269,8 @@ fn hit(ui: &Ui, rect: Rect, session: &Session, at: Pos2) -> Option<(ObjectId, Op
     let labelled = dtool_core::view::ViewTarget::artboards(&session.document)
         .filter(|board| !board.locked && board.pickable)
         .filter(|board| {
-            let at_corner = screen(rect, &session.view, object_world_quad(board)[0]);
+            let quad = object_world_quad(board);
+            let at_corner = screen(rect, &session.view, quad[0]);
             if at.x < at_corner.x || at.y > at_corner.y - 3.0 || at.y < at_corner.y - 19.0 {
                 return false;
             }
@@ -278,8 +279,8 @@ fn hit(ui: &Ui, rect: Rect, session: &Session, at: Pos2) -> Option<(ObjectId, Op
             {
                 return false;
             }
-            let width = ui.painter().layout_no_wrap(board.name.clone(), egui::FontId::proportional(11.0),
-                ui.visuals().text_color()).size().x;
+            let width = at_corner.distance(screen(rect, &session.view, quad[1]));
+            let width = crate::app_canvas::artboard_caption(ui, &session.document, board, width).size().x;
             at.x <= at_corner.x + width
         }).last();
     if let Some(board) = labelled {

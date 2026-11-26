@@ -214,7 +214,7 @@ fn panel_width(ui: &egui::Ui) -> f32 {
 
 fn field_row<R>(ui: &mut egui::Ui, label: &str, control: impl FnOnce(&mut egui::Ui, egui::Id) -> R) -> R {
     if panel_width(ui) < 190.0 {
-        let caption = ui.add(egui::Label::new(label).sense(egui::Sense::click()));
+        let caption = ui.add(dtool_design::numeric_caption(label));
         control(ui, caption.id)
     } else {
         ui.horizontal(|ui| {
@@ -224,7 +224,7 @@ fn field_row<R>(ui: &mut egui::Ui, label: &str, control: impl FnOnce(&mut egui::
                 egui::Layout::left_to_right(egui::Align::Center),
                 |ui| {
                     ui.set_min_width(caption_width);
-                    ui.add(egui::Label::new(label).truncate().sense(egui::Sense::click())).on_hover_text(label)
+                    ui.add(dtool_design::numeric_caption(label).truncate()).on_hover_text(label)
                 },
             ).inner;
             control(ui, caption.id)

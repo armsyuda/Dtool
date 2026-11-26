@@ -7,7 +7,7 @@ use egui::{Color32, Rect, Sense, Stroke, Ui, Vec2};
 use egui::ecolor::Hsva;
 use serde_json::json;
 
-use crate::dialog_chrome::{show_modal, ClosePolicy, DialogResult};
+use crate::dialog_chrome::{confirm_cancel_buttons, show_modal, ClosePolicy, DialogResult};
 use crate::panels::table::{baseline_controls, choice, frame_insets, paint_choice_with, scalar, stroke_pattern};
 use super::images::Images;
 
@@ -52,34 +52,37 @@ impl FormatEditor {
         let paragraphs = session.document.text_styles.names(dtool_core::text_styles::StyleKind::Paragraph);
         let (event, (save, cancel)) = show_modal(ctx, "table-format-editor", text("table.formats.edit"), ClosePolicy::CancelOnly, false, |ui| {
             let bounds = ui.ctx().content_rect();
-            ui.set_width((bounds.width() - 36.0).clamp(220.0, 740.0));
-            egui::ScrollArea::vertical().max_height((bounds.height() - 110.0).max(180.0)).show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(text("table.formats.name"));
-                    ui.add(egui::TextEdit::singleline(&mut self.draft.name).desired_width(230.0));
-                });
-                ui.separator();
-                if ui.available_width() >= 565.0 {
-                    ui.columns(2, |columns| {
-                        self.structure(&mut columns[0], units, &session.document, images);
-                        self.cell_controls(&mut columns[1], units, &paragraphs, &session.document, images);
-                    });
-                } else {
-                    self.structure(ui, units, &session.document, images);
-                    self.cell_controls(ui, units, &paragraphs, &session.document, images);
-                }
+            ui.set_width((bounds.width() - 48.0).clamp(168.0, 740.0));
+            let name_top = ui.cursor().min.y;
+            dtool_design::studio_row(ui, text("table.formats.name"), |ui, label| {
+                ui.add(egui::TextEdit::singleline(&mut self.draft.name)
+                    .desired_width(ui.available_width()))
+                    .labelled_by(label);
             });
             let name = self.draft.name.trim();
+            let has_name = !name.is_empty();
             let conflict = session.document.table_formats.iter().any(|format| {
                 format.name == name && (self.original.is_none() || format.id != self.draft.id)
             });
-            if conflict { ui.label(text("table.formats.name_conflict")); }
-            if let Some(error) = &self.error { ui.label(text(error)); }
-            ui.horizontal(|ui| {
-                let save = ui.add_enabled(!name.is_empty() && !conflict, egui::Button::new(text("button.ok"))).clicked();
-                let cancel = button(ui, text("button.cancel")).clicked();
-                (save, cancel)
-            }).inner
+            if conflict {
+                ui.label(text("table.formats.name_conflict"));
+            } else if let Some(error) = &self.error {
+                ui.label(text(error));
+            }
+            let name_height = ui.cursor().min.y - name_top;
+            let height = (bounds.height() - 90.0 - name_height).clamp(40.0, 620.0);
+            dtool_design::dialog_options_scroll(ui, "table.format.options", height, |ui| {
+                dtool_design::panel_columns(ui, 2, 280.0, |ui, column| {
+                    dtool_design::dialog_section(ui, |ui| {
+                        if column == 0 {
+                            self.structure(ui, units, &session.document, images);
+                        } else {
+                            self.cell_controls(ui, units, &paragraphs, &session.document, images);
+                        }
+                    });
+                });
+            });
+            confirm_cancel_buttons(ui, text("button.ok"), has_name && !conflict)
         });
         if cancel || event == DialogResult::Cancel { return Outcome::Cancelled; }
         if !save { return Outcome::Open; }
@@ -182,11 +185,19 @@ impl FormatEditor {
     fn cell_controls(&mut self, ui: &mut Ui, units: &str, paragraphs: &[String], doc: &Document, images: &mut Images) {
         ui.label(egui::RichText::new(text("table.formats.cell_styles")).strong());
         let selected = self.draft.cell_formats.iter().find(|(id, _, _)| *id == u64::from(self.style)).map(|(_, name, _)| name.as_str()).unwrap_or("");
-        egui::ComboBox::from_id_salt("table-format-cell").selected_text(selected).show_ui(ui, |ui| {
-            for (id, name, _) in &self.draft.cell_formats {
-                ui.selectable_value(&mut self.style, *id as u16, name);
-            }
-        });
+        egui::ComboBox::from_id_salt("table-format-cell")
+            .width(ui.available_width())
+            .truncate()
+            .selected_text(selected)
+            .show_ui(ui, |ui| dtool_design::with_icon_selection(ui, |ui| {
+                for (id, name, _) in &self.draft.cell_formats {
+                    let choice = egui::Button::selectable(self.style == *id as u16, name).wrap();
+                    if ui.add(choice).clicked() {
+                        self.style = *id as u16;
+                    }
+                }
+            }))
+            .response.on_hover_text(selected);
         ui.horizontal_wrapped(|ui| {
             if button(ui, text("table.formats.assign")).clicked() {
                 let index = slot_index(&self.draft.pattern, self.row, self.col);
@@ -207,9 +218,8 @@ impl FormatEditor {
         });
         let Some((_, name, cell)) = self.draft.cell_formats.iter_mut().find(|(id, _, _)| *id == u64::from(self.style)) else { return; };
         ui.push_id(("cell", self.style), |ui| {
-            ui.horizontal(|ui| {
-                ui.label(text("table.formats.cell_name"));
-                ui.add(egui::TextEdit::singleline(name).desired_width(140.0));
+            dtool_design::studio_row(ui, text("table.formats.cell_name"), |ui, label| {
+                ui.add(egui::TextEdit::singleline(name).desired_width(ui.available_width())).labelled_by(label);
             });
             paint_controls(ui, &mut cell.fill, &mut cell.edges, &mut self.colour, &mut self.outline, doc, images);
             egui::CollapsingHeader::new(text("table.panel.insets")).show(ui, |ui| insets(ui, &mut cell.insets, units));

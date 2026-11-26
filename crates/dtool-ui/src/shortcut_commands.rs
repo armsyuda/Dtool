@@ -401,6 +401,10 @@ impl AppShell {
     }
 
     pub fn handle_shortcuts(&mut self, ctx: &egui::Context) {
+        self.handle_shortcuts_after_ui(ctx, self.widget_focused(ctx));
+    }
+
+    pub(crate) fn handle_shortcuts_after_ui(&mut self, ctx: &egui::Context, widget_had_focus: bool) {
         let focus = self.current_focus(ctx);
         let canvas_text = focus == Focus::TextField
             && self.canvas_owns_text(ctx)
@@ -410,6 +414,10 @@ impl AppShell {
             return;
         }
         for (key, egui_modifiers) in pressed_keys(ctx) {
+            // A text field can release focus when Enter commits its value.
+            if key == egui::Key::Enter && widget_had_focus && !canvas_text {
+                continue;
+            }
             if key == egui::Key::Enter && egui_modifiers == egui::Modifiers::NONE && !canvas_text
                 && self.workspace.session().is_some_and(|session| {
                     crate::canvas_input::tool_kind(&session.active_tool) == crate::canvas_input::ToolKind::Move

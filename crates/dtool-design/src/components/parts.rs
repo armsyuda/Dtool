@@ -28,6 +28,45 @@ pub fn list_row_with(ui: &mut Ui, selected: bool, text: impl Into<WidgetText>, s
     state.decorate(response)
 }
 
+/// Draws a compact preview above a single-line caption in a selectable panel list.
+pub fn preview_list_row(
+    ui: &mut Ui,
+    size: Vec2,
+    selected: bool,
+    label: &str,
+    caption: String,
+    preview: impl FnOnce(&Ui, egui::Rect),
+) -> Response {
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    response.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, ui.is_enabled(), selected, label));
+    let visuals = ui.visuals();
+    let paint = ui.painter().with_clip_rect(rect.intersect(ui.clip_rect()));
+    let fill = if selected { crate::theme::surface(ui.ctx(), "widget.bg_active") }
+        else if response.hovered() { visuals.widgets.hovered.weak_bg_fill }
+        else { visuals.widgets.inactive.weak_bg_fill };
+    let rounding = corner(radius("sm"));
+    paint.rect_filled(rect, rounding, fill);
+    if selected || response.has_focus() {
+        paint.rect_stroke(rect, rounding, egui::Stroke::new(crate::stroke_width("thin"), visuals.selection.bg_fill),
+            egui::StrokeKind::Inside);
+    }
+    let font = TextStyle::Small.resolve(ui.style());
+    let ink = visuals.text_color();
+    let mut job = egui::text::LayoutJob::simple_singleline(caption.clone(), font, ink);
+    job.wrap = egui::text::TextWrapping::truncate_at_width((rect.width() - 10.0).max(1.0));
+    let galley = ui.fonts_mut(|fonts| fonts.layout_job(job));
+    let text_top = rect.bottom() - galley.size().y - 3.0;
+    let preview_rect = egui::Rect::from_min_max(
+        rect.left_top() + egui::vec2(4.0, 2.0),
+        egui::pos2(rect.right() - 4.0, text_top - 2.0),
+    );
+    if preview_rect.is_positive() {
+        preview(ui, preview_rect);
+    }
+    paint.galley(egui::pos2(rect.left() + 5.0, text_top), galley, ink);
+    super::tooltip(response, caption)
+}
+
 pub fn small_icon_button_side() -> f32 {
     size("icon.size.sm") + space("xs") * 2.0
 }

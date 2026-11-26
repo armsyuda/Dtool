@@ -11,6 +11,8 @@ pub const CMD_IMPORT: &str = "ui.shortcuts.import";
 pub const CMD_EXPORT: &str = "ui.shortcuts.export";
 pub const EXPORT_OPEN_COMMAND: &str = "ui.export.open";
 pub const AFFINITY_EXPORT_COMMAND: &str = "Serif.Affinity.Commands.ExportDocumentCommand";
+#[cfg(windows)]
+pub const PRINT_COMMAND: &str = "Serif.Affinity.Commands.PrintDocumentCommand";
 pub const EXPORT_OPEN_KEY: &str = "W";
 pub const EXPORT_OPEN_MODIFIERS: Modifiers = Modifiers { ctrl: true, shift: true, alt: true };
 pub const FIND_OPEN_COMMAND: &str = "ui.find.open";
@@ -424,6 +426,7 @@ pub fn publish_focus(focus: Focus) {
 pub fn publish_map(map: &ShortcutMap) {
     if let Some(Ok(mut shared)) = SHARED.get().map(|shared| shared.lock()) {
         shared.map = map.clone();
+        shared.revision += 1;
     }
 }
 

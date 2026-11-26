@@ -2,7 +2,7 @@ use dtool_core::command::Session;
 use dtool_core::view_state::ViewState;
 use dtool_core::ObjectId;
 use dtool_tools::dtool_text::spell_live::{squiggle, story_underlines, LiveSpell, Underline, SETTLE};
-use dtool_tools::frame_text::{in_port, out_port, FrameTextTool};
+use dtool_tools::frame_text::{flow_frame_quad, FrameTextTool};
 use egui::{Response, Ui};
 
 use crate::canvas::CanvasView;
@@ -107,12 +107,6 @@ fn screen(rect: egui::Rect, view: &ViewState, point: [f32; 2]) -> egui::Pos2 {
     egui::pos2(rect.min.x + v[0], rect.min.y + v[1])
 }
 
-fn frame_rect(session: &Session, rect: egui::Rect, view: &ViewState, id: ObjectId) -> Option<egui::Rect> {
-    let object = session.document.get_object(id)?;
-    let end = [object.pos[0] + object.size[0], object.pos[1] + object.size[1]];
-    Some(egui::Rect::from_two_pos(screen(rect, view, object.pos), screen(rect, view, end)))
-}
-
 fn port_mark(painter: &egui::Painter, at: egui::Pos2, side: f32, color: egui::Color32, tip: egui::Color32, filled: bool) {
     let mark = egui::Rect::from_center_size(at, egui::vec2(side, side));
     let stroke = egui::Stroke::new(dtool_design::stroke_width("md"), color);
@@ -139,9 +133,9 @@ fn paint_flow(ui: &Ui, session: &Session, rect: egui::Rect, view: &ViewState, to
     let line = egui::Stroke::new(dtool_design::stroke_width("md"), accent);
     if let Some(from) = tool.linking() {
         for id in [Some(from), target].into_iter().flatten() {
-            if let Some(area) = frame_rect(session, rect, view, id) {
-                painter.rect_filled(area, 0.0, accent.gamma_multiply(0.25));
-                painter.rect_stroke(area, 0.0, line, egui::StrokeKind::Inside);
+            if let Some(object) = session.document.get_object(id) {
+                let corners = flow_frame_quad(&session.document, object).map(|p| screen(rect, view, p));
+                painter.add(egui::Shape::convex_polygon(corners.to_vec(), accent.gamma_multiply(0.25), line));
             }
         }
     }
@@ -149,15 +143,16 @@ fn paint_flow(ui: &Ui, session: &Session, rect: egui::Rect, view: &ViewState, to
         let (Some(a), Some(b)) = (session.document.get_object(*from), session.document.get_object(*to)) else {
             continue;
         };
-        let start = screen(rect, view, out_port(a));
-        let end = screen(rect, view, in_port(b));
+        let start = screen(rect, view, flow_frame_quad(&session.document, a)[2]);
+        let end = screen(rect, view, flow_frame_quad(&session.document, b)[0]);
         painter.line_segment([start, end], line);
         port_mark(&painter, start, side, accent, tip, true);
         port_mark(&painter, end, side, accent, tip, true);
     }
     for id in &marks.overset {
         if let Some(object) = session.document.get_object(*id) {
-            port_mark(&painter, screen(rect, view, out_port(object)), side, overflow, tip, true);
+            let out = flow_frame_quad(&session.document, object)[2];
+            port_mark(&painter, screen(rect, view, out), side, overflow, tip, true);
         }
     }
     crate::canvas::longdoc_marks::paint(&painter, session, rect, view, ui.visuals().text_color());
@@ -662,7 +657,19 @@ pub(crate) fn text_input(ui: &mut Ui, session: &mut Session, response: &Response
     }
     let events = ui.input(|i| i.events.clone());
     let before = composition_text(session);
-    feed_text_input(session, &events);
+    let mut start = 0;
+    if edited_text_object(session).is_some_and(|object| matches!(object.kind, dtool_core::ObjectKind::Table(_))) {
+        for (index, event) in events.iter().enumerate() {
+            let egui::Event::Key { key: egui::Key::Tab, pressed: true, modifiers, .. } = event else { continue; };
+            if modifiers.command || modifiers.ctrl || modifiers.alt { continue; }
+            feed_text_input(session, &events[start..index]);
+            if crate::table::canvas::step_edit_cell(session, modifiers.shift).unwrap_or(false) {
+                ui.ctx().request_repaint();
+            }
+            start = index + 1;
+        }
+    }
+    feed_text_input(session, &events[start..]);
     if before != composition_text(session) {
         ui.ctx().request_repaint();
     }

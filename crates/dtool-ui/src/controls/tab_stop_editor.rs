@@ -80,7 +80,7 @@ fn length_edit(ui: &mut egui::Ui, key: &str, value: f64, default: f64) -> Numeri
     ui.horizontal(|ui| {
         let caption = ui.add_sized(
             [dtool_design::size("panel.label_width").min(ui.available_width() / 3.0), ui.spacing().interact_size.y],
-            egui::Label::new(text(key)).wrap().sense(egui::Sense::click()),
+            dtool_design::numeric_caption(text(key)).wrap(),
         );
         let spec = NumericSpec::new("").suffix("mm").width(70.0).decimals(3).enabled(ui.is_enabled());
         let id = ui.make_persistent_id(key);

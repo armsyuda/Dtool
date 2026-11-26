@@ -650,14 +650,46 @@ pub fn import_svg_data(content: &str, resources_dir: Option<&Path>) -> Result<(D
     import_svg_with_options(content, &options)
 }
 
-pub fn import_clipboard_svg(content: &str) -> Result<(Document, ImportReport), IoError> {
+pub const AFFINITY_SVG_NAMESPACE: &str = "https://www.affinity.studio/";
+
+pub fn import_clipboard_svg(content: &str, companion_pdf: Option<&[u8]>) -> Result<(Document, ImportReport), IoError> {
     if content.len() as u64 > MAX_SVG_SIZE {
         return Err(IoError::new(IoErrorKind::UnsupportedProfile));
     }
     let mut options = usvg::Options { font_size: 16.0, ..Default::default() };
     // Clipboard SVG has no user-selected source directory. Allow embedded images only.
     options.image_href_resolver.resolve_string = Box::new(|_, _| None);
-    import_svg_with_options(content, &options)
+    let (mut document, report) = import_svg_with_options(content, &options)?;
+    if let Some(dpi) = companion_pdf.and_then(|pdf| affinity_clipboard_dpi(content, pdf)) {
+        // Keep SVG geometry in its original pixel space. The clipboard bundle
+        // converts it to physical units when it enters the destination document.
+        document.dpi = dpi;
+    }
+    Ok((document, report))
+}
+
+fn affinity_clipboard_dpi(content: &str, pdf: &[u8]) -> Option<f32> {
+    let xml = XmlDoc::parse_with_options(content, roxmltree::ParsingOptions {
+        allow_dtd: true, ..Default::default()
+    }).ok()?;
+    let root = xml.root_element();
+    if !root.namespaces().any(|namespace| namespace.uri() == AFFINITY_SVG_NAMESPACE) {
+        return None;
+    }
+    let pixels = |name| {
+        root.attribute(name)?.trim().strip_suffix("px")?.trim().parse::<f32>().ok()
+            .filter(|number| number.is_finite() && *number > 0.0)
+    };
+    let (width_px, height_px) = (pixels("width")?, pixels("height")?);
+    let [width_pt, height_pt] = crate::import_pdf::single_pdf_page_size(pdf)?;
+    // Affinity rounds SVG dimensions up to whole pixels, while its companion
+    // PDF keeps the selection size in points. Both axes must agree.
+    let low = ((width_px - 1.0) * 72.0 / width_pt).max((height_px - 1.0) * 72.0 / height_pt);
+    let high = (width_px * 72.0 / width_pt).min(height_px * 72.0 / height_pt);
+    if high < low - 0.01 { return None; }
+    let rounded = ((low + high) * 0.5).round();
+    let dpi = if (low - 0.01..=high + 0.01).contains(&rounded) { rounded } else { (low + high) * 0.5 };
+    (1.0..=10_000.0).contains(&dpi).then_some(dpi)
 }
 
 fn import_svg_with_options(content: &str, options: &usvg::Options<'_>) -> Result<(Document, ImportReport), IoError> {

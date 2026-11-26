@@ -36,7 +36,7 @@ pub struct ModifyDialog {
     pub owner: ContextId,
     pub generation: u64,
     pub error: Option<String>,
-    kind: Kind,
+    pub(crate) kind: Kind,
     radius: f32,
     circular: bool,
     alignment: OutlineAlign,
@@ -107,7 +107,7 @@ impl ModifyDialog {
                             (OutlineAlign::Centre, "selection.modify.centre"),
                             (OutlineAlign::Inside, "selection.modify.inside"),
                         ] {
-                            ui.selectable_value(&mut self.alignment, alignment, text(key));
+                            dtool_design::choice_value(ui, &mut self.alignment, alignment, text(key));
                         }
                     });
                 }

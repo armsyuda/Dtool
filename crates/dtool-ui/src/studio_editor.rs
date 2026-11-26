@@ -1,3 +1,4 @@
+use crate::dialog_chrome::{confirm_cancel_buttons, options_divider, options_scroll};
 use crate::persona::{PersonaId,PersonaEntry,CustomStudio,persona_catalog};
 use crate::tools_panel::ToolId;
 use crate::dock::PanelId;
@@ -5,6 +6,14 @@ use crate::icon_cache::IconCache;
 use dtool_core::{Command,CommandError,CommandResult};
 
 pub type Runner<'a> = dyn FnMut(&Command) -> CommandResult + 'a;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum StudioSection {
+    #[default]
+    Toolbar,
+    Tools,
+    Panels,
+}
 
 #[derive(Debug,Clone)]
 pub struct StudioEditorState {
@@ -14,17 +23,18 @@ pub struct StudioEditorState {
     pub tools: Vec<ToolId>,
     pub toolbar: Vec<String>,
     pub panels: Vec<PanelId>,
+    section: StudioSection,
 }
 
 impl StudioEditorState {
     pub fn new(base: PersonaId) -> Self {
         let def = persona_catalog().into_iter().find(|d| d.entry == PersonaEntry::Builtin(base));
         let (tools, toolbar, panels) = def.map(|d| (d.tools, d.toolbar, d.panels)).unwrap_or_default();
-        Self { original: None, name: String::new(), base, tools, toolbar, panels }
+        Self { original: None, name: String::new(), base, tools, toolbar, panels, section: StudioSection::default() }
     }
 
     pub fn edit(studio: &CustomStudio) -> Self {
-        Self { original: Some(studio.name.clone()), name: studio.name.clone(), base: studio.base, tools: studio.tools.clone(), toolbar: studio.toolbar.clone(), panels: studio.panels.clone() }
+        Self { original: Some(studio.name.clone()), name: studio.name.clone(), base: studio.base, tools: studio.tools.clone(), toolbar: studio.toolbar.clone(), panels: studio.panels.clone(), section: StudioSection::default() }
     }
 
     pub fn toggle_tool(&mut self, tool: &ToolId) {
@@ -193,7 +203,7 @@ fn panel_label(panel: &PanelId) -> String {
 }
 
 pub fn selectable_panels() -> Vec<PanelId> {
-    ["layers", "properties", "console", "pages", "history", "navigator", "colour", "swatches", "stroke", "character", "paragraph", "effects", "ai_log", "resources"].into_iter().map(PanelId::from_key).collect()
+    crate::panel_ids::studio_panel_ids()
 }
 
 fn toolbar_editor(ui: &mut egui::Ui, items: &mut Vec<String>, mut icons: Option<&mut IconCache>) {
@@ -334,55 +344,90 @@ pub fn show_editor(ui: &mut egui::Ui, state: &mut StudioManagerState, run: &mut 
 
 fn show_editor_with_icons(ui: &mut egui::Ui, state: &mut StudioManagerState, run: &mut Runner, mut icons: Option<&mut IconCache>) {
     let Some(editor) = state.editing.as_mut() else { return };
-    ui.heading(text("studio.editor.title"));
     ui.horizontal(|ui| {
         ui.label(text("studio.editor.name"));
-        ui.text_edit_singleline(&mut editor.name);
+        ui.add(egui::TextEdit::singleline(&mut editor.name).desired_width(ui.available_width()));
     });
-    let allowed = persona_catalog().into_iter().find(|d| d.entry == PersonaEntry::Builtin(editor.base)).map(|d| d.tools).unwrap_or_default();
-    egui::ScrollArea::vertical().id_salt("studio.editor.items").max_height(dtool_design::size("dialog.max_body_height")).show(ui, |ui| {
-        ui.label(text("menu.view.top_toolbar"));
-        toolbar_editor(ui, &mut editor.toolbar, icons.as_deref_mut());
-        ui.separator();
-        ui.label(text("studio.editor.tools"));
-        for tool in &allowed {
-            let mut on = editor.tools.iter().any(|t| t.0 == tool.0);
-            let changed = ui.horizontal(|ui| {
-                if let Some(texture) = icons.as_deref_mut().and_then(|cache| {
-                    cache.tool_texture(ui.ctx(), tool.0, dtool_design::icons::current_icon_colour(), dtool_design::icon_texture_px(ui))
-                }) {
-                    ui.add(egui::Image::new(&texture).fit_to_exact_size(egui::Vec2::splat(16.0)));
+    ui.horizontal_wrapped(|ui| {
+        ui.label(text("studio.editor.base"));
+        if editor.original.is_some() {
+            let key = format!("persona.{}", PersonaEntry::Builtin(editor.base).key());
+            ui.label(text(&key));
+        } else {
+            let mut base = editor.base;
+            for option in crate::persona::STUDIO_BASES {
+                let key = format!("persona.{}", PersonaEntry::Builtin(option).key());
+                dtool_design::choice_value(ui, &mut base, option, text(&key));
+            }
+            if base != editor.base {
+                let defaults = StudioEditorState::new(base);
+                editor.base = base;
+                editor.tools = defaults.tools;
+                editor.panels = defaults.panels;
+            }
+        }
+    });
+    ui.horizontal_wrapped(|ui| {
+        for (section, key) in [
+            (StudioSection::Toolbar, "menu.view.top_toolbar"),
+            (StudioSection::Tools, "studio.editor.tools"),
+            (StudioSection::Panels, "studio.editor.panels"),
+        ] {
+            dtool_design::choice_value(ui, &mut editor.section, section, text(key));
+        }
+    });
+    options_divider(ui);
+    let body_height = (ui.ctx().content_rect().bottom() - ui.cursor().min.y - 52.0)
+        .clamp(16.0, dtool_design::size("dialog.max_body_height"));
+    let scroll_id = match editor.section {
+        StudioSection::Toolbar => "studio.editor.toolbar",
+        StudioSection::Tools => "studio.editor.tools",
+        StudioSection::Panels => "studio.editor.panels",
+    };
+    options_scroll(ui, scroll_id, body_height, |ui| {
+        if !state.skipped.is_empty() {
+            ui.label(dtool_strings::format("studio.skipped", &[("items", &state.skipped.join(", "))]));
+        }
+        if let Some(error) = &state.error {
+            ui.colored_label(ui.visuals().error_fg_color, text(error));
+        }
+        match editor.section {
+            StudioSection::Toolbar => toolbar_editor(ui, &mut editor.toolbar, icons.as_deref_mut()),
+            StudioSection::Tools => {
+                let allowed = persona_catalog().into_iter()
+                    .find(|d| d.entry == PersonaEntry::Builtin(editor.base))
+                    .map(|d| d.tools).unwrap_or_default();
+                for tool in &allowed {
+                    let mut on = editor.tools.iter().any(|t| t.0 == tool.0);
+                    let changed = ui.horizontal(|ui| {
+                        if let Some(texture) = icons.as_deref_mut().and_then(|cache| {
+                            cache.tool_texture(ui.ctx(), tool.0, dtool_design::icons::current_icon_colour(), dtool_design::icon_texture_px(ui))
+                        }) {
+                            ui.add(egui::Image::new(&texture).fit_to_exact_size(egui::Vec2::splat(16.0)));
+                        }
+                        dtool_design::toggle(ui, &mut on, text(tool.0)).changed()
+                    }).inner;
+                    if changed {
+                        editor.toggle_tool(tool);
+                    }
                 }
-                dtool_design::toggle(ui, &mut on, text(tool.0)).changed()
-            }).inner;
-            if changed {
-                editor.toggle_tool(tool);
             }
-        }
-        ui.label(text("studio.editor.panels"));
-        for panel in selectable_panels() {
-            let mut on = editor.panels.contains(&panel);
-            if dtool_design::toggle(ui, &mut on, panel_label(&panel)).changed() {
-                editor.toggle_panel(&panel);
+            StudioSection::Panels => {
+                for panel in selectable_panels() {
+                    let mut on = editor.panels.contains(&panel);
+                    if dtool_design::toggle(ui, &mut on, panel_label(&panel)).changed() {
+                        editor.toggle_panel(&panel);
+                    }
+                }
             }
         }
     });
-    let mut save = false;
-    let mut cancel = false;
-    ui.horizontal(|ui| {
-        save = ui.add_enabled(!editor.name.trim().is_empty(), egui::Button::new(text("studio.editor.save"))).clicked();
-        cancel = ui.button(text("studio.editor.cancel")).clicked();
-    });
+    options_divider(ui);
+    let (save, cancel) = confirm_cancel_buttons(ui, text("studio.editor.save"), !editor.name.trim().is_empty());
     if save {
         let _ = state.close_editor(run);
     } else if cancel {
         state.cancel_editor();
-    }
-    if !state.skipped.is_empty() {
-        ui.label(dtool_strings::format("studio.skipped", &[("items", &state.skipped.join(", "))]));
-    }
-    if let Some(error) = &state.error {
-        ui.colored_label(ui.visuals().error_fg_color, text(error));
     }
 }
 
@@ -390,23 +435,69 @@ pub fn show_manager(ui: &mut egui::Ui, state: &mut StudioManagerState, run: &mut
     show_manager_with_icons(ui, state, run, None);
 }
 
+fn transfer_studio(run: &mut Runner, name: Option<&str>) -> Result<bool, CommandError> {
+    let (title, command) = if name.is_some() {
+        ("studio.manager.export", "ui.studio.export")
+    } else {
+        ("studio.manager.import", "ui.studio.import")
+    };
+    let path = crate::dialogs::pick_file_path(
+        text(title),
+        text("studio.manager.file"),
+        "dtoolstudio",
+        name.map(|_| "workspace.dtoolstudio"),
+    ).map_err(|_| CommandError::new("IO_ERROR"))?;
+    let Some(path) = path else { return Ok(false) };
+    let path = path.to_str().ok_or_else(CommandError::invalid_params)?;
+    let params = if let Some(name) = name {
+        serde_json::json!({ "name": name, "path": path })
+    } else {
+        serde_json::json!({ "path": path, "replace_existing": false })
+    };
+    run(&Command::with_params(command, params))?;
+    Ok(true)
+}
+
 fn show_manager_with_icons(ui: &mut egui::Ui, state: &mut StudioManagerState, run: &mut Runner, icons: Option<&mut IconCache>) {
-    ui.heading(text("studio.manager.title"));
-    if ui.button(text("studio.manager.new")).clicked() {
-        state.open_editor(PersonaId::Vector);
-    }
+    const ROW_ACTIONS: [(&str, &str); 5] = [
+        ("use", "studio.manager.use"),
+        ("edit", "studio.manager.edit"),
+        ("rename", "studio.manager.rename"),
+        ("export", "studio.manager.export"),
+        ("delete", "studio.manager.delete"),
+    ];
+    let action_width = dtool_design::size("button.width");
+    let mut action = None;
+    ui.horizontal_wrapped(|ui| {
+        if dtool_design::button(ui, text("studio.manager.new")).clicked() {
+            state.open_editor(PersonaId::Vector);
+        }
+        if dtool_design::button(ui, text("studio.manager.import")).clicked() {
+            action = Some(("import", String::new()));
+        }
+    });
     if state.studios.is_empty() {
         ui.label(text("studio.manager.empty"));
     }
-    let mut action: Option<(&'static str, String)> = None;
     for studio in &state.studios {
-        ui.horizontal(|ui| {
-            ui.label(&studio.name);
-            if ui.button(text("studio.manager.use")).clicked() { action = Some(("use", studio.name.clone())); }
-            if ui.button(text("studio.manager.edit")).clicked() { action = Some(("edit", studio.name.clone())); }
-            if ui.button(text("studio.manager.rename")).clicked() { action = Some(("rename", studio.name.clone())); }
-            if ui.button(text("studio.manager.delete")).clicked() { action = Some(("delete", studio.name.clone())); }
-        });
+        ui.separator();
+        ui.add(egui::Label::new(&studio.name).wrap());
+        let mut show_action = |ui: &mut egui::Ui, index: usize| {
+            let (action_id, label) = ROW_ACTIONS[index];
+            if dtool_design::button(ui, text(label)).clicked() {
+                action = Some((action_id, studio.name.clone()));
+            }
+        };
+        if dtool_design::panel_column_count(ui, ui.available_width(), ROW_ACTIONS.len(), action_width)
+            == ROW_ACTIONS.len() {
+            ui.horizontal(|ui| {
+                for index in 0..ROW_ACTIONS.len() {
+                    show_action(ui, index);
+                }
+            });
+        } else {
+            dtool_design::panel_columns(ui, ROW_ACTIONS.len(), action_width, show_action);
+        }
     }
     let mut commit_rename = None;
     if let Some((old, new)) = state.renaming.as_mut() {
@@ -415,18 +506,30 @@ fn show_manager_with_icons(ui: &mut egui::Ui, state: &mut StudioManagerState, ru
             if ui.button(text("studio.editor.save")).clicked() { commit_rename = Some((old.clone(), new.clone())); }
         });
     }
+    let transfer = matches!(&action, Some(("import" | "export", _)));
     let result = match action {
         Some(("use", name)) => { state.request_switch(&name); Ok(()) }
         Some(("edit", name)) => state.open_existing(&name),
         Some(("rename", name)) => { state.renaming = Some((name.clone(), name)); Ok(()) }
+        Some(("import", _)) => transfer_studio(run, None).and_then(|imported| {
+            if imported { state.refresh(run)?; }
+            Ok(())
+        }),
+        Some(("export", name)) => transfer_studio(run, Some(&name)).map(|_| ()),
         Some((_, name)) => state.delete(run, &name),
         None => match commit_rename {
             Some((old, new)) => state.rename(run, &old, &new),
             None => Ok(()),
         },
     };
-    if let Err(error) = result {
-        state.error = Some(error.code.to_string());
+    if transfer {
+        state.error = result.err().map(|error| error.message_key);
+    } else if let Err(error) = result {
+        state.error = Some(error.message_key);
+    }
+    if state.editing.is_none()
+        && let Some(error) = &state.error {
+        ui.colored_label(ui.visuals().error_fg_color, text(error));
     }
     if state.editing.is_some() {
         ui.separator();
@@ -550,19 +653,34 @@ impl StudioWindows {
         }
         if self.manager_open {
             let mut open = true;
+            let viewport = ctx.content_rect();
+            let width = (viewport.width() - 32.0).clamp(1.0, 560.0);
             egui::Window::new(text("studio.manager.title"))
                 .id(egui::Id::unique("studio.manager.window"))
+                .default_width(width)
+                .max_width(width)
+                .max_height((viewport.height() - 56.0).max(1.0))
+                .vscroll(true)
                 .open(&mut open)
-                .show(ctx, |ui| show_manager_with_icons(ui, &mut self.state, run, icons));
+                .show(ctx, |ui| {
+                    ui.set_width(width);
+                    show_manager_with_icons(ui, &mut self.state, run, icons);
+                });
             if !open {
                 self.close();
             }
         } else if self.state.editing.is_some() {
             let mut open = true;
+            let width = (ctx.content_rect().width() - 32.0).clamp(1.0, 560.0);
             egui::Window::new(text("studio.editor.title"))
                 .id(egui::Id::unique("studio.editor.window"))
+                .default_width(width)
+                .max_width(width)
                 .open(&mut open)
-                .show(ctx, |ui| show_editor_with_icons(ui, &mut self.state, run, icons));
+                .show(ctx, |ui| {
+                    ui.set_width(width);
+                    show_editor_with_icons(ui, &mut self.state, run, icons);
+                });
             if !open {
                 self.state.cancel_editor();
             }

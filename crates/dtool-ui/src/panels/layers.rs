@@ -58,7 +58,7 @@ const LAYER_TAG_COLOURS: [(&str, &str); 8] = [
     ("#E586BF", "layers.tag.pink"),
 ];
 
-fn tag_colour_picker(ui: &mut egui::Ui, stored: Option<Option<&str>>) -> Option<Option<&'static str>> {
+pub(super) fn tag_colour_picker(ui: &mut egui::Ui, stored: Option<Option<&str>>) -> Option<Option<&'static str>> {
     let mut change = None;
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 1.0;
@@ -1070,7 +1070,14 @@ impl LayersPanel {
                     let tile = dtool_design::color("layers.thumbnail");
                     let mut indicator = None;
                     let mut guide_left = None;
-                    let fill = if row.selected { dtool_design::color("layers.selected") } else { surface };
+                    let fill = if row.selected {
+                        dtool_design::color("layers.selected")
+                    } else if is_artboard || is_group {
+                        let neutral = if ui.visuals().dark_mode { egui::Color32::WHITE } else { egui::Color32::BLACK };
+                        surface.lerp_to_gamma(neutral, 0.08)
+                    } else {
+                        surface
+                    };
                     let painted = egui::Frame::new().fill(fill).inner_margin(egui::Margin::symmetric(4, 0)).show(ui, |ui| {
                         let size = egui::vec2(ui.available_width(), row_height);
                         ui.allocate_ui_with_layout(size, egui::Layout::left_to_right(egui::Align::Center), |ui| {
@@ -1170,7 +1177,13 @@ impl LayersPanel {
                         } else {
                             kind_label
                         };
-                        let mut thumbnail_label = format!("{} · {thumbnail_kind}", display_name(row.id, &row.name));
+                        let mut layer_name = display_name(row.id, &row.name);
+                        if let Some(assignment) = document.and_then(|doc| doc.master_pages.for_group(id))
+                            && assignment.stack_slot > 0
+                        {
+                            layer_name = super::pages::application_label(&layer_name, assignment.stack_slot);
+                        }
+                        let mut thumbnail_label = format!("{layer_name} · {thumbnail_kind}");
                         if let Some(status) = symbol_label.filter(|status| *status != thumbnail_kind) {
                             thumbnail_label.push_str(" · ");
                             thumbnail_label.push_str(status);
@@ -1254,11 +1267,11 @@ impl LayersPanel {
                             None
                         } else {
                             Some(ui.push_id(("layers.row", row.id), |ui| {
-                                let name = display_name(row.id, &row.name);
+                                let name = layer_name.as_str();
                                 let ink = if row.visible { ui.visuals().text_color() } else { ui.visuals().weak_text_color() };
                                 let (rect, response) = ui.allocate_exact_size(name_size, egui::Sense::click_and_drag());
-                                response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, ui.is_enabled(), &name));
-                                let label = egui::WidgetText::from(egui::RichText::new(&name).size(name_font).color(ink))
+                                response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, ui.is_enabled(), name));
+                                let label = egui::WidgetText::from(egui::RichText::new(name).size(name_font).color(ink))
                                     .into_galley(ui, Some(egui::TextWrapMode::Truncate), rect.width(), egui::TextStyle::Body);
                                 ui.painter().with_clip_rect(rect).galley(
                                     egui::pos2(rect.left(), rect.center().y - label.size().y * 0.5),
@@ -1304,6 +1317,17 @@ impl LayersPanel {
                                 row_command = Some(Command::with_params("master.object.reset", serde_json::json!({"id": id})));
                                 ui.close();
                             }
+                            if let Some(assignment) = session.document.master_pages.for_group(id) {
+                                for (name, label) in [
+                                    ("master.detach", "panel.master.detach"),
+                                    ("master.remove", "panel.master.remove_application"),
+                                ] {
+                                    if command_menu_item(ui, text(label), true).clicked() {
+                                        row_command = Some(Command::with_params(name, json!({"page_id": assignment.page, "group_id": id})));
+                                        ui.close();
+                                    }
+                                }
+                            }
                             if command_menu_item(ui, text("menu.layer.rename_layer"), !row.locked).clicked() {
                                 rename = Some(id);
                                 ui.close();
@@ -1342,7 +1366,7 @@ impl LayersPanel {
                                 let viewing = session.view.canvas_flags.mask_view == Some(owner);
                                 if viewing || dtool_core::clip_mask::has_any_mask(&session.document, owner) {
                                     let label = text("layer.mask.view_only");
-                                    let response = ui.selectable_label(viewing, label);
+                                    let response = dtool_design::with_icon_selection(ui, |ui| ui.selectable_label(viewing, label));
                                     if command_menu_tooltip(ui, response, label, false, None).clicked() {
                                         mask_view = Some(id);
                                         ui.close();
@@ -1448,8 +1472,9 @@ impl LayersPanel {
                     let divider = surface.lerp_to_gamma(ui.visuals().text_color(), 0.14);
                     if row.depth > 0 && let Some(left) = guide_left.filter(|left| *left > row_rect.left() + 8.0) {
                         let x = left - 6.0;
-                        ui.painter().vline(x, row_rect.y_range(), egui::Stroke::new(1.0, divider));
-                        ui.painter().hline(x..=left - 2.0, row_rect.center().y, egui::Stroke::new(1.0, divider));
+                        let guide = egui::Stroke::new(1.0, surface.lerp_to_gamma(ui.visuals().text_color(), 0.23));
+                        ui.painter().vline(x, row_rect.y_range(), guide);
+                        ui.painter().hline(x..=left - 2.0, row_rect.center().y, guide);
                     }
                     if let Some(colour) = tag_colours.get(&id).and_then(|hex| dtool_design::tokens::parse_hex(hex)) {
                         let stripe = egui::Rect::from_min_max(

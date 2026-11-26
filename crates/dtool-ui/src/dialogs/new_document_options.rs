@@ -370,27 +370,30 @@ pub(crate) fn sides_editor(ui: &mut Ui, sides: &mut Margins, units: Units, label
         let mut invalid = false;
         let mut linked_value = None;
         let mut pending = None;
-        egui::Grid::new("sides").num_columns(2).show(ui, |ui| {
-            for (index, ((key, id), side)) in fields.into_iter().zip([
-                &mut sides.left, &mut sides.right, &mut sides.top, &mut sides.bottom,
-            ]).enumerate() {
-                let caption = ui.label(text(key));
-                let mut value = f64::from(*side);
-                if numeric_value(ui, id, &mut value, &spec).labelled_by(caption.id).changed() {
-                    *side = value as f32;
-                    linked_value = Some(*side);
-                    changed = true;
-                }
-                let edit = dtool_design::numeric_state(ui.ctx(), id);
-                if let Some(draft) = edit.buffer.as_deref().filter(|_| edit.edited) {
-                    match spec.parse_text(draft) {
-                        Some(value) => pending = Some((id, index, value as f32)),
-                        None => invalid = true,
+        let mut edges = [&mut sides.left, &mut sides.right, &mut sides.top, &mut sides.bottom];
+        for start in [0, 2] {
+            dtool_design::panel_columns(ui, 2, 144.0, |ui, column| {
+                let index = start + column;
+                let (key, id) = fields[index];
+                let side = &mut *edges[index];
+                ui.horizontal_wrapped(|ui| {
+                    let caption = ui.label(text(key));
+                    let mut value = f64::from(*side);
+                    if numeric_value(ui, id, &mut value, &spec).labelled_by(caption.id).changed() {
+                        *side = value as f32;
+                        linked_value = Some(*side);
+                        changed = true;
                     }
-                }
-                ui.end_row();
-            }
-        });
+                    let edit = dtool_design::numeric_state(ui.ctx(), id);
+                    if let Some(draft) = edit.buffer.as_deref().filter(|_| edit.edited) {
+                        match spec.parse_text(draft) {
+                            Some(value) => pending = Some((id, index, value as f32)),
+                            None => invalid = true,
+                        }
+                    }
+                });
+            });
+        }
         if let Some(value) = linked_value.filter(|_| sides.linked) {
             sides.left = value;
             sides.right = value;

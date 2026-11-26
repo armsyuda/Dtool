@@ -94,7 +94,7 @@ fn switches(ui: &mut egui::Ui, corner: &mut CornerRecipe, half: f32) {
 }
 
 fn fields(ui: &mut egui::Ui, session: &Session, corner: &mut CornerRecipe, half: f32, index: usize, key: &str) -> Option<(usize, f32)> {
-    let label = ui.add(egui::Label::new(text(key)).sense(egui::Sense::click()));
+    let label = ui.add(dtool_design::numeric_caption(text(key)));
     let mut style = corner.styles[index];
     let name = STYLES.iter().find(|(candidate, _)| *candidate == style)
         .map_or("corner.style.rounded", |(_, key)| *key);

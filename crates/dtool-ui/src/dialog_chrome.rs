@@ -58,17 +58,7 @@ pub fn backdrop_color() -> egui::Color32 {
 }
 
 pub(crate) fn options_scroll<R>(ui: &mut egui::Ui, id: &'static str, height: f32, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
-    ui.scope(|ui| {
-        let mut scroll = egui::style::ScrollStyle::solid();
-        scroll.bar_width = 11.0;
-        scroll.handle_min_length = 28.0;
-        scroll.bar_outer_margin = 2.0;
-        scroll.foreground_color = true;
-        ui.style_mut().spacing.scroll = scroll;
-        egui::ScrollArea::vertical().id_salt(id).max_height(height).auto_shrink([false, false])
-            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
-            .show(ui, add).inner
-    }).inner
+    dtool_design::dialog_options_scroll(ui, id, height, add)
 }
 
 pub(crate) fn options_group(ui: &mut egui::Ui, title: &str) {
@@ -80,7 +70,33 @@ pub(crate) fn options_group(ui: &mut egui::Ui, title: &str) {
 
 pub(crate) fn options_divider(ui: &mut egui::Ui) {
     let (line, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), egui::Sense::hover());
-    ui.painter().hline(line.x_range(), line.center().y, egui::Stroke::new(1.0, dtool_design::color("border")));
+    ui.painter().hline(line.x_range(), line.center().y, egui::Stroke::new(dtool_design::stroke_width("thin"), dtool_design::color("dialog.separator")));
+}
+
+pub(crate) fn confirm_from_enter(
+    ctx: &egui::Context,
+    event: DialogResult,
+    focus_before: Option<egui::Id>,
+    submit_fields: &[egui::Id],
+) -> bool {
+    event == DialogResult::Confirm
+        && focus_before.is_none_or(|field| submit_fields.contains(&field))
+        && !egui::Popup::is_any_open(ctx)
+}
+
+pub(crate) fn confirm_cancel_buttons(
+    ui: &mut egui::Ui,
+    confirm_label: &str,
+    enabled: bool,
+) -> (bool, bool) {
+    let size = egui::vec2(ui.available_width(), dtool_design::size("button.height"));
+    ui.allocate_ui_with_layout(size, egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        let cancel = dtool_design::button(ui, dtool_strings::text("button.cancel")).clicked();
+        let confirm = dtool_design::button_with(
+            ui, confirm_label, &dtool_design::ControlState::enabled(enabled),
+        ).clicked();
+        (confirm, cancel)
+    }).inner
 }
 
 pub fn show_modal<R>(

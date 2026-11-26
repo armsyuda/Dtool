@@ -61,6 +61,11 @@ impl UndoStack {
         !self.redo_stack.is_empty()
     }
 
+    pub(crate) fn next_step(&self, redo: bool) -> Option<(&str, u64)> {
+        let step = if redo { self.redo_stack.last()? } else { self.undo_stack.last()? };
+        Some((&step.change.name, step.after))
+    }
+
     pub fn push(&mut self, change: Change) {
         let before = self.position;
         let selection_only = change.undo.name == "selection.set"

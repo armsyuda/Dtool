@@ -28,6 +28,7 @@ fn build_scene_detail(doc: &Document, flags: &CanvasFlags, only: Option<ObjectId
     let list = crate::build_display_list(doc, flags);
     let mut done = HashSet::new();
     let mut table_text = HashSet::new();
+    let master_clips = dtool_core::commands::masters::fill_clips(doc);
     for item in &list.items {
         if only.is_some_and(|id| id != item.object_id) {
             continue;
@@ -42,7 +43,9 @@ fn build_scene_detail(doc: &Document, flags: &CanvasFlags, only: Option<ObjectId
                 if item.role == "TableFrame" {
                     scene.quads.push((object.id, dtool_core::scene::object_quad(object, &item.matrix)));
                 }
-                append_table_item(doc, object, item, &mut table_text, &mut scene.prims);
+                with_master_clip(&mut scene, object.id, &master_clips, |scene| {
+                    append_table_item(doc, object, item, &mut table_text, &mut scene.prims);
+                });
             }
             continue;
         }
@@ -51,13 +54,28 @@ fn build_scene_detail(doc: &Document, flags: &CanvasFlags, only: Option<ObjectId
         }
         let Some(object) = doc.get_object(item.object_id) else { continue };
         let paint = ObjectPaint { fill: item.fill.clone(), opacity: item.opacity, matrix: item.matrix, outline_only: outline_only || item.outline_only, clip: item.clip };
-        push_object_with_tolerance(doc, object, &paint, &node_matrix, &mut scene, tolerance);
+        with_master_clip(&mut scene, object.id, &master_clips, |scene| {
+            push_object_with_tolerance(doc, object, &paint, &node_matrix, scene, tolerance);
+        });
     }
     dtool_core::paint::display_scene(doc, &mut scene);
     if let Some(step) = pixel_step(doc, flags) {
         snap_scene(&mut scene, step);
     }
     scene
+}
+
+fn with_master_clip(
+    scene: &mut Scene, object: ObjectId,
+    clips: &std::collections::HashMap<ObjectId, [f32; 4]>, paint: impl FnOnce(&mut Scene),
+) {
+    if let Some(&rect) = clips.get(&object) {
+        scene.prims.push(Prim::Clip { object, rect: Some(rect) });
+        paint(scene);
+        scene.prims.push(Prim::Clip { object, rect: None });
+    } else {
+        paint(scene);
+    }
 }
 
 /// Vector geometry used by the table canvas and document exporters.

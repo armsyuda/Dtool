@@ -107,8 +107,76 @@ pub fn display_shortcut(shortcut: &crate::shortcuts::Shortcut) -> String {
 }
 
 pub fn command_label(command: &str) -> String {
+    if let Some((_, tool)) = crate::shortcut_commands::TOOL_TABLE
+        .iter()
+        .find(|(id, _)| *id == command)
+        .filter(|(_, tool)| has(tool))
+    {
+        return text(tool).to_string();
+    }
     let short = command.rsplit('.').next().unwrap_or(command);
     let short = short.strip_suffix("Command").unwrap_or(short);
+    let key = match short {
+        "NewDocument" => "menu.file.new",
+        "OpenDocument" => "menu.file.open",
+        "SaveDocument" => "shortcut.cmd.Save",
+        "SaveDocumentAs" => "menu.file.save_as",
+        "PrintDocument" => "menu.file.print",
+        "ExportDocument" => "menu.file.export.export",
+        "CloseView" => "menu.file.close",
+        "CloseAllViews" => "menu.file.close_all",
+        "ShowHelp" => "menu.help.view_help",
+        "ShowLayerEffectsDialog" => "menu.layer.layer_effects",
+        "ShowResourceManager" => "menu.document.resource_manager",
+        "ToggleUI" => "menu.view.toggle_ui",
+        "Preferences" => "menu.edit.settings",
+        "RenameLayer" => "menu.layer.rename_layer",
+        "DuplicateObjects" => "shortcut.cmd.Duplicate",
+        "GroupNodes" => "shortcut.cmd.Group",
+        "UngroupNodes" => "shortcut.cmd.Ungroup",
+        "DeselectPixels" => "shortcut.cmd.Deselect",
+        "ToggleRulers" => "menu.view.show.rulers",
+        "ToggleGuides" => "menu.view.show.guides",
+        "ToggleMargins" => "menu.view.show.margins",
+        "ResetRotation" => "menu.view.rotate_reset",
+        "Lock" => "menu.layer.lock",
+        "Unlock" => "menu.layer.unlock",
+        "ZoomIn" => "menu.view.zoom.in",
+        "ZoomOut" => "menu.view.zoom.out",
+        "ZoomTo100" => "menu.view.zoom.n100pct",
+        "ZoomTo200" => "menu.view.zoom.n200pct",
+        "ZoomTo400" => "menu.view.zoom.n400pct",
+        "ZoomTo800" => "menu.view.zoom.n800pct",
+        "ZoomToFit" => "menu.view.zoom.to_fit",
+        "ZoomToWidth" => "menu.view.zoom.to_width",
+        "ZoomToActualSize" => "menu.view.zoom.actual_size",
+        "ZoomToPixelSize" => "menu.view.zoom.pixel_size",
+        "TextAlignLeft" => "menu.text.alignment.align_left",
+        "TextAlignCentre" => "menu.text.alignment.align_centre",
+        "TextAlignRight" => "menu.text.alignment.align_right",
+        "TextAlignJustifyLeft" => "menu.text.alignment.justify_left",
+        "TextAlignJustifyCentre" => "menu.text.alignment.justify_centre",
+        "TextAlignJustifyRight" => "menu.text.alignment.justify_right",
+        "TextAlignJustifyAll" => "menu.text.alignment.justify_all",
+        "SpaceHorizontally" => "menu.layer.arrange.align.distribute_horizontally",
+        "SpaceVertically" => "menu.layer.arrange.align.distribute_vertically",
+        _ if command == crate::shortcuts::FIND_OPEN_COMMAND => "menu.edit.find",
+        _ => return localized_command_fallback(short),
+    };
+    text(key).to_string()
+}
+
+fn localized_command_fallback(short: &str) -> String {
+    for (prefix, key) in [
+        ("ApplyStudioPresetCommand", "shortcut.cmd.ApplyStudioPreset"),
+        ("SwitchToWorkspaceCommand", "shortcut.cmd.SwitchToWorkspace"),
+    ] {
+        if let Some(slot) = short.strip_prefix(prefix).and_then(|slot| slot.parse::<u8>().ok()) {
+            if (1..=9).contains(&slot) {
+                return dtool_strings::format(key, &[("slot", &slot.to_string())]);
+            }
+        }
+    }
     let key = format!("shortcut.cmd.{short}");
     if has(&key) {
         text(&key).to_string()
@@ -124,6 +192,7 @@ pub struct ShortcutsPage {
     pub file_path: String,
     defaults: ShortcutMap,
     loaded: bool,
+    shared_revision: u64,
     filter: String,
     capturing: Option<String>,
     status: Option<&'static str>,
@@ -138,6 +207,7 @@ impl Default for ShortcutsPage {
             file_path: default_file_path(),
             defaults: ShortcutMap::default(),
             loaded: false,
+            shared_revision: 0,
             filter: String::new(),
             capturing: None,
             status: None,
@@ -161,7 +231,10 @@ impl ShortcutsPage {
 
     fn store(&mut self) {
         self.status = match self.map.save_checked() {
-            Ok(()) => None,
+            Ok(()) => {
+                crate::shortcuts::publish_map(&self.map);
+                None
+            }
             Err(_) => Some("pref.shortcuts.save_failed"),
         };
     }
@@ -176,9 +249,20 @@ impl ShortcutsPage {
                 egui::Event::Key {
                     key,
                     pressed: true,
+                    repeat: false,
                     modifiers,
                     ..
-                } => Some((*key, *modifiers)),
+                } if !matches!(
+                    key,
+                    egui::Key::ShiftLeft
+                        | egui::Key::ShiftRight
+                        | egui::Key::ControlLeft
+                        | egui::Key::ControlRight
+                        | egui::Key::AltLeft
+                        | egui::Key::AltRight
+                        | egui::Key::SuperLeft
+                        | egui::Key::SuperRight
+                ) => Some((*key, *modifiers)),
                 _ => None,
             })
         });
@@ -204,6 +288,7 @@ impl ShortcutsPage {
 
     pub fn show(&mut self, ui: &mut Ui) {
         self.ensure_loaded();
+        crate::shortcuts::sync_shared(&mut self.map, &mut self.shared_revision);
         self.capture(ui);
 
         ui.horizontal(|ui| {

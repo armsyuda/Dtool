@@ -234,6 +234,7 @@ pub struct Workspace {
     clipboard: AppClipboard,
     snap_prefs: Option<crate::snap_prefs::SnapPrefsService>,
     native_extras: std::collections::HashMap<ContextId, serde_json::Value>,
+    paired_page_moves: Vec<[(ContextId, u64); 2]>,
     jobs: crate::job::JobRegistry,
     host_confirms: Option<HostConfirms>,
     ui_session: UiSessionState,
@@ -306,6 +307,7 @@ impl Workspace {
             clipboard: AppClipboard::new(),
             snap_prefs: None,
             native_extras: std::collections::HashMap::new(),
+            paired_page_moves: Vec::new(),
             jobs: crate::job::JobRegistry::default(),
             host_confirms: None,
             ui_session: UiSessionState::default(),
@@ -335,6 +337,81 @@ impl Workspace {
 
     pub fn get_mut(&mut self, id: ContextId) -> Option<&mut DocContext> {
         self.contexts.iter_mut().find(|c| c.id == id)
+    }
+
+    pub(crate) fn apply_linked_page_change<T>(
+        &mut self, first: ContextId, second: ContextId,
+        apply: impl FnOnce(&mut Session, &mut Session) -> Result<T, CommandError>,
+    ) -> Result<T, CommandError> {
+        let index = |id| self.contexts.iter().position(|context| context.id == id)
+            .ok_or_else(CommandError::context_not_found);
+        let indices = [index(first)?, index(second)?];
+        let [first, second] = self.contexts.get_disjoint_mut(indices).map_err(|_| CommandError::invalid_params())?;
+        let previous_first = crate::command::BatchRollback::capture(&first.session);
+        let previous_second = crate::command::BatchRollback::capture(&second.session);
+        match apply(&mut first.session, &mut second.session) {
+            Ok(value) => {
+                for context in [first, second] {
+                    crate::longdoc::fields::refresh_if_stale(&mut context.session);
+                    context.view_state = context.session.view.clone();
+                }
+                Ok(value)
+            }
+            Err(error) => {
+                previous_first.restore(&mut first.session);
+                previous_second.restore(&mut second.session);
+                Err(error)
+            }
+        }
+    }
+
+    pub(crate) fn record_paired_page_move(&mut self, source: ContextId, destination: ContextId) {
+        if let (Some(source), Some(destination)) = (self.get(source), self.get(destination)) {
+            self.paired_page_moves.push([
+                (source.id, source.session.undo.position()),
+                (destination.id, destination.session.undo.position()),
+            ]);
+        }
+    }
+
+    fn run_paired_page_history(&mut self, id: ContextId, command: &Command) -> Option<CommandResult> {
+        use crate::longdoc::page_import::MOVE_TO_DOCUMENT;
+
+        let redo = match command.name.as_str() {
+            "edit.undo" => false,
+            "edit.redo" => true,
+            _ => return None,
+        };
+        let current = &self.get(id)?.session;
+        if current.edit_active() || current.text_edit.is_some() {
+            return None;
+        }
+        let (name, step) = current.undo.next_step(redo)?;
+        if name != MOVE_TO_DOCUMENT {
+            return None;
+        }
+        let peer = self.paired_page_moves.iter().find_map(|[first, second]| {
+            if *first == (id, step) { Some(*second) }
+            else if *second == (id, step) { Some(*first) }
+            else { None }
+        });
+        let Some((peer_id, peer_step)) = peer else {
+            return Some(Err(CommandError::new("PAGE_MOVE_HISTORY_NEEDS_PEER")));
+        };
+        if !self.get(peer_id).is_some_and(|peer| {
+            !peer.session.edit_active() && peer.session.text_edit.is_none()
+                && peer.session.undo.next_step(redo) == Some((MOVE_TO_DOCUMENT, peer_step))
+        }) {
+            return Some(Err(CommandError::new("PAGE_MOVE_HISTORY_NEEDS_PEER")));
+        }
+        Some(self.apply_linked_page_change(id, peer_id, |current, peer| {
+            let mut result = current.run_with(command, |session, command| session.run_history_step(command, true))?;
+            let other = peer.run_with(command, |session, command| session.run_history_step(command, true))?;
+            result["context_id"] = serde_json::json!(id);
+            result["other_context"] = serde_json::json!(peer_id);
+            result["other_doc_version"] = other["doc_version"].clone();
+            Ok(result)
+        }))
     }
 
     pub fn view_mut(&mut self, id: ContextId) -> Option<&mut ViewState> {
@@ -580,6 +657,7 @@ impl Workspace {
         if let Some(result) = crate::import_hook::run(self, &command) { return result; }
         if let Some(result) = crate::commands::document_files::run(self, scope, &command) { return result; }
         if let Some(result) = crate::clipboard::run_workspace(self, scope, &command) { return result; }
+        if let Some(result) = crate::longdoc::page_import::run_workspace(self, scope, &command) { return result; }
         if let Some(result) = crate::commands::export_batch::run(self, scope, &command) {
             if result.1.is_ok() {
                 if let Some(ctx) = result.0.and_then(|id| self.get_mut(id)) {
@@ -603,6 +681,9 @@ impl Workspace {
             if !self.contexts.iter().any(|c| c.id == id) {
                 let issued = id.0 >= 1 && id.0 < self.next_id;
                 return (issued.then_some(id), Err(CommandError::context_not_found()));
+            }
+            if let Some(result) = self.run_paired_page_history(id, &command) {
+                return (Some(id), result);
             }
 
             match command.name.as_str() {

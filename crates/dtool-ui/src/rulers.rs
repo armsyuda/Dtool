@@ -2,6 +2,7 @@ use dtool_core::command::Session;
 use dtool_core::guides::{Guide, GuideId, GuideKind, Guides};
 use dtool_core::snap_candidates::{CandidateKind, SnapDocument, snap_candidates, smart_guides, SmartGuideKind};
 use dtool_core::ViewState;
+use dtool_core::view::ViewTarget;
 use dtool_core::rulers::{RulerState, MENU_SHOW_RULERS, MENU_SHOW_TEXT_RULER, RULER_ORIGIN_RESET, RULER_ORIGIN_SET, RULER_SHOW, RULER_UNIT_SET};
 use dtool_core::CommandError;
 use dtool_strings::text;
@@ -183,16 +184,19 @@ fn paint_folds(ui: &Ui, doc: &dtool_core::Document, view: &ViewState, canvas: Re
     let painter = ui.painter().with_clip_rect(canvas);
     let stroke = egui::Stroke::new(1.0, dtool_design::color("smart_guide"));
     for (_, segments) in dtool_core::page_fold::segments(doc) {
-        for [a, b] in segments {
-            let a = doc_to_screen(view, canvas, a);
-            let b = doc_to_screen(view, canvas, b);
-            let Some([start, end]) = crate::app_canvas::clip_frame_segment(
-                [a.x, a.y], [b.x, b.y], [canvas.min.x, canvas.min.y], [canvas.width(), canvas.height()],
-            ) else { continue };
-            let delta = b - a;
-            painter.extend(egui::Shape::dashed_line(&[a + delta * start, a + delta * end], stroke, 5.0, 4.0));
+        for segment in segments {
+            paint_dashed_guide(&painter, view, canvas, segment, stroke);
         }
     }
+}
+
+fn paint_dashed_guide(painter: &egui::Painter, view: &ViewState, canvas: Rect, segment: [[f32; 2]; 2], stroke: egui::Stroke) {
+    let [a, b] = segment.map(|point| doc_to_screen(view, canvas, point));
+    let Some([start, end]) = crate::app_canvas::clip_frame_segment(
+        [a.x, a.y], [b.x, b.y], [canvas.min.x, canvas.min.y], [canvas.width(), canvas.height()],
+    ) else { return };
+    let delta = b - a;
+    painter.extend(egui::Shape::dashed_line(&[a + delta * start, a + delta * end], stroke, 5.0, 4.0));
 }
 
 pub(crate) fn paint_column_guides(ui: &Ui, session: &Session, view: &ViewState, canvas: Rect, fill: &str, outline: &str) {
@@ -287,26 +291,35 @@ pub fn guide_segment(view: &ViewState, canvas: Rect, kind: GuideKind, position: 
 }
 
 fn screen_guide(doc: &dtool_core::Document, view: &ViewState, canvas: Rect, guide: &Guide) -> Option<[Pos2; 2]> {
-    if guide.page_id.is_some() {
-        return guide.page_segment(doc).map(|segment| segment.map(|point| doc_to_screen(view, canvas, point)));
+    if guide.surface().is_some() {
+        return guide.source_segment(doc).map(|segment| segment.map(|point| doc_to_screen(view, canvas, point)));
     }
     Some(guide_segment(view, canvas, guide.kind, guide.position))
 }
 
-fn dropped_page(session: &Session, drag: RulerDrag) -> Option<dtool_core::document::PageId> {
+fn dropped_surface(session: &Session, drag: RulerDrag) -> Option<ViewTarget> {
     match drag.target {
-        RulerDragTarget::ExistingGuide { id } => session.guides.get(id)?.page_id,
+        RulerDragTarget::ExistingGuide { id } => session.guides.get(id)?.surface(),
         RulerDragTarget::NewGuide { .. } if session.document.layout_artboard_origins.is_some() => {
+            let [px, py] = drag.raw_point;
+            for &id in &session.document.master_pages.roots {
+                let master = ViewTarget::Artboard(id);
+                if dtool_core::guides::surface_bounds(&session.document, master).is_some_and(|[x, y, w, h]|
+                    (x..=x+w).contains(&px) && (y..=y+h).contains(&py))
+                {
+                    return Some(master);
+                }
+            }
             let index = dtool_core::artboard::edit::page_at_point(&session.document, drag.raw_point)?;
-            Some(session.document.pages[index].id)
+            Some(ViewTarget::Page(session.document.pages[index].id))
         }
         _ => None,
     }
 }
 
-fn local_drop_position(session: &Session, drag: RulerDrag, kind: GuideKind, page: Option<dtool_core::document::PageId>) -> f32 {
+fn local_drop_position(session: &Session, drag: RulerDrag, kind: GuideKind, target: Option<ViewTarget>) -> f32 {
     let position = drag.position(kind);
-    let Some(bounds) = page.and_then(|id| dtool_core::guides::page_bounds(&session.document, id)) else { return position };
+    let Some(bounds) = target.and_then(|target| dtool_core::guides::surface_bounds(&session.document, target)) else { return position };
     let axis = kind.axis();
     (position - bounds[axis]).clamp(0.0, bounds[axis + 2].max(0.0))
 }
@@ -439,9 +452,14 @@ impl Rulers {
                     return RulerDropResult::None;
                 }
                 let kind = drag.kind(None);
-                let page_id = dropped_page(session, drag);
-                let position = local_drop_position(session, drag, kind, page_id);
-                let params = serde_json::json!({ "kind": kind, "position": position, "page_id": page_id });
+                let target = dropped_surface(session, drag);
+                let position = local_drop_position(session, drag, kind, target);
+                let mut params = serde_json::json!({ "kind": kind, "position": position });
+                match target {
+                    Some(ViewTarget::Page(id)) => params["page_id"] = serde_json::json!(id),
+                    Some(ViewTarget::Artboard(id)) => params["master_id"] = serde_json::json!(id),
+                    None => {}
+                }
                 match session.run_named("guides.add", params) {
                     Ok(v) => RulerDropResult::Added(v),
                     Err(e) => RulerDropResult::Refused(error_text(&e.message_key)),
@@ -450,7 +468,7 @@ impl Rulers {
             RulerDragTarget::ExistingGuide { id } => {
                 let original = session.guides.get(id).map(|g| g.kind);
                 let kind = drag.kind(original);
-                let position = local_drop_position(session, drag, kind, dropped_page(session, drag));
+                let position = local_drop_position(session, drag, kind, dropped_surface(session, drag));
                 let unmoved = session.guides.get(id).is_some_and(|guide| guide.position == position);
                 if !drag.over_ruler && unmoved {
                     return RulerDropResult::None;
@@ -600,7 +618,7 @@ impl Rulers {
                             if let Some(id) = self.guide_at(ui, session, view, canvas, pos) {
                                 if self.begin_move_guide(session, id, doc) && let Some(guide) = session.guides.get(id) {
                                     let axis = guide.kind.axis();
-                                    let position = guide.page_segment(&session.document).map_or(guide.position, |segment| segment[0][axis]);
+                                    let position = guide.source_segment(&session.document).map_or(guide.position, |segment| segment[0][axis]);
                                     self.grab_offset[axis] = position - doc[axis];
                                 }
                             }
@@ -740,8 +758,12 @@ impl Rulers {
     }
 
     pub(crate) fn paint_guide(ui: &Ui, doc: &dtool_core::Document, view: &ViewState, canvas: Rect, guide: &Guide, colour: egui::Color32) {
+        let painter = ui.painter().with_clip_rect(canvas);
         if let Some([a, b]) = screen_guide(doc, view, canvas, guide) {
-            dtool_design::canvas_line(&ui.painter().with_clip_rect(canvas), a, b, colour);
+            dtool_design::canvas_line(&painter, a, b, colour);
+        }
+        for segment in guide.inherited_segments(doc) {
+            paint_dashed_guide(&painter, view, canvas, segment, egui::Stroke::new(1.0, colour));
         }
     }
 
@@ -775,6 +797,7 @@ impl Rulers {
 
     fn paint_guides(&self, ui: &Ui, session: &Session, view: &ViewState, canvas: Rect) {
         let colour = dtool_design::color("accent");
+        let painter = ui.painter().with_clip_rect(canvas);
         let moving = match self.drag {
             Some(RulerDrag { target: RulerDragTarget::ExistingGuide { id }, .. }) => Some(id),
             _ => None,
@@ -786,10 +809,12 @@ impl Rulers {
             if moving == Some(g.id) {
                 continue;
             }
+            for segment in g.inherited_segments(&session.document) {
+                paint_dashed_guide(&painter, view, canvas, segment, egui::Stroke::new(1.0, colour));
+            }
             let Some([a, b]) = screen_guide(&session.document, view, canvas, g) else { continue };
-            dtool_design::canvas_line(&ui.painter().with_clip_rect(canvas), a, b, colour);
+            dtool_design::canvas_line(&painter, a, b, colour);
             if let Some((rect, galley)) = guide_label(ui, canvas, g, [a, b]) {
-                let painter = ui.painter().with_clip_rect(canvas);
                 painter.rect_filled(rect, 2.0, dtool_design::color("tab_row"));
                 if galley.elided {
                     ui.interact(rect, ui.scope_id().with(("guide_label", g.id.0)), Sense::hover())
@@ -836,11 +861,16 @@ impl Rulers {
             RulerDragTarget::NewGuide { .. } => None,
         };
         let kind = drag.kind(original);
-        let page_id = dropped_page(session, drag);
+        let target = dropped_surface(session, drag);
+        let (page_id, master_id) = match target {
+            Some(ViewTarget::Page(id)) => (Some(id), None),
+            Some(ViewTarget::Artboard(id)) => (None, Some(id)),
+            None => (None, None),
+        };
         let guide = Guide {
             id: GuideId::default(), kind,
-            position: local_drop_position(session, drag, kind, page_id),
-            name: None, locked: false, page_id,
+            position: local_drop_position(session, drag, kind, target),
+            name: None, locked: false, page_id, master_id,
         };
         Self::paint_guide(ui, &session.document, view, canvas, &guide, dtool_design::color("accent"));
     }
@@ -937,12 +967,11 @@ pub fn origin_controls(ui: &mut Ui, session: &mut Session) {
     let scale = f64::from(rulers.display_scale(units, session.document.dpi));
     let suffix = if rulers.meters { "m" } else { dtool_core::commands::ruler_units::suffix(rulers.effective_units(units)) };
     let mut origin = rulers.origin;
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         for (axis, key) in ["ruler.origin.x", "ruler.origin.y"].into_iter().enumerate() {
-            ui.label(text(key));
             let value = f64::from(origin[axis]) * scale;
             let id = ui.id().with(("ruler.origin", axis));
-            let spec = dtool_design::NumericSpec::new("").suffix(suffix).decimals(6).width(96.0);
+            let spec = dtool_design::NumericSpec::new(text(key)).suffix(suffix).decimals(6).width(96.0);
             let (_, edit) = dtool_design::numeric_field(ui, id, dtool_design::NumericValue::Value(value), &spec);
             if let dtool_design::NumericEvent::Commit(value) = edit {
                 origin[axis] = (value / scale) as f32;

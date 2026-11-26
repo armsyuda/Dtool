@@ -92,6 +92,7 @@ pub struct PanelRegistry {
     pub navigator: crate::navigator::NavigatorPanel,
     pub pages: pages::PagesPanel,
     pub canvas_size: [f32; 2],
+    pub ai_image: crate::ai_image_panel::AiImagePanel,
 }
 
 pub const WINDOW_SWATCHES: &str = "window.general.swatches";
@@ -117,6 +118,8 @@ pub fn window_panel(action: &str) -> Option<PanelId> {
         "window.vector.appearance" => Some(PanelId::Other(appearance::PANEL_KEY.to_string())),
         "window.vector.quick_fx" => Some(PanelId::Effects),
         "window.layout.pages" => Some(PanelId::Pages),
+        "window.general.transform" => Some(PanelId::Other("transform".into())),
+        "window.general.navigator" => Some(PanelId::Navigator),
         WINDOW_SWATCHES => Some(PanelId::Swatches),
         WINDOW_COLOUR => Some(PanelId::Colour),
         WINDOW_PARAGRAPH => Some(PanelId::Paragraph),
@@ -133,7 +136,7 @@ pub fn window_panel(action: &str) -> Option<PanelId> {
     }
 }
 
-pub const WINDOW_PANELS: &[&str] = &[symbols::WINDOW_PANEL, path_brushes::WINDOW_PANEL, pixel_brushes::WINDOW_PANEL, "window.vector.appearance", "window.vector.quick_fx", "window.layout.pages", WINDOW_SWATCHES, WINDOW_COLOUR, WINDOW_PARAGRAPH, WINDOW_CHARACTER, WINDOW_TEXT_FRAME, WINDOW_GLYPH_BROWSER, WINDOW_ASSETS, WINDOW_STYLES, WINDOW_TEXT_WRAP, WINDOW_TEXT_STYLES, WINDOW_TABLE, WINDOW_TABLE_FORMATS];
+pub const WINDOW_PANELS: &[&str] = &[symbols::WINDOW_PANEL, path_brushes::WINDOW_PANEL, pixel_brushes::WINDOW_PANEL, "window.vector.appearance", "window.vector.quick_fx", "window.layout.pages", "window.general.transform", "window.general.navigator", WINDOW_SWATCHES, WINDOW_COLOUR, WINDOW_PARAGRAPH, WINDOW_CHARACTER, WINDOW_TEXT_FRAME, WINDOW_GLYPH_BROWSER, WINDOW_ASSETS, WINDOW_STYLES, WINDOW_TEXT_WRAP, WINDOW_TEXT_STYLES, WINDOW_TABLE, WINDOW_TABLE_FORMATS];
 
 thread_local! {
     static SHOWN_WINDOW_PANELS: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
@@ -149,7 +152,10 @@ pub fn window_panel_checked(action: &str) -> bool {
 }
 
 pub fn toggle_panel(layout: &mut Layout, id: &PanelId) -> bool {
-    let shown = if layout.is_panel_shown(id) {
+    let shown = if id.key() == "transform" && layout.is_panel_shown(id) && !layout.is_panel_active(id) {
+        focus_panel(layout, id);
+        true
+    } else if layout.is_panel_shown(id) {
         layout.set_panel_visible(id, false);
         layout.sync_tree_visibility();
         false
@@ -179,9 +185,16 @@ pub fn workspace_panel(ui: &mut egui::Ui, id: &PanelId, registry: &mut PanelRegi
         PanelId::Pages => {
             let view_size = workspace.active().and_then(|id| workspace.get(id))
                 .and_then(|context| context.session.view_canvas_size).unwrap_or(registry.canvas_size);
-            if let Some(command) = registry.pages.show(ui, workspace.session(), view_size) {
-                if let Err(error) = workspace.run(dtool_core::Scope::active(), command).1 {
-                    ui.weak(dtool_strings::text(&error.message_key));
+            if let Some(command) = registry.pages.show(ui, workspace, view_size) {
+                let select_master = matches!(command.name.as_str(), "master.create" | "master.duplicate");
+                match workspace.run(dtool_core::Scope::active(), command).1 {
+                    Ok(result) if select_master => {
+                        if let Some(id) = result["id"].as_u64() {
+                            registry.pages.select_master(dtool_core::ObjectId(id));
+                        }
+                    }
+                    Err(error) => { ui.weak(dtool_strings::text(&error.message_key)); }
+                    Ok(_) => {}
                 }
             }
             true
@@ -337,6 +350,8 @@ impl PanelRegistry {
         extra.push(PanelId::Other(path_brushes::PANEL_KEY.to_string()));
         extra.push(PanelId::Other(pixel_brushes::PANEL_KEY.to_owned()));
         extra.push(PanelId::Other(constraints::PANEL_KEY.to_string()));
+        extra.push(PanelId::Other(SLICES_PANEL_KEY.into()));
+        extra.push(PanelId::Other(AI_IMAGE_PANEL_KEY.into()));
         extra.push(PanelId::Other(table::PANEL_KEY.to_string()));
         extra.push(PanelId::Other(table_formats::PANEL_KEY.to_string()));
         let text_styles_id = PanelId::Other(text_styles::TEXT_STYLES_PANEL_KEY.to_string());
@@ -392,14 +407,14 @@ macro_rules! studio_chrome {
         }
         fn tab_bar_height(&self, _: &egui::Style) -> f32 { dtool_design::size("panel.header.height") }
         fn gap_width(&self, _: &egui::Style) -> f32 { 3.0 }
-        fn tab_bar_color(&self, visuals: &egui::Visuals) -> egui::Color32 { visuals.panel_fill.lerp_to_gamma(egui::Color32::BLACK, 0.23) }
+        fn tab_bar_color(&self, _: &egui::Visuals) -> egui::Color32 { dtool_design::color("studio.header") }
         fn tab_bg_color(&self, visuals: &egui::Visuals, _: &egui_tiles::Tiles<PanelId>, _: TileId, state: &egui_tiles::TabState) -> egui::Color32 {
             if state.active { visuals.panel_fill } else { egui::Color32::TRANSPARENT }
         }
         fn tab_outline_stroke(&self, visuals: &egui::Visuals, _: &egui_tiles::Tiles<PanelId>, _: TileId, state: &egui_tiles::TabState) -> egui::Stroke {
             if state.active { egui::Stroke::NONE } else { egui::Stroke::new(1.0, visuals.panel_fill) }
         }
-        fn tab_bar_hline_stroke(&self, visuals: &egui::Visuals) -> egui::Stroke { egui::Stroke::new(1.0, visuals.panel_fill.lerp_to_gamma(egui::Color32::BLACK, 0.38)) }
+        fn tab_bar_hline_stroke(&self, _: &egui::Visuals) -> egui::Stroke { egui::Stroke::new(dtool_design::stroke_width("thin"), dtool_design::color("studio.divider")) }
     };
 }
 
@@ -567,6 +582,8 @@ pub fn show_floating_with_stroke(ctx: &egui::Context, layout: &mut Layout, regis
 }
 
 pub const SNAPSHOTS_PANEL_KEY: &str = "snapshots";
+pub const SLICES_PANEL_KEY: &str = "slices";
+pub const AI_IMAGE_PANEL_KEY: &str = "ai_image";
 
 pub struct SessionPanels<'a> {
     pub slices: &'a mut crate::slices_panel::SlicesPanel,
@@ -576,18 +593,22 @@ pub struct SessionPanels<'a> {
 
 impl SessionPanels<'_> {
     pub fn show(&mut self, ui: &mut egui::Ui, id: &PanelId, registry: &mut PanelRegistry, workspace: &mut dtool_core::workspace::Workspace, header_release: &mut Option<(PanelId, egui::Pos2)>) {
-        let session_panel = *id == PanelId::Other("slices".into()) || *id == PanelId::History || *id == PanelId::Other(SNAPSHOTS_PANEL_KEY.into());
+        let session_panel = *id == PanelId::Other(SLICES_PANEL_KEY.into()) || *id == PanelId::History || *id == PanelId::AiLog
+            || matches!(id, PanelId::Other(key) if key == SNAPSHOTS_PANEL_KEY || key == AI_IMAGE_PANEL_KEY);
         if !session_panel {
             if !workspace_panel(ui, id, registry, workspace) {
                 if let Some(release) = panel_chrome(ui, id, registry) { *header_release = Some(release); }
             }
             return;
         }
-        let Some(session) = workspace.session_mut() else { return };
+        let Some(context) = workspace.active().and_then(|id| workspace.get_mut(id)) else { return };
+        let session = &mut context.session;
         match id {
             PanelId::History => { panel_frame(ui, |ui| { if let Some(release) = sense_header_drag(ui, id) { *header_release = Some(release); } self.history.show(ui, session); }); }
             PanelId::Other(key) if key == SNAPSHOTS_PANEL_KEY => { panel_frame(ui, |ui| { if let Some(release) = sense_header_drag(ui, id) { *header_release = Some(release); } self.snapshots.show(ui, session); }); }
-            _ => { self.slices.show(ui, session); }
+            PanelId::AiLog => { registry.ai_image.show(ui, session); }
+            PanelId::Other(key) if key == AI_IMAGE_PANEL_KEY => { registry.ai_image.show(ui, session); }
+            _ => { self.slices.show(ui, context); }
         }
     }
 }
@@ -623,7 +644,7 @@ impl Behavior<PanelId> for SliceDockBehavior<'_> {
         }
     }
     fn pane_ui(&mut self, ui: &mut egui::Ui, _tile_id: TileId, pane: &mut PanelId) -> UiResponse {
-        dtool_design::studio_content_with(ui, !matches!(pane, PanelId::Layers | PanelId::Swatches), |ui| {
+        dtool_design::studio_content_with(ui, !matches!(pane, PanelId::Layers | PanelId::Swatches | PanelId::Pages), |ui| {
             self.panels.show(ui, pane, self.registry, self.workspace, self.header_release);
         });
         UiResponse::None

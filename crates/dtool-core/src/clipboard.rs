@@ -647,6 +647,48 @@ fn commit_paste(session: &mut crate::command::Session, name: &str, before: crate
     crate::commands::arrange::commit_snapshot(session, name, before, ids_json(&ids))
 }
 
+fn paste_into_artboards(
+    doc: &mut crate::Document,
+    bundle: &ClipboardBundle,
+    parent: Option<crate::ObjectId>,
+    offset: [f32; 2],
+) -> std::collections::HashMap<crate::ObjectId, crate::ObjectId> {
+    // Resolve destinations against the existing boards before adding the copied objects.
+    let explicit_board = parent.and_then(|id| crate::artboard::owner_or_self(doc, id));
+    let boards: Vec<_> = if parent.is_none() { crate::view::ViewTarget::artboards(doc).collect() } else { Vec::new() };
+    if boards.is_empty() && explicit_board.is_none() {
+        return paste_bundle_mapped(doc, bundle, parent, offset);
+    }
+    let roots: std::collections::HashSet<_> = bundle.roots.iter().copied().collect();
+    let mut destinations = Vec::new();
+    for source in bundle.objects.iter().filter(|object| roots.contains(&object.id) && !crate::artboard::is_artboard(object)) {
+        let board = if parent.is_some() {
+            explicit_board
+        } else {
+            let point = std::array::from_fn(|axis| source.pos[axis] + offset[axis]);
+            boards.iter().rev().copied().find(|board| crate::artboard::contains(board, point)).filter(|board| !board.locked)
+        };
+        if let Some(board) = board {
+            let index = crate::data_merge::layout::object_page_index(doc, board.id);
+            let page = doc.pages.get(index).map(|page| page.id);
+            destinations.push((source.id, parent.unwrap_or(board.id), page));
+        }
+    }
+
+    let mapping = paste_bundle_mapped(doc, bundle, parent, offset);
+    for (source, destination, page) in destinations {
+        if let Some(&id) = mapping.get(&source)
+            && let Some(object) = doc.find_object_mut(id.0)
+        {
+            object.parent_id = Some(destination);
+            if let Some(page) = page {
+                crate::artboard::edit::set_subtree_page(doc, id, page);
+            }
+        }
+    }
+    mapping
+}
+
 fn paste_objects(
     session: &mut crate::Session, name: &str, mut bundle: ClipboardBundle,
     parent: Option<crate::ObjectId>, at: Option<[f32; 2]>, default_offset: [f32; 2],
@@ -672,14 +714,15 @@ fn paste_objects(
     }
     if !bundle.symbols.is_empty() && symbol_clipboard::can_link_under(&session.document, parent) {
         let mut document = session.document.clone();
-        let mapping = paste_bundle_mapped(&mut document, &bundle, parent, offset);
+        let mapping = paste_into_artboards(&mut document, &bundle, parent, offset);
         symbol_clipboard::paste(&mut document, &bundle, &mapping, session.context, offset, factor)?;
         let ids: Vec<_> = bundle.roots.iter().filter_map(|id| mapping.get(id).copied()).collect();
         let extra = ids_json(&ids);
         return crate::commands::document_change::commit(session, name, document, ids, extra);
     }
     let before = crate::commands::arrange::snapshot(session);
-    let ids = paste_bundle(&mut session.document, &bundle, parent, offset);
+    let mapping = paste_into_artboards(&mut session.document, &bundle, parent, offset);
+    let ids = bundle.roots.iter().filter_map(|id| mapping.get(id).copied()).collect();
     commit_paste(session, name, before, ids)
 }
 

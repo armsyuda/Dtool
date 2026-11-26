@@ -12,7 +12,7 @@ use i_overlay::float::overlay::FloatOverlay;
 use i_overlay::mesh::float::stroke::offset::StrokeOffset;
 use i_overlay::mesh::float::style::{LineJoin, StrokeStyle};
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 pub const CLIP_SET: &str = "layer.clip.set";
 pub const CLIP_RELEASE: &str = "layer.clip.release";
@@ -263,6 +263,71 @@ fn solid(value: u8) -> Paint {
     Paint::Solid { colour: Colour::new(value, value, value, 255) }
 }
 
+const MASK_PREVIEW_FULL_RESOLUTION_PIXELS: usize = 4_000_000;
+const MASK_PREVIEW_RUN_LIMIT: usize = 16_384;
+const MASK_PREVIEW_FALLBACK_SIDE: usize = 128;
+
+struct MaskRun {
+    level: u8,
+    x: [usize; 2],
+    y: [usize; 2],
+}
+
+fn mask_preview_runs(coverage: &[u8], width: usize, run_limit: usize) -> Option<Vec<MaskRun>> {
+    let quantize = |value: u8| ((u32::from(value) * 16 + 127) / 255) as u8;
+    let mut runs = Vec::new();
+    let mut open = BTreeMap::new();
+    let mut next = BTreeMap::new();
+    for (y, row) in coverage.chunks_exact(width).enumerate() {
+        let mut x = 0;
+        while x < width {
+            let level = quantize(row[x]);
+            let start = x;
+            while x < width && quantize(row[x]) == level {
+                x += 1;
+            }
+            if level != 0 {
+                let key = (level, start, x);
+                next.insert(key, open.remove(&key).unwrap_or(y));
+                if runs.len() + open.len() + next.len() > run_limit {
+                    return None;
+                }
+            }
+        }
+        // Join identical runs across rows so antialiasing cannot introduce seams.
+        runs.extend(std::mem::take(&mut open).into_iter().map(|((level, left, right), top)| {
+            MaskRun { level, x: [left, right], y: [top, y] }
+        }));
+        std::mem::swap(&mut open, &mut next);
+    }
+    let height = coverage.len() / width;
+    runs.extend(open.into_iter().map(|((level, left, right), top)| {
+        MaskRun { level, x: [left, right], y: [top, height] }
+    }));
+    Some(runs)
+}
+
+fn average_mask_preview(coverage: &[u8], [width, height]: [usize; 2]) -> (Vec<u8>, [usize; 2]) {
+    let size = [width, height].map(|side| side.min(MASK_PREVIEW_FALLBACK_SIDE));
+    let [preview_width, preview_height] = size;
+    let mut preview = vec![0; preview_width * preview_height];
+    for y in 0..preview_height {
+        let top = y * height / preview_height;
+        let bottom = (y + 1) * height / preview_height;
+        for x in 0..preview_width {
+            let left = x * width / preview_width;
+            let right = (x + 1) * width / preview_width;
+            let sum = (top..bottom)
+                .flat_map(|row| &coverage[row * width + left..row * width + right])
+                .map(|&value| u64::from(value))
+                .sum::<u64>();
+            let count = ((right - left) * (bottom - top)) as u64;
+            preview[y * preview_width + x] = ((sum + count / 2) / count) as u8;
+        }
+    }
+    (preview, size)
+}
+
 fn mask_view_prims(doc: &Document, scene: &Scene, target: ObjectId) -> Option<Vec<Prim>> {
     let object = doc.get_object(target)?;
     if !has_any_mask(doc, target) {
@@ -292,56 +357,38 @@ fn mask_view_prims(doc: &Document, scene: &Scene, target: ObjectId) -> Option<Ve
     match doc.layer_masks.iter().find(|mask| mask.object == target) {
         Some(mask) => {
             let coverage = &mask.coverage;
-            let (w, h) = (coverage.width as usize, coverage.height as usize);
-            if w == 0 || h == 0 || coverage.coverage.len() != w * h || w * h > 4_000_000 {
+            let size = [coverage.width as usize, coverage.height as usize];
+            if size.contains(&0) || size[0].checked_mul(size[1]) != Some(coverage.coverage.len()) {
                 return Some(prims);
             }
-            let at = |u: f64, v: f64| {
+            let run_limit = if coverage.coverage.len() <= MASK_PREVIEW_FULL_RESOLUTION_PIXELS {
+                usize::MAX
+            } else {
+                MASK_PREVIEW_RUN_LIMIT
+            };
+            let (runs, [w, h]) = if let Some(runs) = mask_preview_runs(&coverage.coverage, size[0], run_limit) {
+                (runs, size)
+            } else {
+                // Only simplify the preview when the mask would generate too much geometry.
+                // Averaging retains fractional coverage in detailed or noisy masks.
+                let (preview, size) = average_mask_preview(&coverage.coverage, size);
+                (mask_preview_runs(&preview, size[0], usize::MAX).unwrap_or_default(), size)
+            };
+            let at = |u: usize, v: usize| {
+                let (u, v) = (u as f64 / w as f64, v as f64 / h as f64);
                 [
                     f64::from(quad[0][0]) + f64::from(quad[1][0] - quad[0][0]) * u + f64::from(quad[3][0] - quad[0][0]) * v,
                     f64::from(quad[0][1]) + f64::from(quad[1][1] - quad[0][1]) * u + f64::from(quad[3][1] - quad[0][1]) * v,
                 ]
             };
-            let level = |value: u8| ((u32::from(value) * 16 + 127) / 255) as u8;
-            let mut runs: Vec<(u8, Ring)> = Vec::new();
-            let mut open = std::collections::BTreeMap::new();
-            let mut next = std::collections::BTreeMap::new();
-            let mut finish = |(l, start, end): (u8, usize, usize), top: usize, bottom: usize| {
-                let (u0, u1, v0, v1) = (start as f64 / w as f64, end as f64 / w as f64,
-                    top as f64 / h as f64, bottom as f64 / h as f64);
-                runs.push((l, vec![at(u0, v0), at(u1, v0), at(u1, v1), at(u0, v1)]));
-            };
-            for y in 0..h {
-                let row = &coverage.coverage[y * w..(y + 1) * w];
-                let mut x = 0;
-                while x < w {
-                    let l = level(row[x]);
-                    let start = x;
-                    while x < w && level(row[x]) == l {
-                        x += 1;
-                    }
-                    if l == 0 {
-                        continue;
-                    }
-                    let key = (l, start, x);
-                    next.insert(key, open.remove(&key).unwrap_or(y));
-                }
-                // Keep equal runs joined so the canvas does not antialias a seam on each row.
-                for (key, top) in std::mem::take(&mut open) {
-                    finish(key, top, y);
-                }
-                std::mem::swap(&mut open, &mut next);
-            }
-            for (key, top) in open {
-                finish(key, top, h);
-            }
-            for (l, ring) in runs {
+            for MaskRun { level, x: [left, right], y: [top, bottom] } in runs {
+                let ring = vec![at(left, top), at(right, top), at(right, bottom), at(left, bottom)];
                 let rings = match &region {
                     Some(region) => intersect(&[ring], region, FillRule::EvenOdd),
                     None => vec![ring],
                 };
                 if !rings.is_empty() {
-                    prims.push(Prim::Fill { object: target, contours: to_contours(&rings), origin: object.pos, paint: solid(((u32::from(l) * 255) / 16) as u8), opacity: 1.0 });
+                    prims.push(Prim::Fill { object: target, contours: to_contours(&rings), origin: object.pos, paint: solid(((u32::from(level) * 255) / 16) as u8), opacity: 1.0 });
                 }
             }
         }

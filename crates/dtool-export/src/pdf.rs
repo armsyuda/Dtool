@@ -516,14 +516,14 @@ pub fn export_pdf(
     opts: &PdfOptions,
     control: &ExportControl,
 ) -> Result<ExportReceipt, CommandError> {
-    let (bytes, warnings) = encode_pdf(doc, req, opts, control)?;
+    let (bytes, warnings) = encode_pdf(doc, req, opts, control, None)?;
     crate::write_atomic(&req.path, &bytes).map_err(crate::export_io_error)?;
     Ok(ExportReceipt { path: req.path.clone(), bytes: bytes.len() as u64, warnings })
 }
 
 enum PdfLayer<'a> {
-    OpenPage(krilla::geom::Path),
-    ClosePage,
+    OpenClip(krilla::geom::Path),
+    CloseClip,
     OpenGroup(&'a Object),
     Draw(&'a Object, Option<[f32; 4]>),
     CloseGroup(&'a Object),
@@ -532,19 +532,21 @@ enum PdfLayer<'a> {
 fn pdf_layers<'a>(
     doc: &'a Document, area: &ExportArea, page_scoped: bool,
     page_members: Option<&std::collections::HashSet<ObjectId>>,
+    master_clips: &std::collections::HashMap<ObjectId, [f32; 4]>,
 ) -> Vec<PdfLayer<'a>> {
     use std::collections::HashMap;
     fn append<'a>(
         layers: &mut Vec<PdfLayer<'a>>, doc: &Document, page_scoped: bool,
         children: &HashMap<Option<ObjectId>, Vec<&'a Object>>, parent: Option<ObjectId>,
+        master_clips: &HashMap<ObjectId, [f32; 4]>,
     ) -> bool {
         let mut blends = false;
         for &object in children.get(&parent).into_iter().flatten() {
+            let start = layers.len();
             let blended = !object.blend_mode.is_normal();
             let board = dtool_core::artboard::is_artboard(object);
             if object.is_group() || board {
-                let start = layers.len();
-                let child_blends = append(layers, doc, page_scoped, children, Some(object.id));
+                let child_blends = append(layers, doc, page_scoped, children, Some(object.id), master_clips);
                 if start < layers.len() && (board || object.opacity < 1.0 || blended || object.blend_ranges.is_some()
                     || !matches!(object.transparency, dtool_core::paint::Transparency::None)
                     || dtool_core::raster_source::compositing_mask(doc, object).is_some()
@@ -559,6 +561,12 @@ fn pdf_layers<'a>(
             } else {
                 layers.push(PdfLayer::Draw(object, page_scoped.then(|| crate::vector_object_bounds(doc, object))));
                 blends |= blended;
+            }
+            if start < layers.len()
+                && let Some(clip) = master_clips.get(&object.id).copied().and_then(crop_clip_path)
+            {
+                layers.insert(start, PdfLayer::OpenClip(clip));
+                layers.push(PdfLayer::CloseClip);
             }
         }
         blends
@@ -588,7 +596,7 @@ fn pdf_layers<'a>(
         children.entry(parent.map(|owner| owner.id)).or_default().push(object);
     }
     let mut layers = Vec::new();
-    append(&mut layers, doc, page_scoped, &children, None);
+    append(&mut layers, doc, page_scoped, &children, None, master_clips);
     layers
 }
 
@@ -706,6 +714,7 @@ pub(crate) fn encode_pdf(
     req: &ExportRequest,
     opts: &PdfOptions,
     control: &ExportControl,
+    fitted_size: Option<[f32; 2]>,
 ) -> Result<(Vec<u8>, Vec<String>), CommandError> {
     opts.validate()?;
     if matches!(opts.compat, PdfCompat::X1a2003 | PdfCompat::X3_2003 | PdfCompat::X4) {
@@ -816,7 +825,10 @@ pub(crate) fn encode_pdf(
             Vec::new()
         };
         let margin = if crop_marks || !folds.is_empty() { 18.0 / scale } else { 0.0 };
-        (crate::pdf_links::Placement { trim: [x, y, w, h], offset: [left + margin, top + margin], scale }, margin, folds)
+        let offset = fitted_size.map_or([left + margin, top + margin], |[width, height]| {
+            [((width / scale - w) * 0.5).max(0.0), ((height / scale - h) * 0.5).max(0.0)]
+        });
+        (crate::pdf_links::Placement { trim: [x, y, w, h], offset, scale }, margin, folds)
     }).collect();
     let include_links = opts.include_hyperlinks && opts.fonts != PdfFonts::None
         && (!doc.hyperlinks().is_empty() || !doc.toc.tocs.is_empty());
@@ -834,6 +846,7 @@ pub(crate) fn encode_pdf(
         dtool_render::scene::install();
         dtool_core::scene::build_scene(doc, &dtool_core::CanvasFlags::default())
     });
+    let master_clips = dtool_core::commands::masters::fill_clips(doc);
     for (index, (placement, mark_margin, folds)) in page_geometry.into_iter().enumerate() {
         let [x, y, w, h] = placement.trim;
         if control.is_cancelled() {
@@ -862,20 +875,29 @@ pub(crate) fn encode_pdf(
             let mut layers = Vec::new();
             for (page, clip) in regions {
                 let members = crate::page_members(doc, &[page]);
-                layers.push(PdfLayer::OpenPage(clip));
-                layers.extend(pdf_layers(doc, &req.area, page_scoped, Some(&members)));
-                layers.push(PdfLayer::ClosePage);
+                layers.push(PdfLayer::OpenClip(clip));
+                layers.extend(pdf_layers(doc, &req.area, page_scoped, Some(&members), &master_clips));
+                layers.push(PdfLayer::CloseClip);
             }
             layers
         } else {
-            pdf_layers(doc, &req.area, page_scoped, members.as_ref())
+            pdf_layers(doc, &req.area, page_scoped, members.as_ref(), &master_clips)
         };
         let [outer_x, outer_y] = placement.offset;
-        let (media_w, media_h) = (w + left + right + 2.0 * mark_margin, h + top + bottom + 2.0 * mark_margin);
-        let mut settings = PageSettings::from_wh(media_w * scale, media_h * scale)
-            .ok_or_else(|| crate::export_error("INVALID_PARAMS", "error.export.bad_area"))?
-            .with_trim_box(krilla::geom::Rect::from_xywh(outer_x * scale, outer_y * scale, w * scale, h * scale))
-            .with_bleed_box(krilla::geom::Rect::from_xywh(mark_margin * scale, mark_margin * scale, (w + left + right) * scale, (h + top + bottom) * scale));
+        let [media_w, media_h] = fitted_size.unwrap_or([
+            (w + left + right + 2.0 * mark_margin) * scale,
+            (h + top + bottom + 2.0 * mark_margin) * scale,
+        ]);
+        let mut settings = PageSettings::from_wh(media_w, media_h)
+            .ok_or_else(|| crate::export_error("INVALID_PARAMS", "error.export.bad_area"))?;
+        if fitted_size.is_some() {
+            let frame = krilla::geom::Rect::from_xywh(0.0, 0.0, media_w, media_h);
+            settings = settings.with_trim_box(frame).with_bleed_box(frame);
+        } else {
+            settings = settings
+                .with_trim_box(krilla::geom::Rect::from_xywh(outer_x * scale, outer_y * scale, w * scale, h * scale))
+                .with_bleed_box(krilla::geom::Rect::from_xywh(mark_margin * scale, mark_margin * scale, (w + left + right) * scale, (h + top + bottom) * scale));
+        }
         if !doc.sections().is_empty() && let Some(pages) = pages
             && let Some((&first, &last)) = pages.first().zip(pages.last())
         {
@@ -894,7 +916,7 @@ pub(crate) fn encode_pdf(
             let region = (x - left, y - top, w + left + right, h + top + bottom);
             let range_area = [region.0, region.1, region.2, region.3];
             let range_scale = mask_pixels_per_unit;
-            let page_clip = (page_scoped || crop_marks)
+            let page_clip = (page_scoped || crop_marks || fitted_size.is_some())
                 .then(|| krilla::geom::Rect::from_xywh(region.0, region.1, region.2, region.3))
                 .flatten()
                 .and_then(|rect| {
@@ -910,11 +932,11 @@ pub(crate) fn encode_pdf(
             let mut effects_rasterised = false;
             for layer in &layers {
                 let (obj, bounds) = match *layer {
-                    PdfLayer::OpenPage(ref clip) => {
+                    PdfLayer::OpenClip(ref clip) => {
                         surface.push_clip_path(clip, &FillRule::NonZero);
                         continue;
                     }
-                    PdfLayer::ClosePage => {
+                    PdfLayer::CloseClip => {
                         surface.pop();
                         continue;
                     }

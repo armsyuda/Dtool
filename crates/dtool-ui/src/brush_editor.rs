@@ -264,7 +264,7 @@ impl Editor {
         ui.horizontal_wrapped(|ui| {
             ui.add_enabled_ui(count < MAX_SUB_BRUSHES, |ui| {
                 ui.menu_button(text("brush_editor.sub_brush.add"), |ui| {
-                    let Ok(library) = pixel_presets::library() else {
+                    let Ok(library) = pixel_presets::library_snapshot() else {
                         ui.weak(text("error.io_error"));
                         return;
                     };

@@ -1,4 +1,7 @@
 use serde::{Deserialize, Serialize};
+use crate::{Document, ObjectId};
+use crate::document::PageId;
+use crate::view::ViewTarget;
 
 pub mod column_layout;
 
@@ -23,17 +26,33 @@ pub struct Guide {
     pub locked: bool,
     /// When set, position is relative to the page origin along the guide axis.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub page_id: Option<crate::document::PageId>,
+    pub page_id: Option<PageId>,
+    /// When set, position is relative to the source master's origin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub master_id: Option<ObjectId>,
 }
 
 impl GuideKind {
     pub fn axis(self) -> usize { usize::from(self == Self::Horizontal) }
 }
 
-pub fn page_bounds(doc: &crate::Document, page: crate::document::PageId) -> Option<[f32; 4]> {
-    doc.pages.iter().position(|item| item.id == page)
-        .map(|index| crate::data_merge::layout::page_rect(doc, index))
-        .filter(|rect| rect.iter().all(|value| value.is_finite()) && rect[2] > 0.0 && rect[3] > 0.0)
+pub fn page_bounds(doc: &Document, page: PageId) -> Option<[f32; 4]> {
+    ViewTarget::Page(page).bounds(doc)
+}
+
+pub fn surface_bounds(doc: &Document, target: ViewTarget) -> Option<[f32; 4]> {
+    match target {
+        ViewTarget::Page(page) => page_bounds(doc, page),
+        ViewTarget::Artboard(id) => {
+            if !doc.master_pages.roots.contains(&id) {
+                return None;
+            }
+            let root = doc.get_object(id)?;
+            let bounds = [root.pos[0], root.pos[1], root.size[0], root.size[1]];
+            (bounds.iter().all(|value| value.is_finite()) && bounds[2] > 0.0 && bounds[3] > 0.0)
+                .then_some(bounds)
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -43,10 +62,14 @@ pub struct PercentAxis {
 }
 
 impl PercentAxis {
-    pub fn new(doc: &crate::Document, page: Option<crate::document::PageId>, kind: GuideKind) -> Option<Self> {
+    pub fn new(doc: &Document, page: Option<PageId>, kind: GuideKind) -> Option<Self> {
+        Self::for_surface(doc, page.map(ViewTarget::Page), kind)
+    }
+
+    pub fn for_surface(doc: &Document, target: Option<ViewTarget>, kind: GuideKind) -> Option<Self> {
         let axis = kind.axis();
-        if let Some(page) = page {
-            let bounds = page_bounds(doc, page)?;
+        if let Some(target) = target {
+            let bounds = surface_bounds(doc, target)?;
             return Some(Self { start: 0.0, length: f64::from(bounds[axis + 2]) });
         }
         let (start, end) = crate::scene::page_rects(doc).into_iter()
@@ -71,14 +94,45 @@ impl PercentAxis {
 }
 
 impl Guide {
-    pub fn page_segment(&self, doc: &crate::Document) -> Option<[[f32; 2]; 2]> {
-        let [x, y, w, h] = page_bounds(doc, self.page_id?)?;
+    pub fn surface(&self) -> Option<ViewTarget> {
+        self.master_id.map(ViewTarget::Artboard).or_else(|| self.page_id.map(ViewTarget::Page))
+    }
+
+    pub fn source_segment(&self, doc: &Document) -> Option<[[f32; 2]; 2]> {
+        self.segment_in(surface_bounds(doc, self.surface()?)?)
+    }
+
+    pub fn inherited_segments<'a>(&'a self, doc: &'a Document) -> impl Iterator<Item = [[f32; 2]; 2]> + 'a {
+        self.master_id.into_iter().flat_map(move |source| {
+            let masters = &doc.master_pages;
+            let inherits = move |from| {
+                std::iter::successors(Some(from), |id| masters.for_master(*id).map(|binding| binding.inherited.master))
+                    .take(masters.roots.len()).any(|id| id == source)
+            };
+            let pages = masters.assignments.iter().filter(move |item| inherits(item.master))
+                .filter_map(|item| {
+                    let bounds = page_bounds(doc, item.page)?;
+                    let root = doc.get_object(item.master)?;
+                    let position = item.placement.guide_offset(root, bounds, self.kind.axis(), self.position)?;
+                    self.segment_at(bounds, position)
+                });
+            let descendants = masters.master_assignments.iter().filter(move |item| inherits(item.inherited.master))
+                .filter_map(|item| self.segment_in(surface_bounds(doc, ViewTarget::Artboard(item.target))?));
+            pages.chain(descendants)
+        })
+    }
+
+    fn segment_in(&self, [x, y, w, h]: [f32; 4]) -> Option<[[f32; 2]; 2]> {
+        self.segment_at([x, y, w, h], self.position)
+    }
+
+    fn segment_at(&self, [x, y, w, h]: [f32; 4], position: f32) -> Option<[[f32; 2]; 2]> {
         let axis = self.kind.axis();
-        if self.position < 0.0 || self.position > [w, h][axis] {
+        if position < 0.0 || position > [w, h][axis] {
             return None;
         }
         let mut segment = [[x, y], [x + w, y + h]];
-        segment[0][axis] += self.position;
+        segment[0][axis] += position;
         segment[1][axis] = segment[0][axis];
         Some(segment)
     }
@@ -135,11 +189,11 @@ impl Guides {
     }
 
     pub(crate) fn find_in_scope(
-        &self, id: Option<u64>, name: Option<&str>, page_id: Option<crate::document::PageId>,
+        &self, id: Option<u64>, name: Option<&str>, target: Option<ViewTarget>,
     ) -> Vec<&Guide> {
         let candidates: Vec<&Guide> = self.items.iter().filter(|guide| {
             id.is_none_or(|id| guide.id.0 == id)
-                && page_id.is_none_or(|page| guide.page_id == Some(page))
+                && target.is_none_or(|target| guide.surface() == Some(target))
         }).collect();
         let Some(name) = name.map(|n| n.trim().to_lowercase()) else { return candidates; };
         let named = |g: &&Guide| g.name.as_deref().map(str::trim).filter(|n| !n.is_empty())
@@ -164,10 +218,10 @@ impl Guides {
     }
 
     pub fn add(&mut self, kind: GuideKind, position: f32, name: Option<String>) -> Result<GuideId, GuideError> {
-        self.add_on_page(kind, position, name, None)
+        self.add_on_surface(kind, position, name, None)
     }
 
-    pub fn add_on_page(&mut self, kind: GuideKind, position: f32, name: Option<String>, page_id: Option<crate::document::PageId>) -> Result<GuideId, GuideError> {
+    pub fn add_on_surface(&mut self, kind: GuideKind, position: f32, name: Option<String>, target: Option<ViewTarget>) -> Result<GuideId, GuideError> {
         if !position.is_finite() {
             return Err(GuideError::InvalidParams);
         }
@@ -178,7 +232,14 @@ impl Guides {
             position,
             name: Some(name.filter(|value| !value.trim().is_empty()).unwrap_or_else(|| Self::default_name(id))),
             locked: false,
-            page_id,
+            page_id: target.and_then(|target| match target {
+                ViewTarget::Page(id) => Some(id),
+                ViewTarget::Artboard(_) => None,
+            }),
+            master_id: target.and_then(|target| match target {
+                ViewTarget::Artboard(id) => Some(id),
+                ViewTarget::Page(_) => None,
+            }),
         });
         self.next_guide_id = id.0 + 1;
         Ok(id)

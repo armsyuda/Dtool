@@ -512,14 +512,14 @@ fn stroke_row<R>(
     let width = stroke_available_width(ui);
     let caption_width = if width < 184.0 { 48.0 } else { dtool_design::size("panel.label_width") };
     if width < caption_width + ui.spacing().item_spacing.x + control_width {
-        let caption = ui.add(egui::Label::new(label).sense(egui::Sense::click()));
+        let caption = ui.add(dtool_design::numeric_caption(label));
         ui.horizontal(|ui| controls(ui, caption)).inner
     } else {
         ui.horizontal(|ui| {
             let caption = ui.allocate_ui_with_layout(
                 egui::vec2(caption_width, ui.spacing().interact_size.y),
                 egui::Layout::left_to_right(egui::Align::Center),
-                |ui| ui.add(egui::Label::new(label).truncate().sense(egui::Sense::click())),
+                |ui| ui.add(dtool_design::numeric_caption(label).truncate()),
             ).inner;
             controls(ui, caption)
         }).inner
@@ -663,9 +663,7 @@ fn update_arrow(patch: &mut Value, key: &str, current: &Option<Arrow>, change: O
 }
 
 fn stroke_button(ui: &mut egui::Ui, width: f32, selected: bool, label: &str) -> egui::Response {
-    let response = dtool_design::with_icon_selection(ui, |ui| {
-        ui.add_sized(egui::vec2(width, 20.0), egui::Button::new("").selected(selected))
-    });
+    let response = dtool_design::studio_icon_button(ui, egui::Button::new(""), width, selected);
     response.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, ui.is_enabled(), selected, label));
     ControlState::enabled(ui.is_enabled()).tooltip(label).decorate(response)
 }

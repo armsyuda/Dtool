@@ -60,7 +60,7 @@ fn replace_with_takes_the_larger_high_water() {
     let mut current = Guides::default();
     current.next_guide_id = 9;
     let mut restored = Guides::default();
-    restored.items.push(dtool_core::guides::Guide { id: GuideId(12), kind: dtool_core::guides::GuideKind::Horizontal, position: 1.0, name: None, locked: false, page_id: None });
+    restored.items.push(dtool_core::guides::Guide { id: GuideId(12), kind: dtool_core::guides::GuideKind::Horizontal, position: 1.0, name: None, locked: false, page_id: None, master_id: None });
     restored.next_guide_id = 3;
     let mut a = current.clone();
     a.replace_with(restored.clone());

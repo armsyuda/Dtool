@@ -168,7 +168,7 @@ fn layout_spread(session: &Session, args: &AlignArgs, ids: &[ObjectId]) -> Resul
             || crate::artboard::is_artboard(object)
             || super::masters::owns_source(doc, id)
             || doc.master_pages.source_of(id).is_some()
-            || doc.master_pages.assignments.iter().any(|assignment| assignment.group == Some(id))
+            || doc.master_pages.inherited_content().any(|assignment| assignment.group == Some(id))
         {
             return Err(CommandError::invalid_params());
         }

@@ -1068,6 +1068,13 @@ pub fn encode_preview_document(doc: &Document, img: &RgbaImage, opts: &ExportOpt
 #[path = "pdf_preview.rs"]
 mod pdf_preview;
 
+#[cfg(windows)]
+pub fn pdf_file_thumbnail(path: &std::path::Path, page_index: u32) -> Result<RgbaImage, ExportError> {
+    let bytes = std::fs::read(path).map_err(io_error)?;
+    let options = ExportOptions { width: Some(280), ..ExportOptions::default() };
+    pdf_preview::render_page(&bytes, page_index, 72.0, &options)
+}
+
 pub fn encode_pdf_preview(doc: &Document, opts: &ExportOptions) -> Result<EncodedPreview, ExportError> {
     encode_pdf_preview_at(doc, opts, 0)
 }
@@ -1374,6 +1381,13 @@ pub fn encode_output(doc: &Document, options: &ExportOptions, path: &std::path::
     let control = ExportControl::new();
     let encoded = match options.format {
         ExportFormat::Pdf => {
+            let fitted_size = match (&options.area, options.width, options.height) {
+                (ExportArea::Rect(_), Some(width), Some(height)) => {
+                    let points_per_pixel = 72.0 / doc.dpi.max(1.0);
+                    Some([width as f32 * points_per_pixel, height as f32 * points_per_pixel])
+                }
+                _ => None,
+            };
             let mut pdf = crate::pdf::PdfOptions {
                 colour_space: options.pdf_colour_space.unwrap_or_default().label().to_string(),
                 include_bleed: options.include_bleed,
@@ -1385,13 +1399,13 @@ pub fn encode_output(doc: &Document, options: &ExportOptions, path: &std::path::
                 outline_strokes: options.pdf_outline_strokes,
                 include_hyperlinks: options.pdf_include_hyperlinks,
                 include_bookmarks: options.pdf_include_bookmarks,
-                scale: pdf_scale(doc, options)?,
+                scale: pdf_scale(doc, options, fitted_size.is_some())?,
                 ..Default::default()
             };
             pdf.printers_marks = options.pdf_crop_marks || options.pdf_fold_marks;
             pdf.marks.crop = options.pdf_crop_marks;
             pdf.marks.fold = options.pdf_fold_marks;
-            crate::pdf::encode_pdf(doc, &request, &pdf, &control)
+            crate::pdf::encode_pdf(doc, &request, &pdf, &control, fitted_size)
         }
         ExportFormat::Svg => {
             let size = if options.width.is_some() || options.height.is_some() || options.scale.is_some() || options.dpi.is_some() {
@@ -1415,7 +1429,7 @@ pub fn encode_output(doc: &Document, options: &ExportOptions, path: &std::path::
     })
 }
 
-fn pdf_scale(doc: &Document, options: &ExportOptions) -> Result<f32, ExportError> {
+fn pdf_scale(doc: &Document, options: &ExportOptions, fit_frame: bool) -> Result<f32, ExportError> {
     if options.width.is_none() && options.height.is_none() {
         return Ok(options.scale.unwrap_or(1.0));
     }
@@ -1428,9 +1442,13 @@ fn pdf_scale(doc: &Document, options: &ExportOptions) -> Result<f32, ExportError
     };
     let (_, _, width, height) = region;
     let pixels_per_unit = document_unit_points(doc) * doc.dpi.max(1.0) / 72.0;
-    let factor = options.width.map(|value| value as f32 / (width * pixels_per_unit))
-        .or_else(|| options.height.map(|value| value as f32 / (height * pixels_per_unit)))
-        .unwrap_or(1.0);
+    let x = options.width.map(|value| value as f32 / (width * pixels_per_unit));
+    let y = options.height.map(|value| value as f32 / (height * pixels_per_unit));
+    let factor = if fit_frame {
+        x.zip(y).map(|(x, y)| x.min(y))
+    } else {
+        x.or(y)
+    }.unwrap_or(1.0);
     if factor.is_finite() && factor > 0.0 { Ok(factor) }
     else { Err(ExportError::InvalidArea("size".to_string())) }
 }

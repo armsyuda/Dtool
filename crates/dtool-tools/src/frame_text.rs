@@ -149,7 +149,7 @@ impl FrameTextTool {
                 && matches!(object.kind, ObjectKind::FrameText { .. })
                 && !has_next_frame(doc, object.id)
                 && {
-                    let port = out_port(object);
+                    let port = flow_frame_quad(doc, object)[2];
                     (point[0] - port[0]).abs() <= tolerance && (point[1] - port[1]).abs() <= tolerance
                 }
         }).map(|object| object.id)
@@ -162,9 +162,9 @@ impl FrameTextTool {
             !object.locked
                 && object.pickable
                 && object.id != from
-                && point_in_rect(object.pos, object.size, point)
                 && matches!(object.kind, ObjectKind::FrameText { story } if story != source)
                 && dtool_core::frame::chain_of(doc, object.id).is_none()
+                && point_in_frame(doc, object, point)
         }).map(|object| object.id)
     }
 
@@ -327,12 +327,12 @@ pub fn unlink_frame(session: &mut Session, id: ObjectId) -> CommandResult {
     session.run(&cmd)
 }
 
-pub fn out_port(object: &Object) -> [f32; 2] {
-    [object.pos[0] + object.size[0], object.pos[1] + object.size[1]]
-}
-
-pub fn in_port(object: &Object) -> [f32; 2] {
-    object.pos
+pub fn flow_frame_quad(doc: &dtool_core::Document, object: &Object) -> [[f32; 2]; 4] {
+    let mut quad = dtool_core::geometry::object_world_quad(object);
+    if let Some(points) = dtool_core::commands::warp::live_warp_points(doc, object.id, &quad) {
+        quad.copy_from_slice(&points);
+    }
+    quad
 }
 
 fn has_next_frame(doc: &dtool_core::Document, id: ObjectId) -> bool {
@@ -346,10 +346,20 @@ fn point_in_rect(pos: [f32; 2], size: [f32; 2], point: [f32; 2]) -> bool {
         && point[1] <= pos[1] + size[1]
 }
 
+fn point_in_frame(doc: &dtool_core::Document, object: &Object, point: [f32; 2]) -> bool {
+    let matrix = dtool_core::geometry::object_matrix(object);
+    let Some(inverse) = dtool_core::geometry::invert_matrix(&matrix) else {
+        return false;
+    };
+    let world = dtool_core::commands::warp::unwarp_point(doc, object.id, point);
+    let position = dtool_core::geometry::apply_matrix(&inverse, world);
+    point_in_rect(object.pos, object.size.map(f32::abs), position)
+}
+
 fn frame_at(doc: &dtool_core::Document, point: [f32; 2]) -> Option<&Object> {
     doc.objects.iter().rev().find(|object| {
         !object.locked && object.pickable && matches!(object.kind, ObjectKind::FrameText { .. })
-            && point_in_rect(object.pos, object.size, dtool_core::commands::warp::unwarp_point(doc, object.id, point))
+            && point_in_frame(doc, object, point)
     })
 }
 

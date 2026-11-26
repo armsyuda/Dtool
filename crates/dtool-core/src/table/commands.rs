@@ -455,6 +455,10 @@ fn edit_track(session: &mut Session, command: &Command, axis: TrackAxis, insert:
     };
     let index = *indices.first().ok_or_else(CommandError::invalid_params)?;
     let select = params.get("select").and_then(|value| value.as_bool()).unwrap_or(false);
+    let added = match (insert, params.get("count")) {
+        (true, Some(value)) => track_index(value)?.max(1),
+        _ => 1,
+    };
     let mut next = session.document.clone();
     if insert { reserve_table_story_ids(&mut next); }
     let object = next.objects.iter_mut().find(|object| object.id == id).ok_or_else(CommandError::not_found)?;
@@ -464,7 +468,7 @@ fn edit_track(session: &mut Session, command: &Command, axis: TrackAxis, insert:
     let (tracks, across) = axis.lengths(table);
     let at = index as usize;
     let count = tracks.len();
-    if (insert && (at > count || count >= MAX_ROWS_COLS as usize))
+    if (insert && (at > count || added as usize > (MAX_ROWS_COLS as usize).saturating_sub(count)))
         || (!insert && (indices.len() >= count || indices.iter().any(|i| *i as usize >= count)))
     {
         return Err(CommandError::out_of_range());
@@ -476,11 +480,13 @@ fn edit_track(session: &mut Session, command: &Command, axis: TrackAxis, insert:
         } else {
             axis.default_size()
         };
-        tracks.insert(at, size);
-        insert_cells(table, axis, index, across, &mut next.stories, &mut next.next_story_id)?;
+        tracks.splice(at..at, std::iter::repeat_n(size, added as usize));
+        let format_neighbor = params.get("inherit_format").and_then(Value::as_bool).unwrap_or(false)
+            .then_some(at.min(count.saturating_sub(1)) as u32);
+        insert_cells(table, axis, index, added, across, format_neighbor, &mut next.stories, &mut next.next_story_id)?;
         if matches!(axis, TrackAxis::Row) {
-            if at < table.header_rows as usize { table.header_rows += 1; }
-            else if at > count.saturating_sub(table.footer_rows as usize) { table.footer_rows += 1; }
+            if at < table.header_rows as usize { table.header_rows += added as u16; }
+            else if at > count.saturating_sub(table.footer_rows as usize) { table.footer_rows += added as u16; }
         }
     } else {
         let mut kept = Vec::with_capacity(count + 1);
@@ -529,7 +535,7 @@ fn edit_track(session: &mut Session, command: &Command, axis: TrackAxis, insert:
             if let Some(tracks) = tracks {
                 tracks.retain_mut(|value| {
                     if insert {
-                        *value += u32::from(*value >= index);
+                        if *value >= index { *value += added; }
                         true
                     } else if let Err(removed_before) = indices.binary_search(value) {
                         *value -= removed_before as u32;
@@ -547,31 +553,38 @@ fn edit_track(session: &mut Session, command: &Command, axis: TrackAxis, insert:
 }
 
 fn insert_cells(
-    table: &mut TableNode, axis: TrackAxis, index: u32, across: usize,
-    stories: &mut Vec<crate::Story>, next_story_id: &mut u64,
+    table: &mut TableNode, axis: TrackAxis, index: u32, added: u32, across: usize,
+    format_neighbor: Option<u32>, stories: &mut Vec<crate::Story>, next_story_id: &mut u64,
 ) -> Result<(), CommandError> {
     let mut anchors = vec![None; across];
+    let mut formats = vec![(default_cell_format(), default_cell_mask()); across];
     for cell in &mut table.cells {
         let (start, cross, span, cross_span) = axis.dimensions(cell);
+        if format_neighbor == Some(start) && let Some(format) = formats.get_mut(cross as usize) {
+            *format = (cell.local.clone(), cell.mask);
+        }
         let owns_merge = cell.merged_into.is_none() && start < index && index < start + span;
         let id = cell.id;
         let (position, length) = axis.coordinate(cell);
         if start >= index {
-            *position += 1;
+            *position += added;
         } else if owns_merge {
-            *length += 1;
+            *length += added;
             let end = cross.checked_add(cross_span).ok_or_else(CommandError::out_of_range)?;
             anchors.get_mut(cross as usize..end as usize).ok_or_else(CommandError::out_of_range)?.fill(Some(id));
         }
     }
-    table.cells.reserve(across);
-    for (cross, merged_into) in anchors.into_iter().enumerate() {
-        let (row, col) = match axis { TrackAxis::Row => (index, cross as u32), TrackAxis::Column => (cross as u32, index) };
-        table.cells.push(TableCell {
-            id: table.alloc.try_next()?, row, col, row_span: 1, col_span: 1, merged_into,
-            story: push_cell_story(stories, next_story_id, String::new()),
-            local: default_cell_format(), mask: default_cell_mask(),
-        });
+    table.cells.reserve(across * added as usize);
+    for track in index..index + added {
+        for (cross, merged_into) in anchors.iter().copied().enumerate() {
+            let (row, col) = match axis { TrackAxis::Row => (track, cross as u32), TrackAxis::Column => (cross as u32, track) };
+            let (local, mask) = formats[cross].clone();
+            table.cells.push(TableCell {
+                id: table.alloc.try_next()?, row, col, row_span: 1, col_span: 1, merged_into,
+                story: push_cell_story(stories, next_story_id, String::new()),
+                local, mask,
+            });
+        }
     }
     Ok(())
 }

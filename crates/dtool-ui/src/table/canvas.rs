@@ -72,6 +72,30 @@ pub(crate) fn begin_selected_cell_edit(session: &mut Session) -> Result<bool, Co
     Ok(true)
 }
 
+pub(crate) fn edit_at(session: &mut Session, scene: &Scene, point: [f32; 2], object: Option<ObjectId>) -> Result<bool, CommandError> {
+    let Some(target) = hit(session, scene, point).filter(|hit| object.is_none_or(|id| hit.table == id)) else { return Ok(false); };
+    text_input::finish_text_input(session);
+    session.run(&Command::with_params("ui.tool.set", json!({"id": "tool.table"})))?;
+    select_cells(session, target.table, &[target.cell])?;
+    edit_cell(session, target.table, target.story, caret_at(session, &target))?;
+    Ok(true)
+}
+
+pub(crate) fn step_edit_cell(session: &mut Session, backward: bool) -> Result<bool, CommandError> {
+    let Some((object, table, cell, _, _)) = active_text(session) else { return Ok(false); };
+    let mut cells: Vec<_> = table.cells.iter().filter(|entry| entry.merged_into.is_none()).collect();
+    cells.sort_unstable_by_key(|entry| (entry.row, entry.col));
+    let Some(index) = cells.iter().position(|entry| entry.id == cell) else { return Ok(false); };
+    let next = if backward { index.checked_sub(1) } else { Some(index + 1) };
+    if let Some(target) = next.and_then(|index| cells.get(index)) {
+        let (id, cell, story) = (object.id, target.id, target.story);
+        text_input::finish_text_input(session);
+        select_cells(session, id, &[cell])?;
+        edit_cell(session, id, story, 0)?;
+    }
+    Ok(true)
+}
+
 pub(crate) fn starts_cell_text(input: &egui::InputState) -> bool {
     input.events.iter().any(|event| match event {
         egui::Event::Text(text) => !text.is_empty(),
@@ -216,9 +240,66 @@ impl TrackDrag {
 }
 
 #[derive(Clone, Copy)]
+struct CountDrag {
+    table: ObjectId,
+    axis: usize,
+    start: f32,
+    version: u64,
+}
+
+impl CountDrag {
+    fn delta(self, doc: &dtool_core::Document, point: [f32; 2]) -> Option<i32> {
+        if doc.version != self.version { return None; }
+        let object = doc.get_object(self.table)?;
+        let ObjectKind::Table(table) = &object.kind else { return None; };
+        let local = object_local(object, point)?;
+        let tracks = if self.axis == 0 { &table.col_widths_pt } else { &table.row_heights_pt };
+        let step = *tracks.last()?;
+        let count = tracks.len() as i32;
+        let distance = local[self.axis] - self.start;
+        if distance >= 0.0 {
+            Some(((distance / step).round() as i32).min(dtool_core::table::commands::MAX_ROWS_COLS as i32 - count))
+        } else {
+            let mut removed = 0;
+            let mut offset = -distance;
+            for &length in tracks.iter().rev().take(tracks.len().saturating_sub(1)) {
+                if offset < length * 0.5 { break; }
+                offset -= length;
+                removed += 1;
+            }
+            Some(-removed)
+        }
+    }
+
+    fn command(self, session: &Session, delta: i32) -> Option<Command> {
+        let ObjectKind::Table(table) = &session.document.get_object(self.table)?.kind else { return None; };
+        let (axis, field, count) = if self.axis == 0 {
+            ("column", "col", table.col_widths_pt.len())
+        } else {
+            ("row", "row", table.row_heights_pt.len())
+        };
+        match delta {
+            1.. => {
+                let mut params = json!({"id": self.table.0, "count": delta, "match_neighbor": true, "inherit_format": true});
+                params[field] = json!(count);
+                Some(Command::with_params(&format!("table.{axis}.insert"), params))
+            }
+            ..=-1 => {
+                let mut params = json!({"id": self.table.0});
+                params[if self.axis == 0 { "cols" } else { "rows" }] =
+                    json!(((count - delta.unsigned_abs() as usize)..count).collect::<Vec<_>>());
+                Some(Command::with_params(&format!("table.{axis}.delete"), params))
+            }
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
 enum HeaderHit {
     Select(ObjectId, Header),
     Resize(TrackDrag),
+    Count(CountDrag),
 }
 
 fn object_local(object: &Object, point: [f32; 2]) -> Option<[f32; 2]> {
@@ -244,6 +325,10 @@ fn header_hit(session: &Session, view: &ViewState, point: [f32; 2]) -> Option<He
         return None;
     };
     let at = local[axis];
+    let end = *edges.last()?;
+    if (end..end + margin).contains(&at) {
+        return Some(HeaderHit::Count(CountDrag { table: object.id, axis, start: at, version: session.document.version }));
+    }
     let boundary = edges.partition_point(|edge| *edge < at);
     let near = [boundary.saturating_sub(1), boundary].into_iter()
         .filter(|index| *index > 0 && *index < edges.len())
@@ -290,6 +375,7 @@ pub(crate) fn menu_target(session: &Session, rect: Rect, pointer: Pos2) -> Optio
             let header = if drag.axis == 0 { Header::Column(drag.index) } else { Header::Row(drag.index) };
             (drag.table, header)
         }
+        HeaderHit::Count(_) => return None,
     };
     Some(TableMenu::Header(HeaderMenu { table, header, version: session.document.version }))
 }
@@ -449,6 +535,10 @@ fn paint_grid(ui: &Ui, response: &Response, session: &Session, view: &ViewState)
         let active = rows.binary_search(&(i as u32)).is_ok();
         header([-margin, edge[0], 0.0, edge[1]], (i + 1).to_string(), active);
     }
+    if let (Some(&right), Some(&bottom)) = (grid.col_x.last(), grid.row_y.last()) {
+        header([right, -margin, right + margin, 0.0], "↔".into(), false);
+        header([-margin, bottom, 0.0, bottom + margin], "↕".into(), false);
+    }
 }
 
 fn table_count(session: &Session, option: &str) -> u32 {
@@ -489,6 +579,7 @@ pub fn handle(ui: &mut Ui, response: &Response, session: &mut Session, scene: &S
     let anchor_id = response.id.with(("table-anchor", context));
     let header_anchor_id = response.id.with(("table-header-anchor", context));
     let resize_id = response.id.with(("table-resize", context));
+    let count_id = response.id.with(("table-count", context));
     type CellAnchor = (ObjectId, CellId);
     type TablePress = (Pos2, bool, Option<CellAnchor>);
     let keyboard = ui.memory(|memory| memory.focused().is_none_or(|id| id == response.id));
@@ -496,6 +587,7 @@ pub fn handle(ui: &mut Ui, response: &Response, session: &mut Session, scene: &S
         ui.data_mut(|data| {
             data.remove::<TablePress>(press_id);
             data.remove::<TrackDrag>(resize_id);
+            data.remove::<CountDrag>(count_id);
         });
         text_input::finish_text_input(session);
         ui.ctx().request_repaint();
@@ -508,6 +600,7 @@ pub fn handle(ui: &mut Ui, response: &Response, session: &mut Session, scene: &S
         let point = to_doc(pos);
         let cursor = match header_hit(session, view, point) {
             Some(HeaderHit::Resize(drag)) => resize_cursor(drag.axis),
+            Some(HeaderHit::Count(drag)) => resize_cursor(drag.axis),
             Some(HeaderHit::Select(..)) => egui::CursorIcon::PointingHand,
             None if hit(session, scene, point).is_some() => egui::CursorIcon::Text,
             None => egui::CursorIcon::Crosshair,
@@ -536,8 +629,70 @@ pub fn handle(ui: &mut Ui, response: &Response, session: &mut Session, scene: &S
         ui.data_mut(|data| {
             data.remove::<TrackDrag>(resize_id);
             data.insert_temp(press_id, (press, new_table, range));
-            if let Some(HeaderHit::Resize(drag)) = header { data.insert_temp(resize_id, drag); }
+            data.remove::<CountDrag>(count_id);
+            match header {
+                Some(HeaderHit::Resize(drag)) => { data.insert_temp(resize_id, drag); }
+                Some(HeaderHit::Count(drag)) => { data.insert_temp(count_id, drag); }
+                _ => {}
+            }
         });
+    }
+    if let Some(drag) = ui.data(|data| data.get_temp::<CountDrag>(count_id)) {
+        let pointer = released.or_else(|| ui.input(|input| input.pointer.latest_pos()));
+        let delta = pointer.and_then(|pos| drag.delta(&session.document, to_doc(pos))).unwrap_or(0);
+        if released.is_some() || !ui.input(|input| input.pointer.primary_down()) {
+            ui.data_mut(|data| {
+                data.remove::<CountDrag>(count_id);
+                data.remove::<TablePress>(press_id);
+            });
+            if let Some(command) = released.and_then(|_| drag.command(session, delta)) {
+                text_input::finish_text_input(session);
+                session.run(&command)?;
+                response.request_focus();
+            }
+        } else if let Some(pointer) = pointer {
+            ui.ctx().set_cursor_icon(resize_cursor(drag.axis));
+            let Some(object) = session.document.get_object(drag.table) else { return Ok(()); };
+            let ObjectKind::Table(table) = &object.kind else { return Ok(()); };
+            let (tracks, other) = if drag.axis == 0 {
+                (&table.col_widths_pt, &table.row_heights_pt)
+            } else {
+                (&table.row_heights_pt, &table.col_widths_pt)
+            };
+            let painter = ui.painter_at(response.rect);
+            let accent = dtool_design::color("accent");
+            let extent = tracks.iter().sum::<f32>();
+            let cross = other.iter().sum::<f32>();
+            let line = |along, start, end| {
+                [start, end].map(|value| {
+                    let local = if drag.axis == 0 { [along, value] } else { [value, along] };
+                    screen(response.rect, view, object_point(object, local))
+                })
+            };
+            let count = (tracks.len() as i32 + delta) as usize;
+            if delta > 0 && let Some(&step) = tracks.last() {
+                let ink = egui::Stroke::new(1.0, accent);
+                let end = extent + step * delta as f32;
+                for index in 0..=delta {
+                    painter.line_segment(line(extent + index as f32 * step, 0.0, cross), ink);
+                }
+                let mut cursor = 0.0;
+                for track in std::iter::once(&0.0).chain(other) {
+                    cursor += track;
+                    painter.line_segment([line(extent, cursor, cursor)[0], line(end, cursor, cursor)[0]], ink);
+                }
+            } else if delta < 0 {
+                let edge = tracks[..count].iter().sum();
+                let [a, b] = line(edge, 0.0, cross);
+                let [c, d] = line(extent, 0.0, cross);
+                painter.add(egui::Shape::convex_polygon(vec![a, b, d, c], accent.gamma_multiply(0.20), egui::Stroke::new(1.0, accent)));
+            }
+            painter.text(pointer + egui::vec2(10.0, 12.0), egui::Align2::LEFT_TOP,
+                count.to_string(), egui::FontId::proportional(12.0), accent);
+        }
+        paint_grid(ui, response, session, view);
+        ui.ctx().request_repaint();
+        return Ok(());
     }
     let press = ui.data(|data| data.get_temp::<TablePress>(press_id));
     if let Some(drag) = ui.data(|data| data.get_temp::<TrackDrag>(resize_id)) {

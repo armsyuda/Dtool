@@ -1,9 +1,10 @@
 use super::{click_select_command, screen};
 use crate::input::primary_button_positions;
-use dtool_core::commands::brush::{blend_for_object, linked_blend_path, BlendInfo, BlendLayout, BLEND_SPACING, MAX_BLEND_STEPS};
+use dtool_core::commands::brush::{blend_for_object, linked_blend_path, BlendInfo, BlendLayout, BLEND_SPACING, DEFAULT_BLEND_STEPS, MAX_BLEND_STEPS};
 use dtool_core::geometry::box_centre;
 use dtool_core::object::ObjectId;
 use dtool_core::Session;
+use dtool_design::{NumericEvent, NumericSpec, NumericValue};
 use dtool_protocol::Command;
 use egui::{Color32, Pos2, Rect, Response, Stroke, Ui};
 use serde_json::json;
@@ -21,8 +22,6 @@ pub(super) struct Blend {
     drag: Option<(ObjectId, [f32; 2], [f32; 2])>,
     spine_drag: Option<SpineDrag>,
     steps: u32,
-    spacing: u32,
-    displayed: Option<BlendInfo>,
     endpoint: Option<ObjectId>,
     picking_path: Option<u64>,
 }
@@ -32,9 +31,7 @@ impl Default for Blend {
         Self {
             drag: None,
             spine_drag: None,
-            steps: 3,
-            spacing: BlendLayout::default().spacing,
-            displayed: None,
+            steps: DEFAULT_BLEND_STEPS,
             endpoint: None,
             picking_path: None,
         }
@@ -203,31 +200,31 @@ impl Blend {
 
     pub(super) fn bar(&mut self, ui: &mut Ui, session: &Session) -> Option<Command> {
         let live = self.current(session);
-        if live != self.displayed {
-            if let Some(blend) = live {
-                self.steps = blend.steps;
-                self.spacing = blend.layout.unwrap_or_default().spacing;
-            }
-            self.displayed = live;
-        }
-        let mut action = None;
-        ui.horizontal(|ui| {
-            ui.label(dtool_strings::text("ctx.blend.steps"));
-            let edited = ui.add(egui::DragValue::new(&mut self.steps).range(1..=MAX_BLEND_STEPS));
-            let Some(blend) = live else { return };
+        let target = (session.document.instance, live.map(|blend| blend.id));
+        ui.push_id(target, |ui| ui.horizontal(|ui| {
+            let steps = live.map_or(self.steps, |blend| blend.steps);
+            let steps_spec = NumericSpec::new(dtool_strings::text("ctx.blend.steps"))
+                .range(1.0..=f64::from(MAX_BLEND_STEPS)).decimals(0).width(46.0)
+                .reset_to(f64::from(DEFAULT_BLEND_STEPS));
+            let steps_edit = blend_number(ui, "steps", steps, &steps_spec);
+            let Some(blend) = live else {
+                if let NumericEvent::Commit(value) = steps_edit { self.steps = value.round() as u32; }
+                return None;
+            };
+            self.steps = blend.steps;
             let mut changes = json!({"id": blend.id});
-            if (edited.lost_focus() || edited.drag_stopped()) && blend.steps != self.steps {
-                changes["steps"] = json!(self.steps);
-            }
+            let mut preview = changes.clone();
+            let mut scrubbing = matches!(steps_edit, NumericEvent::Preview(_) | NumericEvent::Cancel);
+            edit_blend_number(&mut changes, &mut preview, "steps", blend.steps, steps_edit);
             if let Some(layout) = blend.layout {
                 ui.separator();
-                ui.label(dtool_strings::text("ctx.blend.spacing"))
-                    .on_hover_text(dtool_strings::text("ctx.blend.spacing.help"));
-                let edited = ui.add(egui::DragValue::new(&mut self.spacing).range(BLEND_SPACING).suffix("%"))
-                    .on_hover_text(dtool_strings::text("ctx.blend.spacing.help"));
-                if (edited.lost_focus() || edited.drag_stopped()) && layout.spacing != self.spacing {
-                    changes["spacing"] = json!(self.spacing);
-                }
+                let spacing_spec = NumericSpec::new(dtool_strings::text("ctx.blend.spacing"))
+                    .range(f64::from(*BLEND_SPACING.start())..=f64::from(*BLEND_SPACING.end()))
+                    .suffix("%").decimals(0).width(54.0)
+                    .reset_to(f64::from(BlendLayout::default().spacing));
+                let spacing_edit = blend_number(ui, "spacing", layout.spacing, &spacing_spec);
+                scrubbing |= matches!(spacing_edit, NumericEvent::Preview(_) | NumericEvent::Cancel);
+                edit_blend_number(&mut changes, &mut preview, "spacing", layout.spacing, spacing_edit);
                 if layout.path_id.is_none()
                     && dtool_design::button(ui, dtool_strings::text("ctx.blend.straighten")).clicked()
                     && layout.spine != [0.0; 2]
@@ -248,13 +245,38 @@ impl Blend {
             }
             ui.separator();
             if dtool_design::button(ui, dtool_strings::text("ctx.blend.expand")).clicked() {
-                action = Some(Command::with_params("blend.expand", json!({"id":blend.id})));
+                Some(Command::with_params("blend.expand", json!({"id":blend.id})))
             } else if changes.as_object().is_some_and(|fields| fields.len() > 1) {
-                action = Some(Command::with_params("blend.update", changes));
+                Some(Command::with_params("blend.update", changes))
+            } else {
+                if preview.as_object().is_some_and(|fields| fields.len() > 1) {
+                    crate::app_canvas::stage_geometry_preview(ui, session, Command::with_params("blend.update", preview));
+                } else if scrubbing {
+                    crate::app_canvas::clear_geometry_preview(ui);
+                }
+                None
             }
-        });
-        action
+        }).inner).inner
     }
+}
+
+fn blend_number(ui: &mut Ui, key: &str, current: u32, spec: &NumericSpec<'_>) -> NumericEvent {
+    let id = ui.make_persistent_id(key);
+    let (field, event) = dtool_design::numeric_field(ui, id, NumericValue::Value(f64::from(current)), spec);
+    if key == "spacing" { field.on_hover_text(dtool_strings::text("ctx.blend.spacing.help")); }
+    if event != NumericEvent::None { return event; }
+    let state = dtool_design::numeric_state(ui.ctx(), id);
+    if state.scrubbing && state.previewed { NumericEvent::Preview(state.scrub) } else { NumericEvent::None }
+}
+
+fn edit_blend_number(changes: &mut serde_json::Value, preview: &mut serde_json::Value, key: &str, current: u32, event: NumericEvent) {
+    let (target, value) = match event {
+        NumericEvent::Commit(value) => (changes, value),
+        NumericEvent::Preview(value) => (preview, value),
+        _ => return,
+    };
+    let value = value.round() as u32;
+    if value != current { target[key] = json!(value); }
 }
 
 fn midpoint(from: [f32; 2], to: [f32; 2]) -> [f32; 2] {

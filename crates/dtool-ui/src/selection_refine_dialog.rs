@@ -152,7 +152,7 @@ impl RefineDialog {
                 (RefineBrush::Matte, "refine.matte"), (RefineBrush::Foreground, "refine.foreground"),
                 (RefineBrush::Background, "refine.background"), (RefineBrush::Feather, "selection.feather"),
             ] {
-                ui.selectable_value(&mut self.brush, brush, text(key));
+                dtool_design::choice_value(ui, &mut self.brush, brush, text(key));
             }
         });
         slider(ui, "selection.width", &mut self.brush_width, 1.0..=256.0, " px");

@@ -112,6 +112,8 @@ pub struct Page {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag_colour: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artboard_id: Option<ObjectId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fold: Option<crate::page_fold::PageFold>,
@@ -120,11 +122,14 @@ pub struct Page {
     /// Pages with the same group form a spread when consecutive in layout order.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spread_group: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spread_spine: Option<usize>,
 }
 
 impl Page {
     pub fn new(id: PageId, size: [f32; 2]) -> Self {
-        Self { id, size, name: String::new(), artboard_id: None, fold: None, column_guides: None, spread_group: None }
+        Self { id, size, name: String::new(), tag_colour: None, artboard_id: None, fold: None, column_guides: None,
+            spread_group: None, spread_spine: None }
     }
 }
 
@@ -185,6 +190,13 @@ pub struct Document {
     /// The page sequence was authored in Layout and survives visits to Vector.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub preserve_layout_page_order: bool,
+    /// Fixed page positions while automatic spread reflow is disabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fixed_spreads: Option<std::collections::BTreeMap<u64, crate::commands::pages::spreads::FixedSpread>>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub page_move_anchor_to_spine: bool,
+    #[serde(default, skip_serializing_if = "crate::commands::masters::PageMoveMasterPolicy::is_keep")]
+    pub page_move_master_policy: crate::commands::masters::PageMoveMasterPolicy,
     #[serde(default, skip_serializing_if = "crate::commands::masters::MasterPages::is_empty")]
     pub master_pages: crate::commands::masters::MasterPages,
     pub objects: Vec<Object>,
@@ -314,6 +326,9 @@ impl Document {
             artboard_backing_pages: Default::default(),
             layout_artboard_origins: None,
             preserve_layout_page_order: false,
+            fixed_spreads: None,
+            page_move_anchor_to_spine: false,
+            page_move_master_policy: Default::default(),
             master_pages: Default::default(),
             next_slice_id: 1,
             colour: crate::colour::DocColour::default(),

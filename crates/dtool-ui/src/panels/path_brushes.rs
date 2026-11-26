@@ -78,9 +78,9 @@ impl PathBrushesPanel {
             self.thumbnails.clear();
         }
         let previous_scope = self.shared;
-        ui.horizontal(|ui| {
-            ui.selectable_value(&mut self.shared, false, text("path_brushes.document"));
-            ui.selectable_value(&mut self.shared, true, text("path_brushes.shared"));
+        dtool_design::panel_columns(ui, 2, dtool_design::size("button.width"), |ui, index| {
+            let (shared, label) = [(false, "path_brushes.document"), (true, "path_brushes.shared")][index];
+            dtool_design::choice_value(ui, &mut self.shared, shared, text(label));
         });
         if previous_scope != self.shared {
             self.thumbnails.clear();
@@ -104,24 +104,25 @@ impl PathBrushesPanel {
             (Some(Some(TextureMode::Image)), "context.brush.tip.image"),
         ];
         let current_label = modes.iter().find(|(mode, _)| *mode == self.filter).map(|(_, label)| *label).unwrap_or("path_brushes.all");
-        egui::ComboBox::from_id_salt("path-brush-type").selected_text(text(current_label))
-            .width(ui.available_width()).show_ui(ui, |ui| {
+        let filter = egui::ComboBox::from_id_salt("path-brush-type").selected_text(text(current_label))
+            .width(ui.available_width()).truncate().show_ui(ui, |ui| {
                 for (mode, label) in modes {
                     ui.selectable_value(&mut self.filter, mode, text(label));
                 }
             });
+        dtool_design::tooltip(filter.response, text(current_label));
         let mut action = None;
-        ui.horizontal(|ui| {
-            let save = text("path_brushes.save");
-            let font = egui::TextStyle::Button.resolve(ui.style());
-            let reserve = ui.fonts_mut(|fonts| fonts.layout_no_wrap(save.to_string(), font, Color32::WHITE).size().x) + 26.0;
-            ui.add(egui::TextEdit::singleline(&mut self.name)
-                .desired_width((ui.available_width() - reserve).max(32.0))
-                .hint_text(text("path_brushes.name")));
-            let save_button = ui.add_enabled(!self.name.trim().is_empty(), egui::Button::new(save))
-                .on_hover_text(text("path_brushes.save_hint"));
-            if save_button.clicked() {
-                action = Some(Action::Save { name: self.name.clone(), replace: false });
+        dtool_design::panel_columns(ui, 2, dtool_design::size("button.width"), |ui, index| {
+            if index == 0 {
+                ui.add(egui::TextEdit::singleline(&mut self.name).desired_width(ui.available_width())
+                    .hint_text(text("path_brushes.name")));
+            } else {
+                let state = dtool_design::ControlState::enabled(!self.name.trim().is_empty());
+                let save = dtool_design::button_with(ui, text("path_brushes.save"), &state)
+                    .on_hover_text(text("path_brushes.save_hint"));
+                if save.clicked() {
+                    action = Some(Action::Save { name: self.name.clone(), replace: false });
+                }
             }
         });
         let needle = self.search.trim().to_lowercase();
@@ -144,15 +145,9 @@ impl PathBrushesPanel {
         }
         egui::ScrollArea::vertical().auto_shrink([false, false]).show_rows(ui, 51.0, rows.len(), |ui, range| {
             for &(preset, image) in &rows[range] {
-                let (rect, response) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 51.0), egui::Sense::click());
-                if active == Some(&preset.name) || response.hovered() {
-                    ui.painter().rect_filled(rect, 2.0, ui.visuals().widgets.hovered.weak_bg_fill);
-                }
-                let sample = Rect::from_min_max(rect.min + egui::vec2(5.0, 1.0), rect.max - egui::vec2(5.0, 20.0));
-                Self::preview(&mut self.thumbnails, ui, doc, preset, image, sample);
-                ui.painter().text(rect.left_bottom() + egui::vec2(6.0, -4.0), egui::Align2::LEFT_BOTTOM,
-                    format!("{} pt   {}", preset.stroke.width, preset.name),
-                    egui::TextStyle::Small.resolve(ui.style()), ui.visuals().text_color());
+                let response = dtool_design::preview_list_row(ui, egui::vec2(ui.available_width(), 51.0),
+                    active == Some(&preset.name), &preset.name, format!("{} pt · {}", preset.stroke.width, preset.name),
+                    |ui, sample| Self::preview(&mut self.thumbnails, ui, doc, preset, image, sample));
                 response.context_menu(|ui| {
                     if ui.button(text("path_brushes.update")).clicked() {
                         action = Some(Action::Save { name: preset.name.clone(), replace: true });

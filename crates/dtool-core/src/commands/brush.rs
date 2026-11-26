@@ -55,7 +55,7 @@ pub fn active_preset_is_shared(doc: &crate::Document) -> bool {
     doc.export_defaults.get(TIP_KEY).and_then(|tip| tip.get("shared")).and_then(serde_json::Value::as_bool) == Some(true)
 }
 mod live_blend;
-pub use live_blend::{blend_for_object, linked_blend_path, refresh_blends, BlendInfo, BlendLayout, BLEND_SPACING, MAX_BLEND_STEPS};
+pub use live_blend::{blend_for_object, linked_blend_path, refresh_blends, BlendInfo, BlendLayout, BLEND_SPACING, DEFAULT_BLEND_STEPS, MAX_BLEND_STEPS};
 pub(crate) use live_blend::refresh_saved_blend_appearance;
 
 fn ours(command: &Command) -> bool {
@@ -1090,7 +1090,7 @@ fn blend_create(session: &mut Session, command: &Command) -> CommandResult {
     if from == to || [from, to].iter().any(|id| live_blend::is_generated(&session.document, *id)) {
         return Err(CommandError::invalid_params());
     }
-    let steps = blend_steps(&command.params, 3)?;
+    let steps = blend_steps(&command.params, u64::from(DEFAULT_BLEND_STEPS))?;
     let id = next_blend_id(&session.document)?;
     let layout = blend_layout(&command.params, None)?;
     validate_blend_path(session, from, to, layout, &command.params)?;
@@ -1122,7 +1122,7 @@ fn blend_update(session: &mut Session, command: &Command) -> CommandResult {
         .ok_or_else(|| CommandError::new("NOT_FOUND"))?;
     let from = ObjectId(existing.get("from").and_then(|v| v.as_u64()).ok_or_else(CommandError::invalid_params)?);
     let to = ObjectId(existing.get("to").and_then(|v| v.as_u64()).ok_or_else(CommandError::invalid_params)?);
-    let steps = blend_steps(&command.params, existing.get("steps").and_then(|v| v.as_u64()).unwrap_or(3))?;
+    let steps = blend_steps(&command.params, existing.get("steps").and_then(|v| v.as_u64()).unwrap_or(u64::from(DEFAULT_BLEND_STEPS)))?;
     let live = existing["live"].as_bool() == Some(true);
     let old: Vec<u64> = existing
         .get("generated")

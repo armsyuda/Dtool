@@ -67,7 +67,24 @@ pub fn page_origin(doc: &Document, page_index: usize) -> [f32; 2] {
 }
 
 pub fn has_right_cover(doc: &Document) -> bool {
+    if doc.layout_artboard_origins.is_some() && let Some(fixed) = &doc.fixed_spreads {
+        return doc.pages.first().and_then(|page| page.spread_group)
+            .and_then(|group| fixed.get(&group)).is_some_and(|spread| spread.cover);
+    }
     doc.setup.facing_pages && doc.setup.start_on_right && doc.pages.len() > 1
+        && !(doc.layout_artboard_origins.is_some() && doc.pages[0].spread_group.is_some()
+            && doc.pages[0].spread_group == doc.pages[1].spread_group && doc.pages[0].spread_spine.is_some())
+}
+
+pub fn spread_spine(doc: &Document, spread: &std::ops::Range<usize>) -> usize {
+    if let Some(fixed) = crate::commands::pages::spreads::fixed_spread(doc, spread) {
+        return fixed.spine;
+    }
+    if spread.len() < 2 || doc.layout_artboard_origins.is_none() {
+        return 1;
+    }
+    doc.pages.get(spread.start).and_then(|page| page.spread_group.and(page.spread_spine))
+        .unwrap_or(1).clamp(1, spread.len() - 1)
 }
 
 /// Consecutive explicit spreads and automatic single or facing pages.
@@ -98,6 +115,18 @@ pub fn spread_ranges(doc: &Document) -> Vec<std::ops::Range<usize>> {
 
 /// Spread placement for the layout workspace, independent of the saved vector positions.
 pub(crate) fn flow_origins(doc: &Document) -> Vec<[f32; 2]> {
+    flow_geometry(doc).0
+}
+
+pub fn vacant_page_rects(doc: &Document) -> Vec<[f32; 4]> {
+    if doc.fixed_spreads.is_none() || doc.layout_artboard_origins.is_none() {
+        return Vec::new();
+    }
+    flow_geometry(doc).1
+}
+
+fn flow_geometry(doc: &Document) -> (Vec<[f32; 2]>, Vec<[f32; 4]>) {
+    use crate::commands::pages::spreads::{SpreadSlot, fixed_spread};
     let boards: std::collections::HashMap<_, _> = doc.objects.iter()
         .filter(|object| object.parent_id.is_none() && crate::artboard::is_artboard(object))
         .map(|object| (object.id, object)).collect();
@@ -111,38 +140,73 @@ pub(crate) fn flow_origins(doc: &Document) -> Vec<[f32; 2]> {
     let gap = crate::artboard::edit::default_spacing(doc);
     let vertical = doc.setup.arrange_vertical;
     let spreads = spread_ranges(doc);
-    let facing = doc.setup.facing_pages && sizes.len() > 1;
+    let facing = doc.setup.facing_pages && (sizes.len() > 1 || doc.fixed_spreads.is_some());
     let cover = has_right_cover(doc);
-    let cover_width = if cover { sizes[0][0] } else { 0.0 };
+    let cover_width = if cover {
+        spreads.first().and_then(|range| fixed_spread(doc, range))
+            .and_then(|fixed| fixed.slots.first()).map_or(sizes[0][0], |slot| slot.size[0])
+    } else { 0.0 };
+    let leading_width = |spread: &std::ops::Range<usize>| {
+        let spine = spread_spine(doc, spread);
+        if let Some(fixed) = fixed_spread(doc, spread) {
+            fixed.slots.iter().take(spine).map(|slot| slot.size[0]).sum()
+        } else {
+            sizes[spread.clone()].iter().take(spine).map(|size| size[0]).sum()
+        }
+    };
     let spine = if vertical && facing {
-        spreads.iter().skip(usize::from(cover)).map(|spread| sizes[spread.start][0])
+        spreads.iter().skip(usize::from(cover)).map(leading_width)
             .fold(cover_width, f32::max)
     } else {
         cover_width
     };
     let mut origins = Vec::with_capacity(sizes.len());
+    let mut vacancies = Vec::new();
     let mut cursor = 0.0;
     for spread in spreads.into_iter().filter(|spread| spread.end <= sizes.len()) {
         let start = spread.start;
-        let left = sizes[start];
-        let x = if cover && start == 0 {
+        let fixed = fixed_spread(doc, &spread);
+        let x = if cover && start == 0 && fixed.is_none() {
             spine
         } else if vertical && facing {
-            spine - left[0]
+            spine - leading_width(&spread)
         } else {
             0.0
         };
         let [mut x, y] = if vertical { [x, cursor] } else { [cursor + x, 0.0] };
         let mut height = 0.0_f32;
-        for [width, page_height] in &sizes[spread] {
-            origins.push([x, y]);
-            x += width;
-            height = height.max(*page_height);
+        if let Some(fixed) = fixed {
+            let mut actual = sizes[spread].iter();
+            for (index, SpreadSlot { page, size }) in fixed.slots.iter().enumerate() {
+                let [width, page_height] = if page.is_some() {
+                    origins.push([x, y]);
+                    *actual.next().unwrap_or(size)
+                } else {
+                    if !(fixed.cover && index == 0) {
+                        vacancies.push([x, y, size[0], size[1]]);
+                    }
+                    *size
+                };
+                x += width;
+                height = height.max(page_height);
+            }
+            // A document loaded from an older build may contain more page records than slots.
+            for [width, page_height] in actual {
+                origins.push([x, y]);
+                x += width;
+                height = height.max(*page_height);
+            }
+        } else {
+            for [width, page_height] in &sizes[spread] {
+                origins.push([x, y]);
+                x += width;
+                height = height.max(*page_height);
+            }
         }
         cursor = if vertical { cursor + height } else { x };
         cursor += gap;
     }
-    origins
+    (origins, vacancies)
 }
 
 pub fn page_rect(doc: &Document, index: usize) -> [f32; 4] {

@@ -835,7 +835,7 @@ pub fn apply_resize_canvas(
     let before = snapshot(&session.document, &session.guides)?;
     
     let offset = resize_canvas_with_offset(&mut session.document, w, h, anchor)?;
-    for guide in session.guides.items.iter_mut().filter(|guide| guide.page_id.is_none()) {
+    for guide in session.guides.items.iter_mut().filter(|guide| guide.surface().is_none()) {
         guide.position += offset[guide.kind.axis()];
     }
 

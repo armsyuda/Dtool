@@ -27,7 +27,7 @@ fn export(doc: &Document, name: &str, opts: &PdfOptions) -> std::path::PathBuf {
 }
 
 #[test]
-fn pdf_oi_own_print_pdf_with_output_intent_imports_back_with_a_warning() {
+fn pdf_oi_own_print_pdf_imports_the_embedded_output_profile() {
     let doc = document();
     let opts = PdfOptions { embed_icc: true, ..PdfOptions::default() };
     let path = export(&doc, "print", &opts);
@@ -37,13 +37,7 @@ fn pdf_oi_own_print_pdf_with_output_intent_imports_back_with_a_warning() {
     let _ = std::fs::remove_file(&path);
     let (back, report) = imported.expect("own print PDF imports without error");
     assert!(report.objects >= 1 && !back.objects.is_empty(), "{report:?}");
-    let intent: Vec<_> = report.losses.iter().filter(|l| l.kind == LossKind::Icc && l.detail.contains("output intent")).collect();
-    assert_eq!(intent.len(), 1, "output intent stays listed as a warning: {:?}", report.losses);
-    assert!(!intent[0].required, "output intent is a warning, not a required loss");
-    let value = dtool_io::import_commands::report_value(&report);
-    let listed = value["losses"].as_array().unwrap();
-    assert!(listed.iter().any(|l| l["required"] == false && l["detail"].as_str().is_some_and(|d| d.contains("output intent"))), "{value}");
-    assert!(report.losses.iter().filter(|l| l.required).all(|l| !l.detail.contains("output intent")), "{:?}", report.losses);
+    assert!(!report.losses.iter().any(|l| l.kind == LossKind::Icc), "{report:?}");
 }
 
 #[test]
@@ -53,5 +47,5 @@ fn pdf_oi_plain_pdf_has_no_output_intent_warning() {
     let imported = import_pdf(&path, &ImportOptions::default());
     let _ = std::fs::remove_file(&path);
     let (_, report) = imported.expect("plain PDF imports");
-    assert!(!report.losses.iter().any(|l| l.detail.contains("output intent")), "{:?}", report.losses);
+    assert!(!report.losses.iter().any(|l| l.kind == LossKind::Icc), "{report:?}");
 }

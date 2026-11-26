@@ -79,7 +79,7 @@ fn copy_index_references(source: &[IndexTopic], destination: &mut Vec<IndexTopic
 
 pub(crate) enum PageTransfer<'a> {
     Import { indices: &'a [usize], at: usize },
-    Duplicate { original: PageId, copy: PageId },
+    Duplicate(&'a HashMap<PageId, PageId>),
 }
 
 impl PageTransfer<'_> {
@@ -88,9 +88,9 @@ impl PageTransfer<'_> {
         match self {
             Self::Import { indices, at } => indices.binary_search(&index).ok()
                 .map(|copied| at + copied + 1),
-            Self::Duplicate { original, copy } => {
+            Self::Duplicate(pages) => {
                 let id = source.pages.get(index)?.id;
-                let target = if id == *original { *copy } else { id };
+                let target = pages.get(&id).copied().unwrap_or(id);
                 destination.pages.iter().position(|page| page.id == target).map(|index| index + 1)
             }
         }
@@ -172,7 +172,7 @@ pub(crate) fn copy(
         if ranges.is_empty() { continue; }
         let target = match &link.target {
             LinkTarget::Anchor(name) => anchors.get(name.as_str()).cloned()
-                .or_else(|| matches!(transfer, PageTransfer::Duplicate { .. }).then(|| name.clone()))
+                .or_else(|| matches!(transfer, PageTransfer::Duplicate(_)).then(|| name.clone()))
                 .map(LinkTarget::Anchor),
             LinkTarget::Page(number) => transfer.page_number(source, destination, *number).map(LinkTarget::Page),
             target => Some(target.clone()),

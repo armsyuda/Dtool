@@ -63,84 +63,114 @@ pub fn show_section_manager(
         return;
     }
     panel_frame(ui, |ui| {
+        let bounds = ui.ctx().content_rect();
+        let width = (bounds.width() - 60.0).clamp(164.0, 540.0);
+        ui.set_width(width);
         panel_header(ui, text("dialog.section_manager.title"));
         let sections = doc.sections();
         let page_count = doc.page_count();
-        for (i, sec) in sections.iter().enumerate() {
-            let end_page = sections.get(i + 1).map(|next| next.start_page.saturating_sub(1)).unwrap_or(page_count);
-            if ui
-                .selectable_label(state.selected_index == Some(i), format!("{}. {}  {}\u{2013}{}", i + 1, sec.name, sec.start_page, end_page))
-                .clicked()
-            {
-                state.selected_index = Some(i);
-            }
-            if state.selected_index != Some(i) {
-                continue;
-            }
-            ui.indent(("section_edit", i), |ui| {
-                let mut new_sec = sec.clone();
-                let mut page_val = new_sec.start_page as f64;
-                if number_field(ui, &mut page_val, text("section.start_on")).changed() && i > 0 {
-                    new_sec.start_page = page_val.max(1.0) as usize;
-                }
-                let mut continue_numbers = new_sec.restart_at.is_none();
-                if toggle(ui, &mut continue_numbers, text("section.continue")).changed() {
-                    new_sec.restart_at = if continue_numbers { None } else { Some(1) };
-                }
-                if let Some(restart) = new_sec.restart_at {
-                    let mut restart_val = restart as f64;
-                    if number_field(ui, &mut restart_val, text("section.restart")).changed() {
-                        new_sec.restart_at = Some(restart_val.max(1.0) as u32);
-                    }
-                }
-                ui.horizontal(|ui| {
-                    ui.label(text("section.name"));
-                    ui.text_edit_singleline(&mut new_sec.name);
-                });
-                ui.horizontal(|ui| {
-                    ui.label(text("section.prefix"));
-                    ui.text_edit_singleline(&mut new_sec.prefix);
-                });
-                ui.horizontal(|ui| {
-                    ui.label(text("section.number_style"));
-                    let labels: Vec<&str> = STYLES.iter().map(|(label, _)| *label).collect();
-                    let mut selected = STYLES.iter().position(|(_, s)| *s == new_sec.style).unwrap_or(0);
-                    if dropdown(ui, &format!("section_style_{}", i), &mut selected, &labels).changed() {
-                        new_sec.style = STYLES[selected].1.clone();
-                    }
-                });
-                toggle(ui, &mut new_sec.include_on_export, text("section.include_on_export"));
-                if new_sec != *sec {
-                    on_change(i, new_sec);
-                }
-                if i > 0 && button(ui, text("button.delete")).clicked() {
-                    on_delete(i);
-                    state.selected_index = None;
+        state.selected_index = state.selected_index.filter(|&index| index < sections.len())
+            .or_else(|| (!sections.is_empty()).then_some(0));
+        let height = (bounds.height() - 124.0).clamp(86.0, 450.0);
+        dtool_design::dialog_options_scroll(ui, "section.manager.options", height, |ui| {
+            let side_by_side = dtool_design::panel_column_count(ui, ui.available_width(), 2, 220.0) == 2;
+            let list_height = if side_by_side { height - 22.0 } else { (height * 0.45).clamp(42.0, 118.0) };
+            dtool_design::panel_columns(ui, 2, 220.0, |ui, column| {
+                if column == 0 {
+                    dtool_design::dialog_section(ui, |ui| {
+                        dtool_design::dialog_options_scroll(ui, "section.manager.list", list_height, |ui| {
+                            for (i, section) in sections.iter().enumerate() {
+                                let end_page = sections.get(i + 1).map_or(page_count, |next| next.start_page.saturating_sub(1));
+                                let caption = format!("{}. {}  {}\u{2013}{}", i + 1, section.name, section.start_page, end_page);
+                                let choice = egui::Button::selectable(state.selected_index == Some(i), &caption)
+                                    .min_size(egui::vec2(ui.available_width(), 0.0)).truncate();
+                                if dtool_design::with_icon_selection(ui, |ui| ui.add(choice).on_hover_text(&caption)).clicked() {
+                                    state.selected_index = Some(i);
+                                }
+                            }
+                        });
+                    });
+                } else if let Some(i) = state.selected_index {
+                    dtool_design::dialog_section(ui, |ui| {
+                        let mut section = sections[i].clone();
+                        let first = if i == 0 { 1 } else { sections[i - 1].start_page + 1 };
+                        let last = sections.get(i + 1).map_or(page_count, |next| next.start_page - 1);
+                        let mut start = section.start_page as f64;
+                        let spec = dtool_design::NumericSpec::new("").range(first as f64..=last.max(first) as f64)
+                            .decimals(0).width(96.0).enabled(i > 0);
+                        dtool_design::studio_row(ui, text("section.start_on"), |ui, label| {
+                            let id = ui.make_persistent_id(("section.start", i));
+                            if dtool_design::numeric_value(ui, id, &mut start, &spec).labelled_by(label).changed() {
+                                section.start_page = start as usize;
+                            }
+                        });
+
+                        let mut continue_numbers = section.restart_at.is_none();
+                        if toggle(ui, &mut continue_numbers, text("section.continue")).changed() {
+                            section.restart_at = if continue_numbers { None } else { Some(1) };
+                        }
+                        if let Some(number) = section.restart_at {
+                            let mut number = f64::from(number);
+                            let spec = dtool_design::NumericSpec::new("").range(1.0..=f64::from(u32::MAX))
+                                .decimals(0).width(96.0);
+                            dtool_design::studio_row(ui, text("section.restart"), |ui, label| {
+                                let id = ui.make_persistent_id(("section.restart", i));
+                                if dtool_design::numeric_value(ui, id, &mut number, &spec).labelled_by(label).changed() {
+                                    section.restart_at = Some(number as u32);
+                                }
+                            });
+                        }
+
+                        for (key, value) in [("section.name", &mut section.name), ("section.prefix", &mut section.prefix)] {
+                            dtool_design::studio_row(ui, text(key), |ui, label| {
+                                let id = ui.make_persistent_id((key, i));
+                                ui.add(egui::TextEdit::singleline(value).id(id)
+                                    .desired_width(ui.available_width())).labelled_by(label);
+                            });
+                        }
+                        dtool_design::studio_row(ui, text("section.number_style"), |ui, caption| {
+                            let options = STYLES.map(|(label, _)| label);
+                            let mut selected = STYLES.iter().position(|(_, style)| *style == section.style).unwrap_or(0);
+                            if dropdown(ui, &format!("section_style_{i}"), &mut selected, &options).labelled_by(caption).changed() {
+                                section.style = STYLES[selected].1.clone();
+                            }
+                        });
+                        toggle(ui, &mut section.include_on_export, text("section.include_on_export"));
+                        if section != sections[i] {
+                            on_change(i, section);
+                        }
+                    });
                 }
             });
-        }
+        });
         ui.horizontal(|ui| {
-            if button(ui, "+").clicked() {
-                let start = sections.last().map(|s| s.start_page + 1).unwrap_or(1);
-                if start <= page_count.max(1) {
-                    on_change(
-                        sections.len(),
-                        Section {
-                            start_page: start,
-                            name: String::new(),
-                            restart_at: None,
-                            prefix: String::new(),
-                            style: NumberStyle::Arabic,
-                            include_on_export: true,
-                        },
-                    );
+            let start_page = sections.last().map_or(1, |section| section.start_page + 1);
+            if dtool_design::button_with(ui, "+", &dtool_design::ControlState::enabled(start_page <= page_count)).clicked() {
+                on_change(sections.len(), Section {
+                    start_page,
+                    name: String::new(),
+                    restart_at: None,
+                    prefix: String::new(),
+                    style: NumberStyle::Arabic,
+                    include_on_export: true,
+                });
+                state.selected_index = Some(sections.len());
+            }
+            if dtool_design::button_with(ui, text("button.delete"),
+                &dtool_design::ControlState::enabled(state.selected_index.is_some_and(|index| index > 0))).clicked()
+                && let Some(index) = state.selected_index
+            {
+                on_delete(index);
+                state.selected_index = Some(index.saturating_sub(1));
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if button(ui, text("button.close")).clicked() {
+                    state.open = false;
                 }
-            }
-            if button(ui, text("button.close")).clicked() {
-                state.open = false;
-            }
+            });
         });
     });
+
 }
 
 #[derive(Default)]

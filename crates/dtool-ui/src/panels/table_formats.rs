@@ -189,78 +189,89 @@ impl ImportDialog {
     }
 
     fn show(&mut self, ctx: &egui::Context, session: &mut Session, existing_images: &mut images::Images) -> bool {
-        use crate::dialog_chrome::{show_modal, ClosePolicy, DialogResult};
+        use crate::dialog_chrome::{confirm_cancel_buttons, show_modal, ClosePolicy, DialogResult};
         let (event, close) = show_modal(ctx, "table-format-import", text("table.formats.import"), ClosePolicy::CancelOnly, false, |ui| {
-            ui.set_width(ui.ctx().content_rect().width().min(540.0) * 0.9);
-            ui.label(text("dialog.file.path"));
-            ui.horizontal(|ui| {
-                let path = ui.add(egui::TextEdit::singleline(&mut self.path).desired_width((ui.available_width() - 100.0).max(90.0)));
+            let bounds = ctx.content_rect();
+            ui.set_width((bounds.width() - 48.0).clamp(168.0, 492.0));
+            let top = ui.cursor().min.y;
+            if let Some(error) = &self.error { ui.label(text(error)); }
+            let status_height = ui.cursor().min.y - top;
+            let height = (bounds.height() - 96.0 - status_height).clamp(56.0, 480.0);
+            dtool_design::dialog_options_scroll(ui, "table.format.import.options", height, |ui| {
+                let caption = ui.label(text("dialog.file.path"));
+                let path = ui.add(egui::TextEdit::singleline(&mut self.path)
+                    .desired_width(ui.available_width())).labelled_by(caption.id);
                 if path.changed() {
                     self.rows.clear();
                     self.source = None;
                     self.images = Default::default();
                     self.error = None;
                 }
-                if button(ui, text("table.formats.browse")).clicked() {
-                    let picked = crate::dialogs::pick_file_path(text("table.formats.import"), text("dialog.file.filter.native"), "dtool", None);
-                    match picked {
-                        Ok(Some(path)) => { self.path = path.to_string_lossy().into_owned(); self.load(); }
-                        Ok(None) => {}
-                        Err(_) => self.error = Some("table.formats.browse_error".into()),
+                ui.horizontal_wrapped(|ui| {
+                    if button(ui, text("table.formats.browse")).clicked() {
+                        let picked = crate::dialogs::pick_file_path(text("table.formats.import"), text("dialog.file.filter.native"), "dtool", None);
+                        match picked {
+                            Ok(Some(path)) => { self.path = path.to_string_lossy().into_owned(); self.load(); }
+                            Ok(None) => {}
+                            Err(_) => self.error = Some("table.formats.browse_error".into()),
+                        }
                     }
-                }
-                if ui.add_enabled(!self.path.trim().is_empty(), egui::Button::new(text("table.formats.read"))).clicked() {
-                    self.load();
-                }
-            });
-            if self.source.is_some() && self.rows.is_empty() { ui.label(text("table.formats.empty")); }
-            let mut taken = std::collections::HashSet::new();
-            let duplicates: std::collections::HashSet<_> = self.rows.iter().filter(|row| row.selected)
-                .filter_map(|row| (!taken.insert(row.name.trim())).then_some(row.name.trim().to_string()))
-                .collect();
-            let mut valid = true;
-            egui::ScrollArea::vertical().max_height(300.0).show(ui, |ui| {
+                    if dtool_design::button_with(ui, text("table.formats.read"),
+                        &dtool_design::ControlState::enabled(!self.path.trim().is_empty())).clicked()
+                    {
+                        self.load();
+                    }
+                });
+                if self.source.is_some() && self.rows.is_empty() { ui.label(text("table.formats.empty")); }
+                let mut taken = std::collections::HashSet::new();
+                let duplicates: std::collections::HashSet<_> = self.rows.iter().filter(|row| row.selected)
+                    .filter_map(|row| (!taken.insert(row.name.trim())).then_some(row.name.trim().to_string()))
+                    .collect();
                 for row in &mut self.rows {
-                    ui.push_id(row.format.id.0, |ui| {
-                        ui.separator();
+                    ui.push_id(row.format.id.0, |ui| dtool_design::dialog_section(ui, |ui| {
                         dtool_design::toggle(ui, &mut row.selected, &row.format.name);
-                        ui.horizontal(|ui| {
-                            ui.label(text("table.formats.new_name"));
-                            ui.add_enabled(row.selected, egui::TextEdit::singleline(&mut row.name).desired_width(175.0));
+                        dtool_design::studio_row(ui, text("table.formats.new_name"), |ui, label| {
+                            ui.add_enabled(row.selected, egui::TextEdit::singleline(&mut row.name)
+                                .desired_width(ui.available_width())).labelled_by(label);
                         });
                         let name = row.name.trim();
                         let existing = session.document.table_formats.iter().find(|format| format.name == name);
                         if row.selected && (name.is_empty() || existing.is_some() || duplicates.contains(name)) {
-                            valid = false;
                             ui.label(text("table.formats.name_conflict"));
                         }
-                        ui.horizontal(|ui| {
-                            if let Some(source) = &self.source {
+                        if let Some(source) = &self.source {
+                            if let Some(format) = existing.filter(|_| row.selected) {
+                                dtool_design::panel_columns(ui, 2, 92.0, |ui, column| {
+                                    if column == 0 {
+                                        preview(ui, &row.format, "table.formats.incoming", source, &mut self.images);
+                                    } else {
+                                        preview(ui, format, "table.formats.existing", &session.document, existing_images);
+                                    }
+                                });
+                            } else {
                                 preview(ui, &row.format, "table.formats.incoming", source, &mut self.images);
                             }
-                            if row.selected {
-                                if let Some(format) = existing { preview(ui, format, "table.formats.existing", &session.document, existing_images); }
-                            }
-                        });
-                    });
+                        }
+                    }));
                 }
             });
-            if let Some(error) = &self.error { ui.label(text(error)); }
-            let mut done = false;
-            ui.horizontal(|ui| {
-                let enabled = valid && self.rows.iter().any(|row| row.selected);
-                if ui.add_enabled(enabled, egui::Button::new(text("button.ok"))).clicked() {
-                    let picks: Vec<_> = self.rows.iter().filter(|row| row.selected)
-                        .map(|row| json!({"id":row.format.id.0,"rename_to":row.name.trim()})).collect();
-                    let command = Command::with_params("style.table.import", json!({"path":self.path.trim(),"picks":picks}));
-                    match session.run(&command) {
-                        Ok(_) => done = true,
-                        Err(error) => self.error = Some(error.message_key),
-                    }
-                }
-                done |= button(ui, text("button.cancel")).clicked();
+            let mut names: std::collections::HashSet<_> = session.document.table_formats.iter()
+                .map(|format| format.name.as_str()).collect();
+            let selected = self.rows.iter().filter(|row| row.selected);
+            let enabled = selected.clone().next().is_some() && selected.clone().all(|row| {
+                let name = row.name.trim();
+                !name.is_empty() && names.insert(name)
             });
-            done
+            let (import, cancel) = confirm_cancel_buttons(ui, text("button.ok"), enabled);
+            if import {
+                let picks: Vec<_> = selected.map(|row| json!({"id":row.format.id.0,"rename_to":row.name.trim()})).collect();
+                let command = Command::with_params("style.table.import", json!({"path":self.path.trim(),"picks":picks}));
+                match session.run(&command) {
+                    Ok(_) => return true,
+                    Err(error) => self.error = Some(error.message_key),
+                }
+            }
+            cancel
         });
         close || event == DialogResult::Cancel
     }

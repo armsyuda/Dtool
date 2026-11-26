@@ -103,6 +103,7 @@ pub mod context_toolbar;
 pub mod fill_tool;
 
 pub mod ai;
+pub mod ai_image;
 
 pub mod doc_setup;
 

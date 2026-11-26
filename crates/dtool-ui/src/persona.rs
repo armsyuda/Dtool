@@ -114,8 +114,8 @@ pub fn persona_catalog()->Vec<PersonaDef>{
                 let persona = crate::presets::WorkspacePersona::from_key(&key).unwrap();
                 crate::presets::default_layout(persona).panels.into_iter().map(|p| p.id).collect()
             },
-            PersonaId::AiImage=>vec![PanelId::Layers,PanelId::AiLog,PanelId::History],
-            PersonaId::Slice=>vec![PanelId::Layers,PanelId::Other("export".into())],
+            PersonaId::AiImage=>vec![PanelId::Layers,PanelId::Other(crate::panels::AI_IMAGE_PANEL_KEY.into())],
+            PersonaId::Slice=>vec![PanelId::Layers,PanelId::Other(crate::panels::SLICES_PANEL_KEY.into())],
             _=>vec![PanelId::Layers,PanelId::Colour,PanelId::History,PanelId::Navigator],
         };
         let tools=registered_tools().into_iter().filter(|tool|match id{
@@ -174,6 +174,13 @@ fn initial(definition:&PersonaDef)->PersonaLayout {
     let mut layout=crate::presets::WorkspacePersona::from_key(&definition.entry.key())
         .filter(|p| matches!(p, crate::presets::WorkspacePersona::Vector | crate::presets::WorkspacePersona::Pixel | crate::presets::WorkspacePersona::Layout))
         .map(crate::presets::default_layout).unwrap_or_default();
+    let hidden_preset_panels: Vec<_> = layout.panels.iter()
+        .filter(|panel| panel.visible && !panel.id.is_named() && !definition.panels.contains(&panel.id))
+        .map(|panel| panel.id.clone())
+        .collect();
+    for panel in hidden_preset_panels {
+        layout.set_panel_visible(&panel, false);
+    }
     for panel in crate::panel_ids::NAMED_PANELS {layout.set_panel_visible(&panel,definition.panels.contains(&panel));}
     for panel in &definition.panels{layout.set_panel_visible(panel,true);}
     PersonaLayout{panels:definition.panels.clone(),dock:serde_json::to_value(layout).unwrap_or(serde_json::Value::Null),tool:tool("tool.move"),tools:definition.tools.clone(),toolbar:definition.toolbar.clone(),tool_columns:None,standalone_tools:Vec::new()}
@@ -433,7 +440,13 @@ impl<'de> Deserialize<'de> for CustomStudio {
     fn deserialize<D:serde::Deserializer<'de>>(deserializer:D)->Result<Self,D::Error>{
         let value=CustomStudioWire::deserialize(deserializer)?;
         let tools=value.tools.iter().filter_map(|id|tool(id)).collect();
-        let panels=value.panels.into_iter().filter(|panel|!matches!(panel,PanelId::Other(_))).collect();
+        let allowed = crate::panel_ids::studio_panel_ids();
+        let mut panels = Vec::new();
+        for id in value.panels.into_iter().map(crate::panel_ids::canonical) {
+            if allowed.contains(&id) && !panels.contains(&id) {
+                panels.push(id);
+            }
+        }
         Ok(Self{name:value.name,base:value.base,tools,toolbar:value.toolbar,panels})
     }
 }
@@ -492,7 +505,7 @@ pub fn import_studio(path:&std::path::Path)->Result<CustomStudio,CommandError>{
 }
 
 pub fn studio_def(studio:&CustomStudio)->PersonaDef{
-    PersonaDef{entry:PersonaEntry::Custom(studio.name.clone()),name_key:"studio.custom".into(),icon:"persona.vector".into(),tools:studio.tools.clone(),toolbar:studio.toolbar.clone(),panels:studio.panels.clone()}
+    PersonaDef{entry:PersonaEntry::Custom(studio.name.clone()),name_key:"studio.custom".into(),icon:format!("persona.{}", PersonaEntry::Builtin(studio.base).key()),tools:studio.tools.clone(),toolbar:studio.toolbar.clone(),panels:studio.panels.clone()}
 }
 
 fn initial_studio(studio: &CustomStudio) -> PersonaLayout {
@@ -501,9 +514,11 @@ fn initial_studio(studio: &CustomStudio) -> PersonaLayout {
     initial(&definition)
 }
 
+pub(crate) const STUDIO_BASES: [PersonaId; 3] = [PersonaId::Vector, PersonaId::Pixel, PersonaId::Layout];
+
 pub fn studio_base(base:Option<&str>)->Result<PersonaId,CommandError>{
     match PersonaEntry::parse(base.unwrap_or("vector"))?{
-        PersonaEntry::Builtin(PersonaId::Vector)=>Ok(PersonaId::Vector),
+        PersonaEntry::Builtin(id) if STUDIO_BASES.contains(&id) => Ok(id),
         PersonaEntry::Builtin(PersonaId::Liquify|PersonaId::Panorama|PersonaId::AstroStack|PersonaId::AiImage)|PersonaEntry::Extra(_)=>Err(CommandError::not_implemented()),
         _=>Err(CommandError::invalid_params()),
     }
@@ -523,14 +538,16 @@ pub fn studio_tools(base:PersonaId,names:&[serde_json::Value],skipped:&mut Vec<S
     tools
 }
 
-pub fn studio_panels(names:&[serde_json::Value],skipped:&mut Vec<String>)->Vec<PanelId>{
-    let mut panels=Vec::new();
-    for value in names{
-        let name=value.as_str().unwrap_or_default();
-        match PanelId::from_key(name){
-            PanelId::Other(_)=>skipped.push(name.to_string()),
-            panel if !panels.contains(&panel)=>panels.push(panel),
-            _=>{}
+pub fn studio_panels(names: &[serde_json::Value], skipped: &mut Vec<String>) -> Vec<PanelId> {
+    let allowed = crate::panel_ids::studio_panel_ids();
+    let mut panels = Vec::new();
+    for value in names {
+        let name = value.as_str().unwrap_or_default();
+        let panel = PanelId::from_key(name);
+        if !allowed.contains(&panel) {
+            skipped.push(name.to_string());
+        } else if !panels.contains(&panel) {
+            panels.push(panel);
         }
     }
     panels
@@ -612,7 +629,9 @@ pub fn delete_studio(state:&mut PersonaState,params:&serde_json::Value)->Result<
     let name=studio_name(params,"name")?;
     let index=state.custom_studios.iter().position(|studio|studio.name==name).ok_or_else(CommandError::not_found)?;
     let entry=PersonaEntry::Custom(name);
-    if state.active==entry{switch_persona(state,PersonaEntry::Builtin(PersonaId::Vector))?;}
+    if state.active == entry {
+        switch_persona(state, PersonaEntry::Builtin(state.custom_studios[index].base))?;
+    }
     state.custom_studios.remove(index);
     state.layouts.remove(&entry.key());
     Ok(())
@@ -694,7 +713,8 @@ fn shared_action(command:&Command)->CommandResult{
     } else if command.name=="ui.persona.list" {
         let mut items:Vec<serde_json::Value>=persona_catalog().iter().map(|def|serde_json::json!({"id":def.entry.key(),"name_key":def.name_key,"icon":def.icon,"status":persona_status(&def.entry)})).collect();
         for studio in &host.state.custom_studios{
-            items.push(serde_json::json!({"id":format!("custom:{}",studio.name),"name":studio.name,"name_key":"studio.custom","icon":"persona.vector","status":"supported"}));
+            let icon = format!("persona.{}", PersonaEntry::Builtin(studio.base).key());
+            items.push(serde_json::json!({"id":format!("custom:{}",studio.name),"name":studio.name,"name_key":"studio.custom","icon":icon,"status":"supported"}));
         }
         return Ok(serde_json::Value::Array(items));
     } else if matches!(command.name.as_str(),"ui.studio.create"|"ui.studio.update"|"ui.studio.rename"|"ui.studio.delete"|"ui.studio.import") {
@@ -710,6 +730,15 @@ fn shared_action(command:&Command)->CommandResult{
                 studio_base(Some(&PersonaEntry::Builtin(studio.base).key()))?;
                 let entry = PersonaEntry::Custom(studio.name.clone());
                 if let Some(previous) = candidate.custom_studios.iter_mut().find(|item| item.name == studio.name) {
+                    if command.params["replace_existing"].as_bool() == Some(false) {
+                        return Err(CommandError {
+                            code: "CONFLICT".into(),
+                            message_key: "studio.manager.import_conflict".into(),
+                        });
+                    }
+                    if previous.base != studio.base {
+                        return Err(CommandError::new("CONFLICT"));
+                    }
                     let layout = if candidate.active == entry {
                         Some(&mut candidate.live)
                     } else {

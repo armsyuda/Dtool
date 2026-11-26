@@ -393,7 +393,7 @@ impl TextBarState {
         } else {
             ui.data_mut(|data| data.remove::<bool>(popup_state));
             if let Some((model, stamp)) = trailing {
-                trailing_command = context_bar::show_toolbar_options(ui, model, stamp, icons, true);
+                trailing_command = context_bar::show_toolbar_options(ui, model, stamp, icons, true, None);
             }
         }
         (out, hover, trailing_command)

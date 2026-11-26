@@ -300,7 +300,7 @@ impl DocSetup {
 
         pages::preserve_content(doc, &mut next);
         let new_rects = crate::scene::page_rects(&next);
-        let inherited: HashSet<_> = doc.master_pages.assignments.iter()
+        let inherited: HashSet<_> = doc.master_pages.inherited_content()
             .flat_map(|item| item.group.into_iter().chain(item.links.iter().map(|&(_, id)| id)))
             .collect();
         for object in &mut next.objects {
@@ -423,6 +423,7 @@ impl DocSetup {
                     flow[index][axis] + old[axis] - transformed
                 })
             });
+            crate::commands::masters::resize_layer_references(&before, doc, curve_scale);
             crate::commands::masters::lock_positions(doc);
         }
         Ok(())

@@ -170,6 +170,16 @@ fn table_status(ui: &mut egui::Ui, width: f32, status: ResourceStatus) {
     table_label(ui, width, label, value);
 }
 
+fn resource_path_field(ui: &mut egui::Ui, label: &str, value: &mut String) {
+    ui.horizontal(|ui| {
+        ui.label(label);
+        ui.add(
+            egui::TextEdit::singleline(value)
+                .desired_width(156.0_f32.min(ui.available_width())),
+        );
+    });
+}
+
 impl ResourceManagerDialog {
     pub fn new()->Self {Self::default()}
 
@@ -364,29 +374,28 @@ impl ResourceManagerDialog {
         let selected: Vec<_> = rows.iter().filter(|row| self.selected.contains(&row.id.0)).collect();
         let single = match selected.as_slice() { [row] => Some(*row), _ => None };
         if let Some(row) = single {
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing.x = 12.0;
-                let placed_size = placed_size_label(row.placed_size);
-                for (key, value) in [
-                    (TYPE_KEY, format_label(row.format).to_owned()),
-                    ("rm.original_size", format!("{} × {}", row.original_size[0], row.original_size[1])),
-                    ("rm.original_dpi", format!("{:.1}", row.original_dpi)),
-                    ("rm.placed_size", if placed_size.is_empty() { "—".into() } else { placed_size }),
-                    ("rm.placed_dpi", row.placed_size.map_or_else(|| "—".into(), |_| format!("{:.1}", row.placed_dpi))),
-                    ("rm.colour_space", row.colour_space.clone()),
-                ] {
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 4.0;
+            let placed_size = placed_size_label(row.placed_size);
+            let details = [
+                (TYPE_KEY, format_label(row.format).to_owned()),
+                ("rm.original_size", format!("{} × {}", row.original_size[0], row.original_size[1])),
+                ("rm.original_dpi", format!("{:.1}", row.original_dpi)),
+                ("rm.placed_size", if placed_size.is_empty() { "—".into() } else { placed_size }),
+                ("rm.placed_dpi", row.placed_size.map_or_else(|| "—".into(), |_| format!("{:.1}", row.placed_dpi))),
+                ("rm.colour_space", row.colour_space.clone()),
+            ];
+            dtool_design::dialog_section(ui, |ui| {
+                dtool_design::panel_columns(ui, details.len(), 154.0, |ui, index| {
+                    let (key, value) = &details[index];
+                    ui.horizontal_wrapped(|ui| {
                         ui.weak(text(key));
                         ui.label(value);
                     });
-                }
+                });
             });
-            ui.separator();
         }
         let available = |row: &ResourceRow| matches!(row.status, ResourceStatus::Linked | ResourceStatus::Modified);
         let dir=dir_param(doc_dir);
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             if ui.add_enabled(selected.iter().any(|row| !row.uses.is_empty()), egui::Button::new(text("rm.locate"))).clicked() {
                 pending.locate = Some(selected.iter().flat_map(|row| row.uses.iter().copied()).collect());
             }
@@ -404,9 +413,9 @@ impl ResourceManagerDialog {
                 }
             });
         });
+        ui.separator();
         ui.horizontal_wrapped(|ui| {
-            ui.label(text("rm.folder"));
-            ui.add(egui::TextEdit::singleline(&mut self.folder).desired_width(130.0));
+            resource_path_field(ui, text("rm.folder"), &mut self.folder);
             #[cfg(windows)]
             if dtool_design::button(ui, text("pref.browse")).on_hover_text(text("rm.select_destination")).clicked() {
                 pending.browse_folder = Some(FolderField::Destination);
@@ -429,9 +438,7 @@ impl ResourceManagerDialog {
         });
         ui.horizontal_wrapped(|ui| {
             let multiple = selected.len() > 1;
-            ui.label(text(if multiple { "rm.folder" } else { "rm.path" }));
-            ui.add(egui::TextEdit::singleline(&mut self.relink_path).desired_width(180.0)
-                .hint_text(text(if multiple { "rm.select_folder" } else { "rm.path" })));
+            resource_path_field(ui, text(if multiple { "rm.folder" } else { "rm.path" }), &mut self.relink_path);
             #[cfg(windows)]
             if multiple && dtool_design::button(ui, text("pref.browse")).on_hover_text(text("rm.select_folder")).clicked() {
                 pending.browse_folder = Some(FolderField::Relink);
@@ -479,7 +486,7 @@ impl ResourceManagerDialog {
         }));
         ui.add_space(dtool_design::space("md"));
         let selected=self.selected_text.and_then(|story|rows.iter().find(|row|row.story.0==story));
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.add_enabled_ui(selected.is_some(),|ui| {
                 let locate = dtool_design::button(ui,text("rm.locate")).clicked();
                 let update = dtool_design::button(ui,text("rm.update")).clicked();

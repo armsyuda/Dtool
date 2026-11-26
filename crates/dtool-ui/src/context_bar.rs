@@ -16,7 +16,7 @@ pub const OPTION_SET: &str = "ui.context_option.set";
 #[derive(Debug, Clone, PartialEq)]
 pub enum ContextControl {
     Toggle(bool),
-    Number { value: f64, min: f64, max: f64, step: f64 },
+    Number { value: f64, min: f64, max: f64, step: f64, integer: bool, default: Option<f64> },
     Choice { value: String, values: Vec<String> },
     Text(String),
     Action { command: String },
@@ -85,6 +85,8 @@ fn parse_item(option: &Value) -> Option<ContextItem> {
             min: number("min", f64::MIN),
             max: number("max", f64::MAX),
             step: number("step", 1.0),
+            integer: value.is_u64(),
+            default: None,
         },
         "choice" => ContextControl::Choice {
             value: value.as_str().unwrap_or_default().to_string(),
@@ -129,7 +131,7 @@ impl ContextBarModel {
     }
 
     pub fn stamped(session: &Session, context: ContextId) -> Self {
-        Self::from_stamped_query(&dtool_core::commands::context_toolbar::query_with_state(session, &session.active_tool), context, session.generation)
+        Self { stamp: Some((context, session.generation)), ..Self::current(session) }
     }
 
     pub fn is_current(&self, current: Option<Stamp>) -> bool {
@@ -165,11 +167,33 @@ impl ContextBarModel {
     }
 
     pub fn load(session: &mut Session) -> Result<Self, CommandError> {
-        session.run_named(QUERY, json!({})).map(|result| Self::from_query(&result))
+        session.run_named(QUERY, json!({})).map(|result| Self::from_query(&result).with_shape_defaults(session))
     }
 
     pub fn current(session: &Session) -> Self {
         Self::from_query(&dtool_core::commands::context_toolbar::query_with_state(session, &session.active_tool))
+            .with_shape_defaults(session)
+    }
+
+    fn with_shape_defaults(mut self, session: &Session) -> Self {
+        let [id] = session.selection.ids.as_slice() else { return self };
+        let Some(shape) = session.document.get_object(*id).and_then(|object| object.shape.as_ref()) else {
+            return self;
+        };
+        if !self.items.iter().any(is_shape_recipe_item) {
+            return self;
+        }
+        use dtool_tools::shape_tool::{ShapeTool, shape_kind_key};
+        let initial = ShapeTool { kind: shape.kind }.create([0.0; 2], shape.size);
+        let defaults = &initial.params[shape_kind_key(shape.kind)];
+        for item in self.items.iter_mut().filter(|item| is_shape_recipe_item(item)) {
+            if let ContextControl::Number { default, .. } = &mut item.control
+                && let Some((_, field)) = item.id.rsplit_once('.')
+            {
+                *default = defaults[field].as_f64();
+            }
+        }
+        self
     }
 
     pub fn ids(&self) -> Vec<&str> {
@@ -430,6 +454,12 @@ fn show_zoom_level(ui: &mut egui::Ui, item: &ContextItem, current: f64, range: s
     picked.map(|value| ContextEdit { id: item.id.clone(), value: json!(value) })
 }
 
+const SHAPE_NUMBER_PREVIEW: &str = "dtool.context.shape_number_preview";
+
+fn is_shape_recipe_item(item: &ContextItem) -> bool {
+    item.id.starts_with("shape.recipe.")
+}
+
 fn show_control(ui: &mut egui::Ui, item: &ContextItem) -> Option<ContextEdit> {
     let label = text(&item.key);
     let edit = |value: Value| Some(ContextEdit { id: item.id.clone(), value });
@@ -440,7 +470,33 @@ fn show_control(ui: &mut egui::Ui, item: &ContextItem) -> Option<ContextEdit> {
                 return edit(json!(value));
             }
         }
-        ContextControl::Number { value, min, max, step } => {
+        ContextControl::Number { value, min, max, step, integer, default } if is_shape_recipe_item(item) => {
+            use dtool_design::{NumericEvent, NumericSpec, NumericValue};
+            let id = ui.make_persistent_id(&item.id);
+            let mut spec = NumericSpec::new(label).range(*min..=*max).step(*step)
+                .width(52.0).enabled(ui.is_enabled());
+            if *integer { spec = spec.decimals(0); }
+            if let Some(default) = default { spec = spec.reset_to(*default); }
+            if ui.is_sizing_pass() {
+                ui.horizontal(|ui| {
+                    ui.label(label);
+                    ui.allocate_space(egui::vec2(52.0, ui.spacing().interact_size.y));
+                });
+                return None;
+            }
+            let (_, event) = dtool_design::numeric_field(ui, id, NumericValue::Value(*value), &spec);
+            if let NumericEvent::Commit(value) = event {
+                return edit(json!(value));
+            }
+            let state = dtool_design::numeric_state(ui.ctx(), id);
+            if state.scrubbing && state.previewed {
+                ui.data_mut(|data| data.insert_temp(
+                    egui::Id::unique(SHAPE_NUMBER_PREVIEW),
+                    Some(ContextEdit { id: item.id.clone(), value: json!(state.scrub) }),
+                ));
+            }
+        }
+        ContextControl::Number { value, min, max, step, .. } => {
             if item.id == "zoom.level" {
                 return show_zoom_level(ui, item, *value, *min..=*max, *step);
             }
@@ -466,8 +522,6 @@ fn show_control(ui: &mut egui::Ui, item: &ContextItem) -> Option<ContextEdit> {
                 || (item.id == "brush.width" && item.key == "context.vector_brush.width")
             {
                 field.suffix(" pt").max_decimals(2).clamp_existing_to_range(false).update_while_editing(false)
-            } else if item.id.starts_with("shape.recipe.") {
-                field.clamp_existing_to_range(false).update_while_editing(false)
             } else {
                 field
             };
@@ -627,7 +681,10 @@ pub(crate) fn show_toolbar_options(
     current: Option<Stamp>,
     icons: &mut IconCache,
     follows_tools: bool,
+    session: Option<&Session>,
 ) -> Option<Command> {
+    let preview_id = egui::Id::unique(SHAPE_NUMBER_PREVIEW);
+    ui.data_mut(|data| data.remove::<Option<ContextEdit>>(preview_id));
     let available = ui.available_width();
     let spacing = ui.spacing().item_spacing.x;
     // Measure the same widgets without advancing the live toolbar or accepting input.
@@ -658,7 +715,7 @@ pub(crate) fn show_toolbar_options(
         if (index == 0 && follows_tools) || (index > 0 && starts_option_group(item)) {
             ui.separator();
         }
-        if let Some(edit) = ui.push_id(&item.id, |ui| show_item_with_icons(ui, item, icons)).inner {
+        if let Some(edit) = ui.push_id((current, &item.id), |ui| show_item_with_icons(ui, item, icons)).inner {
             picked = Some(edit);
         }
     }
@@ -672,11 +729,17 @@ pub(crate) fn show_toolbar_options(
                     .max_height((ui.ctx().content_rect().height() * 0.55).min(360.0))
                     .show(ui, |ui| {
                         ui.set_min_width(148.0);
-                        if let Some(edit) = show_menu_items(ui, &model.items[visible..]) {
+                        if let Some(edit) = ui.push_id(current, |ui| show_menu_items(ui, &model.items[visible..])).inner {
                             picked = Some(edit);
                         }
                     });
             });
+    }
+    let preview = ui.data_mut(|data| data.remove_temp::<Option<ContextEdit>>(preview_id)).flatten();
+    if let Some(session) = session
+        && let Some(command) = preview.and_then(|edit| model.bind(&edit, current))
+    {
+        crate::app_canvas::stage_geometry_preview(ui, session, command);
     }
     picked.and_then(|edit| model.bind(&edit, current))
 }

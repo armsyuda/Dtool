@@ -6,7 +6,7 @@ use dtool_design::{button, color, dropdown, number_field, panel_header, slider, 
 use dtool_strings::{format, text};
 use egui::Ui;
 
-use crate::settings::{UiSettings, UiStyle};
+use crate::settings::UiSettings;
 use crate::shortcuts_page::ShortcutsPage;
 
 pub const TAB_ORDER_SOURCE: &str = "dlg_Settings_PrefGeneralPage.txt";
@@ -748,15 +748,6 @@ impl PrefsDialog {
             }
             if tab(ui, settings.high_contrast, text("settings.ui_contrast.high")).clicked() {
                 settings.high_contrast = true;
-            }
-        });
-        ui.horizontal(|ui| {
-            ui.label(text("settings.ui_style"));
-            if tab(ui, settings.ui_style == UiStyle::Dark, text("settings.ui_style.dark")).clicked() {
-                settings.ui_style = UiStyle::Dark;
-            }
-            if tab(ui, settings.ui_style == UiStyle::Light, text("settings.ui_style.light")).clicked() {
-                settings.ui_style = UiStyle::Light;
             }
         });
         ui.horizontal(|ui| {

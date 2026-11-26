@@ -374,6 +374,15 @@ impl Layout {
         }
     }
 
+    pub(crate) fn is_panel_active(&self, id: &PanelId) -> bool {
+        if self.panel_state(id).is_some_and(|state| state.floated) { return true; }
+        let Some((_, tree, tile)) = self.panel_location(id) else { return false; };
+        match tree.tiles.parent_of(tile).and_then(|parent| tree.tiles.get(parent)) {
+            Some(Tile::Container(egui_tiles::Container::Tabs(tabs))) => tabs.active == Some(tile),
+            _ => true,
+        }
+    }
+
     pub fn has_visible_docked_panels(&self, side: DockSide) -> bool {
         self.columns.is_shown(side) && self.panels.iter().any(|panel| {
             panel.visible && !panel.floated && self.side_of(&panel.id) == Some(side)
@@ -604,13 +613,32 @@ impl Layout {
     }
 
     pub(crate) fn redock_as_group(&mut self, id: &PanelId, side: DockSide, adjacent: Option<(TileId, bool)>) {
-        let Some(state) = self.panel_state(id) else { return };
-        if !state.visible { return; }
-        let mut tree = self.tree(side).unwrap_or_else(|| side_tree(side, Vec::new()));
         let direction = match side {
             DockSide::Left | DockSide::Right => egui_tiles::LinearDir::Vertical,
             DockSide::Top | DockSide::Bottom => egui_tiles::LinearDir::Horizontal,
         };
+        self.redock_split(id, side, adjacent, direction);
+    }
+
+    pub(crate) fn redock_as_column(&mut self, id: &PanelId, side: DockSide, mut group: TileId, before: bool) -> bool {
+        let Some(tree) = self.tree(side) else { return false; };
+        while let Some(parent) = tree.tiles.parent_of(group) {
+            if matches!(tree.tiles.get(parent), Some(Tile::Container(egui_tiles::Container::Linear(linear)))
+                if linear.dir == egui_tiles::LinearDir::Horizontal)
+            {
+                break;
+            }
+            group = parent;
+        }
+        self.redock_split(id, side, Some((group, before)), egui_tiles::LinearDir::Horizontal)
+    }
+
+    fn redock_split(
+        &mut self, id: &PanelId, side: DockSide, adjacent: Option<(TileId, bool)>, direction: egui_tiles::LinearDir,
+    ) -> bool {
+        let Some(state) = self.panel_state(id) else { return false; };
+        if !state.visible { return false; }
+        let mut tree = self.tree(side).unwrap_or_else(|| side_tree(side, Vec::new()));
         let source_side = self.side_of(id);
         let source = pane_tile(&tree, id);
         if let Some((target, _)) = adjacent
@@ -618,7 +646,7 @@ impl Layout {
             && source.is_some_and(|source| tabs.children.as_slice() == [source])
         {
             self.redock_panel(id);
-            return;
+            return false;
         }
 
         if let Some(source) = source {
@@ -665,6 +693,7 @@ impl Layout {
         }
         self.store_tree(side, &tree);
         self.redock_panel(id);
+        true
     }
 
     pub fn floating_panels(&self) -> Vec<PanelState> {

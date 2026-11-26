@@ -106,8 +106,7 @@ pub fn tab_row(shell: &mut AppShell, ui: &mut egui::Ui) {
     if shell.workspace.contexts().is_empty() {
         return;
     }
-    let shade = if ui.visuals().dark_mode { 0.36 } else { 0.06 };
-    let fill = dtool_design::theme::surface(ui.ctx(), "tab_row").lerp_to_gamma(egui::Color32::BLACK, shade);
+    let fill = dtool_design::theme::surface(ui.ctx(), "tab_row");
     let tab_height = dtool_design::size("bar.tab.height");
     egui::Panel::top("dtool.shell.document_tabs")
         .exact_size(tab_height)

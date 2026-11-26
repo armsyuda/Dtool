@@ -194,6 +194,15 @@ pub fn surface(ctx: &egui::Context, key: &str) -> Color32 {
     crate::tokens::color(key)
 }
 
+/// Keep tooltip text within the viewport, including the frame and its margins.
+pub fn fit_tooltips_to_viewport(ctx: &egui::Context) {
+    let viewport_width = (ctx.content_rect().width() - 24.0).max(1.0);
+    let width = egui::Spacing::default().tooltip_width.min(viewport_width);
+    if ctx.global_style().spacing.tooltip_width != width {
+        ctx.global_style_mut(|style| style.spacing.tooltip_width = width);
+    }
+}
+
 pub fn apply(ctx: &egui::Context, palette: &Palette) {
     set_style(palette.style);
     ctx.data_mut(|data| data.insert_temp(egui::Id::NULL, palette.clone()));
@@ -218,10 +227,14 @@ pub fn apply(ctx: &egui::Context, palette: &Palette) {
     visuals.window_corner_radius = egui::CornerRadius::same(crate::tokens::radius("md") as u8);
     visuals.menu_corner_radius = egui::CornerRadius::same(crate::tokens::radius("sm") as u8);
     for widget in [&mut visuals.widgets.noninteractive, &mut visuals.widgets.inactive, &mut visuals.widgets.hovered, &mut visuals.widgets.active, &mut visuals.widgets.open] {
-        widget.corner_radius = egui::CornerRadius::same(crate::tokens::radius("sm") as u8);
+        widget.corner_radius = egui::CornerRadius::same(crate::tokens::size("radius.button").round() as u8);
         widget.bg_stroke = egui::Stroke::new(stroke_width("thin"), color_in(style_name(palette.style), if palette.high_contrast { "color.border.high_contrast" } else { "border" }));
     }
-    visuals.widgets.active.bg_stroke = egui::Stroke::new(stroke_width("thin"), palette.accent);
+    let focus = widget_token_for(palette.style, "focus").unwrap_or(palette.accent);
+    visuals.widgets.active.bg_stroke = egui::Stroke::new(stroke_width("thin"), focus);
+    if let Some(disabled) = widget_token_for(palette.style, "fg_disabled") {
+        visuals.widgets.noninteractive.fg_stroke.color = disabled;
+    }
     ctx.set_visuals(visuals);
     ctx.style_mut_of(ctx.theme(), |style| {
         let input = crate::tokens::size("size.input");

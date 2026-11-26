@@ -174,11 +174,13 @@ pub struct SnapPrefsSetArgs {
 }
 
 pub const CANDIDATE_MODES: &[&str] = &["Candidate List"];
+pub const SCREEN_TOLERANCE_RANGE: std::ops::RangeInclusive<u32> = 1..=100;
+pub const MAX_CANDIDATES_RANGE: std::ops::RangeInclusive<u32> = 1..=50;
 
 impl SnapPrefsSetArgs {
     pub fn is_valid(&self) -> bool {
-        self.screen_tolerance.map_or(true, |v| (1..=100).contains(&v))
-            && self.max_candidates.map_or(true, |v| (1..=50).contains(&v))
+        self.screen_tolerance.map_or(true, |v| SCREEN_TOLERANCE_RANGE.contains(&v))
+            && self.max_candidates.map_or(true, |v| MAX_CANDIDATES_RANGE.contains(&v))
             && self.candidates_mode.as_deref().map_or(true, |m| CANDIDATE_MODES.contains(&m))
     }
 }

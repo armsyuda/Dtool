@@ -55,6 +55,24 @@ pub fn export_shortcut_pressed(ctx: &egui::Context, map: &ShortcutMap) -> bool {
     })
 }
 
+#[cfg(windows)]
+fn consume_print_shortcut(ctx: &egui::Context, map: &ShortcutMap, focus: Focus) -> bool {
+    ctx.input_mut(|input| {
+        let binding = input.events.iter().find_map(|event| {
+            let egui::Event::Key { key, pressed: true, repeat: false, modifiers, .. } = event else {
+                return None;
+            };
+            let name = crate::shortcuts_page::affinity_key_name(*key);
+            let chord = crate::shortcut_commands::modifiers_from(*modifiers);
+            map.dispatch_all(focus, &name, chord)
+                .iter()
+                .any(|command| command == crate::shortcuts::PRINT_COMMAND)
+                .then_some((*key, *modifiers))
+        });
+        binding.is_some_and(|(key, modifiers)| input.consume_key(modifiers, key))
+    })
+}
+
 pub const LAYER_SELECT_ITEMS: [&str; 13] = [
     "menu.layer.select.next",
     "menu.layer.select.previous",
@@ -266,6 +284,8 @@ pub struct AppShell {
     pub layer_effects: crate::dialogs::layer_effects::LayerEffectsDialog,
     pub layer_effects_owner: Option<ContextId>,
     pub pending_context_dialog: Option<String>,
+    pdf_import: Option<crate::pdf_import_dialog::PdfImportDialog>,
+    pdf_drop_queue: std::collections::VecDeque<(std::path::PathBuf, Option<ContextId>)>,
     pub blend_options: crate::dialogs::blend_options::BlendOptionsDialog,
     pub blend_options_owner: Option<ContextId>,
     tone_blend: Option<crate::dialogs::tone_blend::Dialog>,
@@ -434,6 +454,8 @@ impl AppShell {
             layer_effects: Default::default(),
             layer_effects_owner: None,
             pending_context_dialog: None,
+            pdf_import: None,
+            pdf_drop_queue: Default::default(),
             blend_options: Default::default(),
             blend_options_owner: None,
             tone_blend: None,
@@ -903,6 +925,7 @@ impl AppShell {
                     } else if let Some(model) = model.as_deref() {
                         picked = crate::context_bar::show_toolbar_options(
                             ui, model, current, &mut self.icon_cache, show_frame || show_brush_tip,
+                            self.workspace.session(),
                         );
                     }
                 });
@@ -1276,9 +1299,12 @@ impl AppShell {
     /// The same header remains present before a document is opened.
     pub fn show_persona_header(&mut self, ui: &mut egui::Ui) {
         let current = crate::persona::host_action(&Command::new("ui.persona.query")).ok();
-        if let Some(id) = current.as_ref().and_then(|v| v["id"].as_str()) {
-            self.menu_persona = id.to_string();
+        let active_workspace_id = current.as_ref().and_then(|value| value["id"].as_str());
+        if let Some(id) = active_workspace_id {
+            self.menu_persona = current.as_ref().and_then(|value| value["base_id"].as_str())
+                .unwrap_or(id).to_string();
         }
+        let active_workspace_id = active_workspace_id.unwrap_or(&self.menu_persona);
         if !self.top_toolbar_visible() { return; }
         let home_open = self.workspace.active().is_none() && self.new_document_dialog.is_some()
             && self.file_dialog.is_none() && self.exit_review.is_none();
@@ -1315,7 +1341,7 @@ impl AppShell {
                         let toolbar = current.as_ref().and_then(|value| value.pointer("/layout/toolbar"))
                             .and_then(|value| serde_json::from_value::<Vec<String>>(value.clone()).ok())
                             .unwrap_or_else(|| crate::persona::DEFAULT_TOOLBAR.map(String::from).into());
-                        let draft = self.studio_windows.toolbar_draft(&self.menu_persona);
+                        let draft = self.studio_windows.toolbar_draft(active_workspace_id);
                         let items = draft.as_deref().map_or(toolbar.as_slice(), Vec::as_slice);
                         let (toolbar_action, drop) = crate::persona_bar::toolbar_icons(
                             ui, self.workspace.session(), items, &mut self.icon_cache, draft.is_some(),
@@ -1327,7 +1353,7 @@ impl AppShell {
                     });
                 });
             });
-        if let Some(draft) = self.studio_windows.toolbar_draft(&self.menu_persona) {
+        if let Some(draft) = self.studio_windows.toolbar_draft(active_workspace_id) {
             let outside = ui.input(|input| input.pointer.primary_released()
                 && input.pointer.interact_pos().is_some_and(|pos| !header.response.rect.contains(pos)));
             if toolbar_edit.is_none() && outside
@@ -1667,7 +1693,7 @@ impl AppShell {
         }
         let result = crate::tools_panel::handle_tool_command(session, &Command::with_params("ui.tool.set", serde_json::json!({"id": tool})));
         if result.is_ok() && tool == "tool.slice" {
-            let panel = crate::dock::PanelId::Other("slices".into());
+            let panel = crate::dock::PanelId::Other(crate::panels::SLICES_PANEL_KEY.into());
             if !self.layout.is_panel_shown(&panel) {
                 crate::panels::open_panel(&mut self.layout, &panel);
             }
@@ -2054,7 +2080,7 @@ impl AppShell {
             self.icon_cache.clear();
             self.icon_ppp = ppp;
         }
-        let key = format!("{:?}|{:?}|{:?}|{:?}|{:?}|{}", self.settings.ui_style, self.settings.background_grey, self.settings.ui_brightness, self.settings.text_contrast, self.settings.high_contrast, self.prefs.accent_colour);
+        let key = format!("{:?}|{:?}|{:?}|{:?}|{}", self.settings.background_grey, self.settings.ui_brightness, self.settings.text_contrast, self.settings.high_contrast, self.prefs.accent_colour);
         if self.theme_applied.as_deref() == Some(key.as_str()) {
             return false;
         }
@@ -2527,9 +2553,9 @@ impl AppShell {
 
     fn publish_os_clipboard(&mut self, ctx: &egui::Context, events: &crate::os_clipboard::OsClipboardEvents) {
         let Some(session) = self.workspace.session().filter(|session| session.text_edit.is_none()) else { return };
-        let result = match crate::os_clipboard::image_for_copy(session) {
-            Ok(Some(image)) => crate::os_clipboard::write_native_image(ctx, image),
-            Ok(None) => {
+        let result = match crate::os_clipboard::publish_graphic_copy(ctx, session) {
+            Ok(true) => Ok(()),
+            Ok(false) => {
                 if let Some(text) = crate::os_clipboard::after_shortcuts(session, events) {
                     ctx.copy_text(text);
                 }
@@ -2741,9 +2767,11 @@ impl AppShell {
     }
 
     fn show_frame(&mut self, ui: &mut egui::Ui) {
+        let widget_had_focus = self.widget_focused(ui.ctx());
         self.adopt_core_prefs();
         self.apply_prefs_to_new_contexts();
         self.apply_theme(ui.ctx());
+        dtool_design::theme::fit_tooltips_to_viewport(ui.ctx());
         self.modal_blocking = crate::dialog_chrome::begin_modal_frame(ui.ctx());
         self.modal_blocking |= export_dialog().lock().is_ok_and(|dialog| dialog.is_open());
         self.modal_blocking |= self.exit_review.is_some();
@@ -3082,7 +3110,7 @@ impl AppShell {
         #[cfg(windows)]
         {
             if !self.dialog_open(ui.ctx()) && self.workspace.session().is_some()
-                && ui.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::P))
+                && consume_print_shortcut(ui.ctx(), &self.shortcuts, self.current_focus(ui.ctx()))
             {
                 self.open_print_dialog();
             }
@@ -3102,7 +3130,9 @@ impl AppShell {
         if self.spell_host.show(ui.ctx(), &mut self.workspace) {
             self.reconcile_active();
         }
-        self.place_tool.show_dialog(ui, &mut self.workspace);
+        let place_target = self.workspace.active();
+        let placed_pdfs = self.place_tool.show_dialog(ui, &mut self.workspace);
+        self.pdf_drop_queue.extend(placed_pdfs.into_iter().map(|path| (path, place_target)));
         if let Some(preset) = self.panel_registry.pixel_brushes.edit_target.take() {
             if let Err(error) = self.open_brush_editor(Some(preset)) {
                 self.status_bar.set_hint_key(&error.message_key);
@@ -3153,11 +3183,26 @@ impl AppShell {
             }
         }
         let dropped: Vec<std::path::PathBuf> = ui.input(|input| input.raw.dropped_files.iter().map(|file| file.path().to_path_buf()).collect());
-        if !dropped.is_empty() && !self.input_blocked(ui.ctx()) {
-            if let Err(error) = self.place_tool.drop_files(&mut self.workspace, &dropped) {
+        let startup_home = self.workspace.active().is_none() && self.new_document_dialog.is_some()
+            && self.file_dialog.is_none() && self.exit_review.is_none() && !self.update_indicator.dialog_open();
+        let can_drop = !self.input_blocked(ui.ctx());
+        if !dropped.is_empty() && (can_drop || startup_home) && self.pdf_import.is_none() {
+            let (pdfs, other): (Vec<_>, Vec<_>) = dropped.into_iter()
+                .partition(|path| crate::pdf_import_dialog::is_pdf(path));
+            let target = self.workspace.active();
+            self.pdf_drop_queue.extend(pdfs.into_iter().map(|path| (path, target)));
+            if can_drop && !other.is_empty()
+                && let Err(error) = self.place_tool.drop_files(&mut self.workspace, &other)
+            {
                 self.status_bar.set_hint_key(&error.message_key);
             }
         }
+        if self.pdf_import.is_none() && (can_drop || startup_home)
+            && let Some((path, target)) = self.pdf_drop_queue.pop_front()
+        {
+            self.open_pdf_options(path, target);
+        }
+        self.show_pdf_import(ui.ctx());
         if let Some(state) = &mut self.file_dialog {
             use crate::dialog_chrome::DialogResult;
             let result = crate::dialogs::file_dialog_result(ui, state, &mut self.workspace);
@@ -3189,7 +3234,8 @@ impl AppShell {
                 }
             }
         }
-        if self.file_dialog.is_none() && self.exit_review.is_none() && !self.update_indicator.dialog_open()
+        if self.file_dialog.is_none() && self.pdf_import.is_none()
+            && self.exit_review.is_none() && !self.update_indicator.dialog_open()
             && let Some(state) = &mut self.new_document_dialog {
             use crate::dialogs::NewDocumentOutcome;
             let mut action = None;
@@ -3236,7 +3282,7 @@ impl AppShell {
         crate::shortcuts::sync_shared(&mut self.shortcuts, &mut self.shortcut_seen);
         self.ingest_ime(ui.ctx());
         if !self.input_blocked(ui.ctx()) {
-            self.handle_shortcuts(ui.ctx());
+            self.handle_shortcuts_after_ui(ui.ctx(), widget_had_focus);
         }
         if os_clip.copy || os_clip.cut {
             self.publish_os_clipboard(ui.ctx(), &os_clip);
@@ -3246,6 +3292,16 @@ impl AppShell {
         self.show_tools_column(ui);
         self.show_tool_paint_editor(ui.ctx());
         self.show_dock(ui);
+        if let Some(page) = self.panel_registry.pages.take_add_pages_request()
+            && let Some(session) = self.workspace.session()
+            && let Some(dialog) = crate::menus::pages::Dialog::add_at_page(session, page)
+        {
+            self.page_menu_dialog = Some(dialog);
+            self.app_canvas.input.cancel();
+        }
+        if self.panel_registry.pages.take_section_manager_request() {
+            self.longdoc.open_dialog("section_manager");
+        }
         self.status_bar.stats_text = self.workspace.session().and_then(|s| s.document()).and_then(crate::status_bar_stats::document_stats_text);
         self.longdoc.show(ui.ctx(), &mut self.workspace, &mut self.status_bar);
         self.sync_status_inputs(ui.ctx());
@@ -3277,11 +3333,23 @@ impl AppShell {
 
 impl AppShell {
     fn show_studio_windows(&mut self, ctx: &egui::Context) {
-        let mut run = crate::persona::host_action;
+        let mut studio_dock_changed = false;
+        let mut run = |command: &Command| {
+            let result = crate::persona::host_action(command);
+            studio_dock_changed |= result.is_ok()
+                && matches!(command.name.as_str(), "ui.studio.update" | "ui.studio.delete");
+            result
+        };
         if let Some(request) = crate::persona_bar::take_studio_request(ctx) {
             self.studio_windows.open(request, &mut run);
         }
-        if let Some(command) = self.studio_windows.show_with_icons(ctx, &mut run, Some(&mut self.icon_cache)) {
+        let switch = self.studio_windows.show_with_icons(ctx, &mut run, Some(&mut self.icon_cache));
+        // Layout persistence runs in this frame, before the next persona reconciliation.
+        if studio_dock_changed && let Some(mut layout) = crate::persona::live_dock() {
+            layout.sync_tree_visibility();
+            self.layout = layout;
+        }
+        if let Some(command) = switch {
             self.commit_ime_before_switch();
             let result = if self.workspace.session().is_some() {
                 self.run_and_reconcile(command)
@@ -3403,6 +3471,23 @@ impl AppShell {
     pub fn apply_host_request(&mut self, ctx: &egui::Context, request: dtool_core::workspace::HostRequest) {
         let name = request.command.name.clone();
         let menu_id = request.command.params["id"].as_str();
+        if name == crate::panel_actions::INVOKE
+            && matches!(menu_id, Some("window.general.transform" | "window.general.navigator"))
+            && let Some(panel) = menu_id.and_then(crate::panels::window_panel)
+        {
+            let frame = self.ui_frame(ctx);
+            let result = crate::ui_host::check_context(&request.command.params, request.scope.context, frame.context_id)
+                .and_then(|()| {
+                    if self.input_blocked(ctx) {
+                        return Err(dtool_core::CommandError::new("CANNOT_EXECUTE"));
+                    }
+                    crate::panels::toggle_panel(&mut self.layout, &panel);
+                    self.persist_layout().map_err(|_| dtool_core::CommandError::new("IO_ERROR"))?;
+                    Ok(self.layout.panel_state_json(&panel))
+                });
+            crate::ui_host::reply(request, &frame, result);
+            return;
+        }
         if name == crate::panel_actions::INVOKE && let Some(id) = menu_id.and_then(crate::menu_tree::panels_action) {
             let frame = self.ui_frame(ctx);
             let result = crate::ui_host::check_context(&request.command.params, request.scope.context, frame.context_id)
@@ -3454,6 +3539,21 @@ impl AppShell {
             crate::ui_host::reply(request, &frame, result);
             return;
         }
+        if name == crate::panel_actions::INVOKE && menu_id == Some(crate::snapping_dialog::MENU_ID) {
+            let frame = self.ui_frame(ctx);
+            let result = crate::ui_host::check_context(&request.command.params, request.scope.context, frame.context_id)
+                .and_then(|()| {
+                    if !self.snapping_dialog.open {
+                        if self.input_blocked(ctx) {
+                            return Err(dtool_core::CommandError::new("CANNOT_EXECUTE"));
+                        }
+                        self.snapping_dialog.open();
+                    }
+                    Ok(serde_json::json!({ "open": true }))
+                });
+            crate::ui_host::reply(request, &frame, result);
+            return;
+        }
         if name == crate::panel_actions::INVOKE && menu_id == Some(crate::dialogs::NEW_DOCUMENT_MENU) {
             let frame = self.ui_frame(ctx);
             let result = crate::ui_host::check_context(&request.command.params, request.scope.context, frame.context_id)
@@ -3495,6 +3595,24 @@ impl AppShell {
             let result = crate::ui_host::check_context(&request.command.params, request.scope.context, frame.context_id)
                 .and_then(|()| {
                     let owner = frame.context_id.ok_or_else(dtool_core::CommandError::no_document)?;
+                    if let Some(kind) = menu_id.and_then(crate::selection_modify_dialog::Kind::from_menu) {
+                        if !self.selection_modify.as_ref().is_some_and(|dialog| dialog.owner == owner && dialog.kind == kind) {
+                            if self.selection_modify.is_some() || self.input_blocked(ctx) {
+                                return Err(dtool_core::CommandError::new("CANNOT_EXECUTE"));
+                            }
+                            self.open_selection_modify(kind)?;
+                        }
+                        return Ok(serde_json::json!({ "open": true }));
+                    }
+                    if menu_id == Some(crate::selection_refine_dialog::MENU_ID) {
+                        if !self.selection_refine.as_ref().is_some_and(|dialog| dialog.owner == owner) {
+                            if self.selection_refine.is_some() || self.input_blocked(ctx) {
+                                return Err(dtool_core::CommandError::new("CANNOT_EXECUTE"));
+                            }
+                            self.open_selection_refine()?;
+                        }
+                        return Ok(serde_json::json!({ "open": true }));
+                    }
                     if menu_id == Some(CUSTOMISE_TOOLS_MENU_ID) {
                         self.open_tool_palette(ctx)?;
                         return Ok(serde_json::json!({ "open": true }));
@@ -3706,15 +3824,81 @@ impl AppShell {
         self.template_browser.error = result.err().map(|error| dtool_strings::text(&error.message_key).to_string());
     }
 
+    fn open_pdf_options(&mut self, path: std::path::PathBuf, target: Option<ContextId>) -> bool {
+        let layout = self.menu_persona == "layout" || dtool_core::commands::persona::layout_active();
+        match crate::pdf_import_dialog::PdfImportDialog::new(path, target, layout) {
+            Ok(dialog) => {
+                self.pdf_import = Some(dialog);
+                self.app_canvas.input.cancel();
+                true
+            }
+            Err(error) => {
+                self.status_bar.set_file_open_error(&error.message_key);
+                false
+            }
+        }
+    }
+
+    fn show_pdf_import(&mut self, ctx: &egui::Context) {
+        use crate::dialog_chrome::DialogResult;
+        use dtool_io::import_commands::{open_prepared_pdf, place_prepared_pdf};
+        use std::sync::mpsc::TryRecvError;
+
+        let Some(mut dialog) = self.pdf_import.take() else { return; };
+        if let Some(load) = &dialog.load {
+            let result = match load.result.try_recv() {
+                Ok(result) => result,
+                Err(TryRecvError::Disconnected) => Err(dtool_core::CommandError::new("IO.OTHER")),
+                Err(TryRecvError::Empty) => {
+                    dialog.show_loading(ctx);
+                    self.pdf_import = Some(dialog);
+                    return;
+                }
+            };
+            let result = result.and_then(|document| {
+                if let Some(target) = load.target {
+                    place_prepared_pdf(&mut self.workspace, target, &dialog.path, document, load.layout)?;
+                } else {
+                    let title = dialog.path.file_stem().unwrap_or(dialog.path.as_os_str()).to_string_lossy();
+                    if let Some(active) = self.workspace.active() {
+                        self.workspace.finish_pending_edit(active, true)?;
+                    }
+                    open_prepared_pdf(&mut self.workspace, &title, document);
+                    self.workspace.push_recent(&dialog.path);
+                }
+                Ok(())
+            });
+            dialog.load = None;
+            match result {
+                Ok(()) => {
+                    self.new_document_dialog = None;
+                    self.status_bar.clear_file_open_error();
+                    self.reconcile_active();
+                    return;
+                }
+                Err(error) => dialog.error = Some(error.message_key),
+            }
+        }
+
+        let target = dialog.target.and_then(|id| self.workspace.get(id));
+        let layout = target.is_some_and(|context| context.session.document.layout_artboard_origins.is_some());
+        match dialog.show(ctx, target.map(|context| context.title.as_str()), layout) {
+            DialogResult::Cancel => return,
+            DialogResult::Confirm => {
+                dialog.start_load(ctx, layout);
+                ctx.request_repaint();
+            }
+            DialogResult::Open => {}
+        }
+        self.pdf_import = Some(dialog);
+    }
+
     pub(crate) fn browse_document(&mut self) -> bool {
         #[cfg(windows)]
         match crate::dialogs::pick_document_path() {
             Ok(Some(path)) => {
-                if path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("pdf")) {
-                    let mut dialog = crate::dialogs::FileDialogState::new(crate::dialogs::FileDialogMode::Open);
-                    dialog.path = path.to_string_lossy().into_owned();
-                    self.file_dialog = Some(dialog);
-                    return true;
+                if crate::pdf_import_dialog::is_pdf(&path) {
+                    return self.open_pdf_options(path, None);
                 }
                 match self.run_and_reconcile(Command::with_params("doc.open", json!({ "path": path }))) {
                     Ok(_) => {
@@ -3739,6 +3923,7 @@ impl AppShell {
             || self.update_indicator.dialog_open()
             || self.exit_review.is_some()
             || self.file_dialog.is_some()
+            || self.pdf_import.is_some()
             || self.new_document_dialog.is_some()
             || self.pending_close_id.is_some()
             || self.close_dialog.is_some()
@@ -4292,7 +4477,7 @@ impl AppShell {
             let header = response.interact_pointer_pos().and_then(|pointer| {
                 crate::table::canvas::menu_target(&context.session, rect, pointer)
             });
-            let master_target = if context.session.document.master_pages.assignments.is_empty() {
+            let master_target = if context.session.document.master_pages.inherited_content().next().is_none() {
                 None
             } else {
                 response.interact_pointer_pos().and_then(|pointer| {
@@ -4447,6 +4632,7 @@ impl AppShell {
 enum StudioDrop {
     Tab(egui_tiles::TileId),
     Split(egui_tiles::TileId, bool),
+    Column(egui_tiles::TileId, bool),
     Edge,
 }
 
@@ -4499,7 +4685,22 @@ fn studio_drop_target(
     }
     if let Some(&(side, group, rect)) = groups.iter().find(|(_, _, rect)| rect.contains(point)) {
         let (before, after) = studio_group_split_rects(side, rect);
-        let (target, preview) = if before.is_positive() && before.contains(point) {
+        let column = if matches!(side, DockSide::Left | DockSide::Right)
+            && point.y >= rect.top() + dtool_design::size("panel.header.height")
+        {
+            let depth = (rect.width() * 0.18).min(STUDIO_EDGE_DEPTH);
+            let left = point.x < rect.left() + depth;
+            let right = point.x > rect.right() - depth;
+            (left || right).then(|| {
+                let mut area = rect;
+                if left { area.max.x = area.min.x + depth; }
+                else { area.min.x = area.max.x - depth; }
+                (StudioDrop::Column(group, left), area)
+            })
+        } else { None };
+        let (target, preview) = if let Some(column) = column {
+            column
+        } else if before.is_positive() && before.contains(point) {
             (StudioDrop::Split(group, true), before)
         } else if after.is_positive() && after.contains(point) {
             (StudioDrop::Split(group, false), after)
@@ -4515,7 +4716,22 @@ fn studio_drop_target(
         (DockSide::Left, point.x - canvas.left()), (DockSide::Right, canvas.right() - point.x),
         (DockSide::Top, point.y - canvas.top()), (DockSide::Bottom, canvas.bottom() - point.y),
     ].into_iter().min_by(|a, b| a.1.total_cmp(&b.1))?;
-    (distance <= STUDIO_EDGE_DEPTH).then_some((side, StudioDrop::Edge, studio_edge_rect(canvas, side)))
+    if distance > STUDIO_EDGE_DEPTH { return None; }
+    let edge = studio_edge_rect(canvas, side);
+    if matches!(side, DockSide::Left | DockSide::Right) {
+        let target = groups.iter()
+            .filter(|(candidate, _, rect)| *candidate == side && rect.y_range().contains(point.y))
+            .min_by(|(_, _, a), (_, _, b)| (a.center().x - point.x).abs().total_cmp(&(b.center().x - point.x).abs()));
+        if let Some(&(_, group, rect)) = target {
+            let before = side == DockSide::Right;
+            let preview = egui::Rect::from_min_max(
+                egui::pos2(edge.left(), rect.top().max(edge.top())),
+                egui::pos2(edge.right(), rect.bottom().min(edge.bottom())),
+            );
+            return Some((side, StudioDrop::Column(group, before), preview));
+        }
+    }
+    Some((side, StudioDrop::Edge, edge))
 }
 
 fn studio_group_seam(
@@ -4620,6 +4836,11 @@ fn paint_studio_drop_guides(
             caption(area, label);
         }
     }
+    if let Some((_, StudioDrop::Column(_, before), area)) = studio_drop_target(groups, canvas, pointer) {
+        paint(area, 0.32, 1.0);
+        let label_area = egui::Rect::from_center_size(area.center(), egui::vec2(120.0, area.height()));
+        caption(label_area, if before { "studio.drop.left" } else { "studio.drop.right" });
+    }
     let edge = if seam.is_none() && group.is_none() {
         studio_drop_target(groups, canvas, pointer).map(|(side, _, _)| side)
     } else {
@@ -4648,6 +4869,28 @@ impl AppShell {
         }
         self.panel_registry.canvas_size = self.canvas_size;
 
+        let dock_width = ui.available_rect_before_wrap().width();
+        let studio_width = (dock_width - (dock_width * 0.25).clamp(120.0, 320.0)).max(2.0);
+        let default_left = dtool_design::size("panel.default_width").min(dock_width * 0.20);
+        let default_right = (dtool_design::size("panel.default_width") + dtool_design::size("panel.secondary_width"))
+            .min(dock_width * 0.46);
+        let preferred_width = |side: DockSide, default: f32| {
+            if self.layout.has_visible_docked_panels(side) {
+                self.layout.dock_sizes.get(side.key()).copied()
+                    .filter(|size| size.is_finite() && *size > 0.0).unwrap_or(default)
+            } else {
+                0.0
+            }
+        };
+        let left_width = preferred_width(DockSide::Left, default_left);
+        let right_width = preferred_width(DockSide::Right, default_right);
+        let combined_width = left_width + right_width;
+        let constrained = left_width > 0.0 && right_width > 0.0 && combined_width > studio_width;
+        let side_limit = |preferred: f32, other: f32| {
+            if constrained { studio_width * (preferred / combined_width) }
+            else { studio_width - other }
+        };
+
         let mut drop_groups = Vec::new();
         let mut native_drop = None;
         for side in DockSide::ALL {
@@ -4661,17 +4904,17 @@ impl AppShell {
             let horizontal = matches!(side, DockSide::Left | DockSide::Right);
             let extent = |rect: egui::Rect| if horizontal { rect.width() } else { rect.height() };
             let available = extent(ui.available_rect_before_wrap());
-            let maximum = (available - 80.0).max(1.0);
-            let default_size = match side {
-                DockSide::Left => dtool_design::size("panel.default_width").min(ui.max_rect().width() * 0.20),
-                DockSide::Right => (dtool_design::size("panel.default_width") + dtool_design::size("panel.secondary_width"))
-                    .min(ui.max_rect().width() * 0.46),
-                _ => (ui.max_rect().height() * 0.22).clamp(96.0, 180.0),
+            let (maximum, default_size) = match side {
+                DockSide::Left => (side_limit(left_width, right_width), default_left),
+                DockSide::Right => (side_limit(right_width, left_width), default_right),
+                _ => (available - 80.0, (ui.max_rect().height() * 0.22).clamp(96.0, 180.0)),
             };
+            let maximum = maximum.max(1.0);
             let saved = self.layout.dock_sizes.get(side.key()).copied().filter(|size| size.is_finite() && *size > 0.0);
             let previous = self.presented_dock_sizes.get(side.key()).copied();
-            let restore = previous.is_some_and(|(size, max)| size != saved || (max < saved.unwrap_or(0.0) && max != maximum))
-                || (previous.is_none() && saved.is_some());
+            let restore = previous.is_some_and(|(size, max)| {
+                size != saved || (max != maximum && max.min(maximum) < saved.unwrap_or(0.0))
+            }) || (previous.is_none() && saved.is_some());
             let panel = if restore {
                 panel.exact_size(saved.unwrap_or(default_size).min(maximum))
             } else {
@@ -4718,6 +4961,13 @@ impl AppShell {
         match target {
             StudioDrop::Tab(group) => self.layout.redock_into_tabs(panel, side, group),
             StudioDrop::Split(group, before) => self.layout.redock_as_group(panel, side, Some((group, before))),
+            StudioDrop::Column(group, before) => {
+                if self.layout.redock_as_column(panel, side, group, before)
+                    && let Some(width) = self.layout.dock_sizes.get_mut(side.key())
+                {
+                    *width += dtool_design::size("panel.default_width");
+                }
+            }
             StudioDrop::Edge => self.layout.redock_as_group(panel, side, None),
         }
     }

@@ -31,6 +31,27 @@ type TextureKey = (ObjectId, u64, usize, [usize; 2]);
 type GlyphContours = std::sync::Arc<Vec<Vec<[f32; 2]>>>;
 type GlyphInk = ([f32; 4], GlyphContours);
 
+pub(crate) fn artboard_caption(
+    ui: &Ui, doc: &dtool_core::Document, board: &dtool_core::Object, width: f32,
+) -> std::sync::Arc<egui::Galley> {
+    let mut name = board.name.clone();
+    let spread = doc.master_pages.spread(board.id);
+    if let Some(spread) = spread
+        && let Some(index) = spread.pages.iter().position(|&id| id == board.id)
+    {
+        name = if index == 0 {
+            dtool_core::commands::masters::master_name(board).to_owned()
+        } else {
+            dtool_strings::format("panel.pages.number", &[("number", &(index + 1).to_string())])
+        };
+    }
+    let mut job = egui::text::LayoutJob::simple_singleline(name, egui::FontId::proportional(11.0), ui.visuals().text_color());
+    if spread.is_some() {
+        job.wrap = egui::text::TextWrapping::truncate_at_width((width - 4.0).max(1.0));
+    }
+    ui.fonts_mut(|fonts| fonts.layout_job(job))
+}
+
 struct GlyphTexture {
     contours: GlyphContours,
     lines: Vec<TextLine>,
@@ -1585,6 +1606,14 @@ impl AppCanvas {
                 Self::paint_page(ui, &painter, rect, &view, *page);
             }
         }
+        if !view.canvas_flags.preview_mode {
+            let stroke = Stroke::new(1.0, ui.visuals().weak_text_color().gamma_multiply(0.45));
+            for [x, y, width, height] in dtool_core::data_merge::layout::vacant_page_rects(&session.document) {
+                let corners = [[x, y], [x + width, y], [x + width, y + height], [x, y + height]];
+                let points = corners.map(|point| screen(rect, &view, point));
+                painter.add(egui::Shape::closed_line(points.to_vec(), stroke));
+            }
+        }
         let artboard_border = Self::page_border(ui, &view);
         let linked_layout_pages = session.document.layout_artboard_origins.is_some().then(|| {
             session.document.pages.iter().filter_map(|page| page.artboard_id)
@@ -1596,8 +1625,8 @@ impl AppCanvas {
             painter.add(egui::Shape::convex_polygon(points.to_vec(), Color32::WHITE, artboard_border));
             let is_layout_page = linked_layout_pages.as_ref().is_some_and(|ids| ids.contains(&artboard.id));
             if !view.canvas_flags.preview_mode && !is_layout_page {
-                painter.text(points[0] - egui::vec2(0.0, 3.0), egui::Align2::LEFT_BOTTOM, &artboard.name,
-                    egui::FontId::proportional(11.0), ui.visuals().text_color());
+                let galley = artboard_caption(ui, &session.document, artboard, points[0].distance(points[1]));
+                painter.galley(points[0] - egui::vec2(0.0, 3.0 + galley.size().y), galley, ui.visuals().text_color());
             }
         }
         let staged = dtool_core::commands::layer_style::snapshot_staged(session);

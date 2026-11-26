@@ -60,14 +60,16 @@ pub fn snap_candidates(doc:&SnapDocument<'_>,view:&ViewState,prefs:&SnapPrefs,po
         for guide in doc.guides.list() {
             let axis = guide.kind.axis();
             let mut target = point;
-            if guide.page_id.is_some() {
-                let Some([a, b]) = guide.page_segment(doc.document) else { continue };
-                target[axis] = a[axis];
-                target[1 - axis] = point[1 - axis].clamp(a[1 - axis], b[1 - axis]);
+            if guide.surface().is_some() {
+                for [a, b] in guide.source_segment(doc.document).into_iter().chain(guide.inherited_segments(doc.document)) {
+                    target[axis] = a[axis];
+                    target[1 - axis] = point[1 - axis].clamp(a[1 - axis], b[1 - axis]);
+                    offer(target, CandidateKind::Guide, Some(guide.id.0));
+                }
             } else {
                 target[axis] = guide.position;
+                offer(target, CandidateKind::Guide, Some(guide.id.0));
             }
-            offer(target,CandidateKind::Guide,Some(guide.id.0));
         }
         if !view.canvas_flags.preview_mode {
             if doc.guides.show_columns {

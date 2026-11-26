@@ -133,6 +133,8 @@ pub struct GuidesAddArgs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub page_id: Option<crate::document::PageId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub master_id: Option<ObjectId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
 }
 
@@ -162,6 +164,18 @@ pub struct GuidesFindArgs {
     pub name: Option<String>,
     #[serde(default)]
     pub page_id: Option<crate::document::PageId>,
+    #[serde(default)]
+    pub master_id: Option<ObjectId>,
+}
+
+pub(crate) fn guide_surface(page: Option<crate::document::PageId>, master: Option<ObjectId>) -> Result<Option<crate::view::ViewTarget>, CommandError> {
+    use crate::view::ViewTarget;
+    match (page, master) {
+        (Some(_), Some(_)) => Err(CommandError::invalid_params()),
+        (Some(page), None) => Ok(Some(ViewTarget::Page(page))),
+        (None, Some(master)) => Ok(Some(ViewTarget::Artboard(master))),
+        (None, None) => Ok(None),
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -678,7 +692,7 @@ fn group_member_transform(from: &Object, to: &Object, scale: [f64; 2]) -> Result
 
 /// The object's unflipped local axes decompose into rotation, horizontal shear
 /// and local scales. Store a reflection in the signed dimensions.
-fn transform_group_member(object: &Object, map: &[f32; 6], map_path_text: bool, reflow_frame_text: bool) -> Result<(Object, [f64; 2]), CommandError> {
+pub(crate) fn transform_group_member(object: &Object, map: &[f32; 6], map_path_text: bool, reflow_frame_text: bool) -> Result<(Object, [f64; 2]), CommandError> {
     use crate::geometry::{apply_matrix, box_centre, compose, object_linear};
     if map[..4] == [1.0, 0.0, 0.0, 1.0] {
         let mut next = object.clone();
@@ -1427,7 +1441,7 @@ pub fn preflight_targets(session: &Session, command: &Command) -> Result<(), Com
     Ok(())
 }
 
-struct BatchRollback {
+pub(crate) struct BatchRollback {
     document: Document,
     generation: u64,
     undo: crate::undo::UndoStack,
@@ -1448,10 +1462,11 @@ struct BatchRollback {
     history: crate::history_store::SessionHistory,
     effect_previews: Vec<crate::commands::layer_style::StagedEffect>,
     last_deselected: Option<PixelSelection>,
+    change_log: crate::query::ChangeLog,
 }
 
 impl BatchRollback {
-    fn capture(session: &Session) -> Self {
+    pub(crate) fn capture(session: &Session) -> Self {
         Self {
             document: session.document.clone(),
             generation: session.generation,
@@ -1473,10 +1488,11 @@ impl BatchRollback {
             history: session.history.clone(),
             effect_previews: crate::commands::layer_style::snapshot_staged(session),
             last_deselected: session.last_deselected.clone(),
+            change_log: session.change_log.clone(),
         }
     }
 
-    fn restore(self, session: &mut Session) {
+    pub(crate) fn restore(self, session: &mut Session) {
         session.document = self.document;
         session.generation = self.generation;
         session.undo = self.undo;
@@ -1496,6 +1512,7 @@ impl BatchRollback {
         session.appearance_focus = self.appearance_focus;
         session.history = self.history;
         session.last_deselected = self.last_deselected;
+        session.change_log = self.change_log;
         crate::commands::layer_style::restore_staged(session, self.effect_previews);
     }
 }
@@ -1526,6 +1543,8 @@ pub struct Session {
     pub document: Document,
     pub catalog: CommandCatalog,
     pub selection: Selection,
+    pub active_slice: Option<crate::slice::SliceId>,
+    pub ai_image: crate::ai_image::Jobs,
     pub table_selection: crate::table::selection::TableSelection,
     pub clipboard: AppClipboard,
     pub last_duplicate_ids: Vec<ObjectId>,
@@ -1840,6 +1859,8 @@ impl Session {
             document,
             catalog: CommandCatalog::new(),
             selection: Selection::default(),
+            active_slice: None,
+            ai_image: crate::ai_image::Jobs::default(),
             table_selection: crate::table::selection::TableSelection::default(),
             clipboard: AppClipboard::new(),
             history: crate::history_store::SessionHistory::default(),
@@ -2038,14 +2059,7 @@ impl Session {
 
         for cmd in commands {
             let applied = match cmd.name.as_str() {
-                "edit.undo" => match self.undo.undo() {
-                    Some(undo_cmd) => self.apply_command(&undo_cmd),
-                    None => Err(CommandError::invalid_params()),
-                },
-                "edit.redo" => match self.undo.redo() {
-                    Some(redo_cmd) => self.apply_command(&redo_cmd),
-                    None => Err(CommandError::invalid_params()),
-                },
+                "edit.undo" | "edit.redo" => self.apply_history_step(cmd.name == "edit.redo", false),
                 _ => self.apply_command(&cmd),
             };
             if let Err(e) = applied {
@@ -2274,6 +2288,14 @@ impl Session {
     }
 
     pub fn run(&mut self, command: &Command) -> Result<serde_json::Value, CommandError> {
+        self.run_with(command, Self::run_dispatch)
+    }
+
+    pub(crate) fn run_with(
+        &mut self,
+        command: &Command,
+        dispatch: impl FnOnce(&mut Self, &Command) -> CommandResult,
+    ) -> CommandResult {
         if self.edit.is_some() && crate::edit_session::ends_edit(&command.name) {
             self.end_edit(crate::edit_session::EditEnd::Commit)?;
         }
@@ -2283,7 +2305,9 @@ impl Session {
         }
         let track_masters = !self.document.master_pages.is_empty()
             && spec.is_some_and(|spec| spec.mutating && spec.undoable)
-            && !command.name.starts_with("master.");
+            && !command.name.starts_with("master.")
+            && !matches!(command.name.as_str(),
+                crate::longdoc::page_import::COPY_TO_DOCUMENT | crate::longdoc::page_import::MOVE_TO_DOCUMENT);
         let command = &crate::commands::ruler_units::normalize(self, command)?;
         let master_before = track_masters.then(|| {
             (self.document.clone(), self.selection.ids.clone(), self.undo.position(), self.undo.applied_steps())
@@ -2294,7 +2318,7 @@ impl Session {
         let geometry_before = self.document.geometry_rev;
         let macro_context = self.macro_recorder.step_context(self);
         self.macro_recorder.enter();
-        let result = self.run_dispatch(command);
+        let result = dispatch(self, command);
         self.macro_recorder.exit();
         if result.is_ok() {
             if self.has_document {
@@ -2326,6 +2350,23 @@ impl Session {
             }
         }
         result
+    }
+
+    fn apply_history_step(&mut self, redo: bool, linked: bool) -> Result<(), CommandError> {
+        if !linked && self.undo.next_step(redo).is_some_and(|(name, _)| {
+            name == crate::longdoc::page_import::MOVE_TO_DOCUMENT
+        }) {
+            return Err(CommandError::new("PAGE_MOVE_HISTORY_NEEDS_PEER"));
+        }
+        let action = if redo { self.undo.redo() } else { self.undo.undo() }
+            .ok_or_else(CommandError::invalid_params)?;
+        self.apply_command(&action)
+    }
+
+    pub(crate) fn run_history_step(&mut self, command: &Command, linked: bool) -> CommandResult {
+        self.apply_history_step(command.name == "edit.redo", linked)?;
+        self.generation += 1;
+        Ok(serde_json::json!({"doc_version": self.generation, "changes": [{"name": command.name}]}))
     }
 
     fn run_dispatch(&mut self, command: &Command) -> Result<serde_json::Value, CommandError> {
@@ -2361,30 +2402,7 @@ impl Session {
         }
 
         match command.name.as_str() {
-            "edit.undo" => {
-                if !self.undo.can_undo() {
-                    return Err(CommandError { code: "INVALID_PARAMS".to_string(), message_key: "error.invalid_params".to_string() });
-                }
-                let undo_cmd = self.undo.undo().unwrap();
-                self.apply_command(&undo_cmd)?;
-                self.generation += 1;
-                Ok(serde_json::json!({
-                    "doc_version": self.generation,
-                    "changes": [{ "name": "edit.undo" }]
-                }))
-            },
-            "edit.redo" => {
-                if !self.undo.can_redo() {
-                    return Err(CommandError { code: "INVALID_PARAMS".to_string(), message_key: "error.invalid_params".to_string() });
-                }
-                let redo_cmd = self.undo.redo().unwrap();
-                self.apply_command(&redo_cmd)?;
-                self.generation += 1;
-                Ok(serde_json::json!({
-                    "doc_version": self.generation,
-                    "changes": [{ "name": "edit.redo" }]
-                }))
-            },
+            "edit.undo" | "edit.redo" => self.run_history_step(command, false),
             "edit.batch" => {
                 let commands = command.params.get("commands")
                     .and_then(|v| v.as_array())
@@ -2958,10 +2976,11 @@ impl Session {
             "guides.add" => {
                 let args: GuidesAddArgs = serde_json::from_value(command.params.clone())
                     .map_err(|_| CommandError { code: "INVALID_PARAMS".to_string(), message_key: "error.invalid_params".to_string() })?;
-                if args.page_id.is_some_and(|page| crate::guides::page_bounds(&self.document, page).is_none()) {
+                let target = guide_surface(args.page_id, args.master_id)?;
+                if target.is_some_and(|target| crate::guides::surface_bounds(&self.document, target).is_none()) {
                     return Err(CommandError::not_found());
                 }
-                let id = self.guides.add_on_page(args.kind, args.position, args.name, args.page_id).map_err(guide_error)?;
+                let id = self.guides.add_on_surface(args.kind, args.position, args.name, target).map_err(guide_error)?;
                 let guide = self.guides.get(id).cloned()
                     .ok_or_else(|| CommandError { code: "NOT_FOUND".to_string(), message_key: "error.not_found".to_string() })?;
                 self.push_guide_undo(
@@ -3008,10 +3027,11 @@ impl Session {
             },
             "guides.find" => {
                 let args: GuidesFindArgs = serde_json::from_value(command.params.clone()).map_err(|_| CommandError::invalid_params())?;
-                if args.id.is_none() && args.page_id.is_none() && args.name.as_deref().map_or(true, |n| n.trim().is_empty()) {
+                let target = guide_surface(args.page_id, args.master_id)?;
+                if args.id.is_none() && target.is_none() && args.name.as_deref().map_or(true, |n| n.trim().is_empty()) {
                     return Err(CommandError::invalid_params());
                 }
-                let found = self.guides.find_in_scope(args.id, args.name.as_deref(), args.page_id);
+                let found = self.guides.find_in_scope(args.id, args.name.as_deref(), target);
                 Ok(serde_json::json!({ "count": found.len(), "guides": found }))
             },
             "guides.list" => {                let mut value = serde_json::to_value(&self.guides)

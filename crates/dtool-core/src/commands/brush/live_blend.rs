@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub const MAX_BLEND_STEPS: u32 = 200;
+pub const DEFAULT_BLEND_STEPS: u32 = 3;
 const SAMPLES: usize = 64;
 pub const BLEND_SPACING: std::ops::RangeInclusive<u32> = 5..=95;
 

@@ -124,9 +124,8 @@ impl IconCache {
             Some(texture) => egui::Button::image(egui::Image::new(texture).fit_to_exact_size(egui::Vec2::splat(18.0))),
             None => egui::Button::new(label),
         };
-        let response = dtool_design::with_icon_selection(ui, |ui| {
-            ui.add_sized([24.0, 23.0], button.selected(selected)).on_hover_text(label)
-        });
+        let response = dtool_design::studio_icon_button(ui, button, dtool_design::size("control.icon.width"), selected)
+            .on_hover_text(label);
         response.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, ui.is_enabled(), selected, label));
         response
     }

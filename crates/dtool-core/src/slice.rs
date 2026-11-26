@@ -129,10 +129,11 @@ pub fn expand_path_with_context(template: &str, slice: &Slice, out: &SliceOutput
     for token in SLICE_TOKENS {
         let token_pattern = format!("{{{}}}", token);
         if !result.contains(&token_pattern) { continue; }
+        let name = |value: &str| value.replace(['/', '\\'], "_");
         let replacement = match *token {
-            "document_name" => document_name.ok_or_else(CommandError::invalid_params)?.to_string(),
-            "document_file_name" => document_file_name.ok_or_else(CommandError::invalid_params)?.to_string(),
-            "slice_name" => slice.name.clone(),
+            "document_name" => name(document_name.ok_or_else(CommandError::invalid_params)?),
+            "document_file_name" => name(document_file_name.ok_or_else(CommandError::invalid_params)?),
+            "slice_name" => name(&slice.name),
             "scale" => match out.size {
                 OutputSize::Scale(s) => s.to_string(),
                 _ => "1".to_string(),
@@ -147,14 +148,16 @@ pub fn expand_path_with_context(template: &str, slice: &Slice, out: &SliceOutput
             _ => String::new(),
         };
 
-        let token_pattern = format!("{{{}}}", token);
         result = result.replace(&token_pattern, &replacement);
     }
 
-    if !result.is_empty() && !result.ends_with('.') {
-        result.push('.');
+    let extension = format!(".{}", out.format);
+    if !result.to_ascii_lowercase().ends_with(&extension.to_ascii_lowercase()) {
+        if !result.is_empty() && !result.ends_with('.') {
+            result.push('.');
+        }
+        result.push_str(&out.format);
     }
-    result.push_str(&out.format);
 
     Ok(result)
 }
@@ -245,8 +248,9 @@ pub fn refresh_auto_bounds(doc: &mut Document) {
 impl SliceOutput {
     pub fn dimensions(&self, slice: &Slice, doc: &Document) -> Result<[u32; 2], CommandError> {
         let bounds = slice.resolved_bounds(doc)?;
-        let width = f64::from(bounds[2]) - f64::from(bounds[0]);
-        let height = f64::from(bounds[3]) - f64::from(bounds[1]);
+        let px = f64::from(crate::doc_setup::unit_factor(doc.units, doc.dpi, crate::document::Units::Px, doc.dpi));
+        let width = (f64::from(bounds[2]) - f64::from(bounds[0])) * px;
+        let height = (f64::from(bounds[3]) - f64::from(bounds[1])) * px;
         if !width.is_finite() || !height.is_finite() || width <= 0.0 || height <= 0.0 { return Err(CommandError::invalid_params()); }
         let (w, h) = match self.size {
             OutputSize::Scale(scale) if scale.is_finite() && scale > 0.0 => (width * f64::from(scale), height * f64::from(scale)),

@@ -6,7 +6,7 @@ pub fn register_action(action:fn(&Command)->CommandResult)->bool{ACTION.set(acti
 
 pub fn layout_active() -> bool {
     run_without_document(&Command::new("ui.persona.query"))
-        .and_then(Result::ok).is_some_and(|value| value["id"] == "layout")
+        .and_then(Result::ok).is_some_and(|value| base_persona(&value) == Some("layout"))
 }
 
 pub(crate) fn run_without_document(command: &Command) -> Option<CommandResult> {
@@ -39,7 +39,7 @@ pub(crate) fn apply_default_view_mode(view: &mut crate::view_state::ViewState, m
 pub fn can_execute(_session:&Session,command:&Command)->Option<bool>{matches!(command.name.as_str(),"ui.persona.set"|"ui.persona.query"|"ui.persona.list"|"ui.persona.enter_sub"|"ui.persona.leave_sub"|"ui.studio.create"|"ui.studio.update"|"ui.studio.rename"|"ui.studio.delete"|"ui.studio.list"|"ui.studio.export"|"ui.studio.import").then_some(ACTION.get().is_some())}
 pub(crate) fn sync_document_mode(session: &mut Session) {
     let Some(Ok(active)) = run_without_document(&Command::new("ui.persona.query")) else { return };
-    let target = match (active["id"].as_str(), session.document.layout_artboard_origins.is_some()) {
+    let target = match (base_persona(&active), session.document.layout_artboard_origins.is_some()) {
         (Some("vector"), true) => "layout",
         (Some("layout"), false) => "vector",
         _ => return,
@@ -49,11 +49,15 @@ pub(crate) fn sync_document_mode(session: &mut Session) {
 
 pub(super) fn select_document_persona(session: &mut Session, target: &str) -> Option<crate::ViewMode> {
     let command = Command::with_params("ui.persona.set", serde_json::json!({"id": target}));
-    let value = run_without_document(&command)?.ok()?;
+    let active = run_without_document(&Command::new("ui.persona.query"))?.ok()?;
+    let base = base_persona(&active);
+    let custom = active["id"].as_str().is_some_and(|id| id.starts_with("custom:"));
+    let compatible_custom = custom && (base == Some(target) || (base == Some("pixel") && target == "vector"));
+    let value = if compatible_custom { active } else { run_without_document(&command)?.ok()? };
     if let Some(tool) = value["active_tool"].as_str() {
         session.active_tool = crate::context_toolbar::active_id(tool);
     }
-    default_view_mode(target)
+    default_view_mode(base_persona(&value)?)
 }
 
 fn switches(name:&str)->bool{matches!(name,"ui.persona.set"|"ui.persona.enter_sub"|"ui.persona.leave_sub")}

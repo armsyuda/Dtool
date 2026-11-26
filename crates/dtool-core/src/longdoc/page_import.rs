@@ -4,13 +4,17 @@ use std::path::Path;
 use crate::clipboard::{collect_bundle_members, paste_bundle_mapped};
 use crate::commands::{document_change, masters, page_artboards, pages};
 use crate::document::{Page, PageId};
+use crate::guides::Guides;
 use crate::longdoc::helpers::{parse_page_ranges, unique_name};
+use crate::workspace::{ContextId, Scope, Workspace};
 use crate::{Command, CommandError, CommandResult, Document, ObjectId, Session};
 use serde_json::{Value, json};
 
 pub(crate) mod navigation;
 
 pub const IMPORT: &str = "page.import";
+pub const COPY_TO_DOCUMENT: &str = "page.copy_to_document";
+pub const MOVE_TO_DOCUMENT: &str = "page.move_to_document";
 
 fn section_index(value: &Value) -> Result<usize, CommandError> {
     value.as_u64().and_then(|n| usize::try_from(n).ok())
@@ -124,24 +128,132 @@ fn source_directory(path: &Path) -> Result<std::path::PathBuf, CommandError> {
 }
 
 pub(crate) fn run(session: &mut Session, command: &Command) -> CommandResult {
-    let target = &session.document;
-    if target.layout_artboard_origins.is_none() {
+    if session.document.layout_artboard_origins.is_none() {
         return Err(CommandError::invalid_params());
     }
     let path = command.path_param().filter(|path| !path.as_os_str().is_empty()).ok_or_else(CommandError::invalid_params)?;
     let directory = source_directory(&path)?;
-    let Placement { index: at, replacing, retained_section_start } = placement(target, &command.params)?;
+    let placement = placement(&session.document, &command.params)?;
     let (source, extras) = crate::native_io::read_file(&path).map_err(|err| err.read_error())?;
-    let (source, factor) = source_in_destination_units(source, target)?;
-    let indices = selected_indices(&source, &command.params)?;
+    let incoming = extras.get(crate::workspace::NATIVE_GUIDES_KEY)
+        .and_then(|value| serde_json::from_value(value.clone()).ok());
+    let source = source_in_destination_units(source, &session.document)?;
+    let indices = selected_indices(&source.0, &command.params)?;
+    prepare_import(session, source, indices, placement, &directory, incoming)?.commit(session, IMPORT)
+}
+
+pub fn insert_imported_pages(session: &mut Session, source: Document, path: &Path) -> CommandResult {
+    if session.document.layout_artboard_origins.is_none() {
+        return Err(CommandError::invalid_params());
+    }
+    let directory = source_directory(path)?;
+    let params = pages::viewed_page(session).map_or_else(|| json!({}), |page| json!({"after_id": page}));
+    let placement = placement(&session.document, &params)?;
+    let source = source_in_destination_units(source, &session.document)?;
+    let indices = (0..source.0.pages.len()).collect();
+    prepare_import(session, source, indices, placement, &directory, None)?.commit(session, IMPORT)
+}
+
+pub(crate) fn run_workspace(workspace: &mut Workspace, scope: Scope, command: &Command) -> Option<(Option<ContextId>, CommandResult)> {
+    if !matches!(command.name.as_str(), COPY_TO_DOCUMENT | MOVE_TO_DOCUMENT) {
+        return None;
+    }
+    let moving = command.name == MOVE_TO_DOCUMENT;
+    let source = scope.context.or_else(|| workspace.active());
+    let destination = command.params["destination_context"].as_u64().map(ContextId);
+    let result = (|| {
+        let source = source.ok_or_else(CommandError::no_document)?;
+        let destination = destination.ok_or_else(CommandError::invalid_params)?;
+        if source == destination {
+            return Err(CommandError::invalid_params());
+        }
+        let target = workspace.get(destination).ok_or_else(CommandError::context_not_found)?;
+        let origin = workspace.get(source).ok_or_else(CommandError::context_not_found)?;
+        if origin.session.document.layout_artboard_origins.is_none() || target.session.document.layout_artboard_origins.is_none() {
+            return Err(CommandError::invalid_params());
+        }
+        let ids: Vec<PageId> = serde_json::from_value(command.params["ids"].clone())
+            .map_err(|_| CommandError::invalid_params())?;
+        if command.params.get("replace_from_id").is_some() || command.params.get("into_section").is_some() {
+            return Err(CommandError::invalid_params());
+        }
+        let directory = match &origin.path {
+            Some(path) => source_directory(path)?,
+            None => std::env::current_dir().map_err(|err| crate::import_hook::read_error(&err))?,
+        };
+        workspace.finish_pending_edit(source, true)?;
+        workspace.finish_pending_edit(destination, true)?;
+        let origin = workspace.get(source).ok_or_else(CommandError::context_not_found)?;
+        let target = workspace.get(destination).ok_or_else(CommandError::context_not_found)?;
+        let indices = pages::selected_page_indices(&origin.session.document, &ids)?;
+        let placement = placement(&target.session.document, &command.params)?;
+        let removal = moving.then(|| pages::prepare_page_deletion(&origin.session, ids, true)).transpose()?;
+        let incoming = source_in_destination_units(origin.session.document.clone(), &target.session.document)?;
+        let prepared = prepare_import(&target.session, incoming, indices, placement,
+            &directory, Some(origin.session.guides.clone()))?;
+        let mut result = if let Some(removal) = removal {
+            let value = workspace.apply_linked_page_change(source, destination, |source, destination| {
+                let mut incoming = destination.run_with(command, |session, command| prepared.commit(session, &command.name))?;
+                let removed = source.run_with(command, |session, command| removal.commit(session, &command.name))?;
+                incoming["source_doc_version"] = removed["doc_version"].clone();
+                incoming["source_ids"] = removed["ids"].clone();
+                Ok(incoming)
+            })?;
+            workspace.record_paired_page_move(source, destination);
+            value
+        } else {
+            let target = workspace.get_mut(destination).ok_or_else(CommandError::context_not_found)?;
+            let result = target.session.run_with(command, |session, command| prepared.commit(session, &command.name))?;
+            crate::longdoc::fields::refresh_if_stale(&mut target.session);
+            result
+        };
+        result["context_id"] = json!(destination.0);
+        result["source_context"] = json!(source.0);
+        Ok(result)
+    })();
+    Some((if result.is_ok() { destination } else { source }, result))
+}
+
+struct PageImport {
+    document: Document,
+    selection: Vec<ObjectId>,
+    guides: Guides,
+    result: Value,
+}
+
+impl PageImport {
+    fn commit(self, session: &mut Session, command: &str) -> CommandResult {
+        document_change::commit_guides(session, command, self.document, self.selection, self.guides, self.result)
+    }
+}
+
+fn prepare_import(
+    session: &Session, (source, factor): (Document, f32), indices: Vec<usize>, placement: Placement,
+    directory: &Path, incoming: Option<Guides>,
+) -> Result<PageImport, CommandError> {
+    let target = &session.document;
+    let Placement { index: at, replacing, retained_section_start } = placement;
     let end = at + indices.len();
     if replacing && end > target.pages.len() {
         return Err(CommandError::out_of_range());
     }
     let included: HashSet<_> = indices.iter().copied().collect();
-    let chosen_masters: HashSet<_> = indices.iter().filter_map(|&index| {
-        source.master_pages.for_page(source.pages[index].id).map(|item| item.master)
+    let mut chosen_masters: HashSet<_> = indices.iter().flat_map(|&index| {
+        source.master_pages.on_page(source.pages[index].id).map(|item| item.master)
     }).collect();
+    let mut pending: Vec<_> = chosen_masters.iter().copied().collect();
+    while let Some(id) = pending.pop() {
+        for &page in source.master_pages.spread_pages(&id) {
+            if chosen_masters.insert(page) {
+                pending.push(page);
+            }
+        }
+        if let Some(binding) = source.master_pages.for_master(id)
+            && chosen_masters.insert(binding.inherited.master)
+        {
+            pending.push(binding.inherited.master);
+        }
+    }
     let mut members = HashSet::new();
     let mut page_of = HashMap::new();
     for object in &source.objects {
@@ -165,7 +277,7 @@ pub(crate) fn run(session: &mut Session, command: &Command) -> CommandResult {
 
     let mut bundle = collect_bundle_members(&source, &members);
     let excerpts = super::pages::restrict_page_copy(&source, &mut bundle);
-    resolve_bundle_links(&mut bundle, &directory);
+    resolve_bundle_links(&mut bundle, directory);
     for object in &mut bundle.objects {
         object.page_id = None;
     }
@@ -207,6 +319,7 @@ pub(crate) fn run(session: &mut Session, command: &Command) -> CommandResult {
         let id = if replacing { target.pages[at + offset].id } else { document.alloc_page_id() };
         let mut page = Page::new(id, [w, h]);
         page.name.clone_from(&source.pages[index].name);
+        page.tag_colour.clone_from(&source.pages[index].tag_colour);
         page.fold = source.pages[index].fold;
         page.column_guides = source.pages[index].column_guides;
         page.spread_group = if replacing {
@@ -214,12 +327,19 @@ pub(crate) fn run(session: &mut Session, command: &Command) -> CommandResult {
         } else {
             destination_group.or_else(|| source_groups.get(&index).copied())
         };
+        page.spread_spine = if replacing {
+            target.pages[at + offset].spread_spine
+        } else if destination_group.is_none() && source_groups.contains_key(&index) {
+            source.pages[index].spread_spine
+        } else {
+            None
+        };
         new_ids.insert(source.pages[index].id, id);
         new_pages.push(page);
     }
     document.pages.splice(at..if replacing { end } else { at }, new_pages);
     if !replacing {
-        if at == 0 && crate::data_merge::layout::has_right_cover(&document) {
+        if at == 0 && document.fixed_spreads.is_none() && crate::data_merge::layout::has_right_cover(&document) {
             document.pages[0].spread_group = None;
         }
         for (index, section) in document.sections.iter_mut().enumerate().skip(1) {
@@ -237,14 +357,24 @@ pub(crate) fn run(session: &mut Session, command: &Command) -> CommandResult {
 
     import_swatches(&mut document, &bundle);
     let map = paste_bundle_mapped(&mut document, &bundle, None, [0.0; 2]);
-    let mut names: Vec<_> = document.master_pages.roots.iter().filter_map(|id| document.get_object(*id))
+    let mut names: Vec<_> = document.master_pages.spread_roots().filter_map(|id| document.get_object(id))
         .map(|root| root.name.clone()).collect();
-    for old in &source.master_pages.roots {
-        if let Some(&new) = map.get(old) {
-            let root = document.find_object_mut(new.0).ok_or_else(CommandError::not_found)?;
-            root.name = unique_name(&names, &root.name);
-            names.push(root.name.clone());
-            document.master_pages.roots.push(new);
+    for old in source.master_pages.spread_roots().filter(|id| map.contains_key(id)) {
+        let root = source.get_object(old).ok_or_else(CommandError::not_found)?;
+        let name = unique_name(&names, &root.name);
+        names.push(name.clone());
+        let pages = source.master_pages.spread_pages(&old).iter().map(|id|
+            map.get(id).copied().ok_or_else(CommandError::not_found)).collect::<Result<Vec<_>, _>>()?;
+        for (index, &id) in pages.iter().enumerate() {
+            let root = document.find_object_mut(id.0).ok_or_else(CommandError::not_found)?;
+            root.name = masters::physical_name(&name, index);
+        }
+        document.master_pages.roots.extend(&pages);
+        if let Some(colour) = source.master_pages.tag_colour(old) {
+            document.master_pages.tag_colours.insert(pages[0].0, colour.to_owned());
+        }
+        if let Some(spread) = source.master_pages.spread(old) {
+            document.master_pages.spreads.push(masters::MasterSpread { pages, spine: spread.spine });
         }
     }
     for (&old, &new) in &map {
@@ -258,6 +388,13 @@ pub(crate) fn run(session: &mut Session, command: &Command) -> CommandResult {
             curve.source_object = curve.source_object.and_then(|id| map.get(&ObjectId(id)).map(|copy| copy.0));
         }
     }
+    for binding in &source.master_pages.master_assignments {
+        if let Some(&target) = map.get(&binding.target) {
+            document.master_pages.master_assignments.push(masters::MasterAssignment {
+                target, inherited: remap_master(&binding.inherited, &map)?,
+            });
+        }
+    }
     for (offset, &index) in indices.iter().enumerate() {
         let old = &source.pages[index];
         let page = &mut document.pages[at + offset];
@@ -265,37 +402,55 @@ pub(crate) fn run(session: &mut Session, command: &Command) -> CommandResult {
         if page.artboard_id.is_some() && source.artboard_backing_pages.contains(&old.id) {
             document.artboard_backing_pages.insert(page.id);
         }
-        if let Some(assignment) = source.master_pages.for_page(old.id) {
-            let master = *map.get(&assignment.master).ok_or_else(CommandError::not_found)?;
+        for assignment in source.master_pages.on_page(old.id) {
             document.master_pages.assignments.push(masters::Assignment {
-                page: page.id, master,
-                group: assignment.group.and_then(|id| map.get(&id).copied()),
-                links: assignment.links.iter().filter_map(|(source, instance)| Some((*map.get(source)?, *map.get(instance)?))).collect(),
+                page: page.id, stack_slot: assignment.stack_slot, inherited: remap_master(&assignment.inherited, &map)?,
             });
         }
     }
     copy_document_metadata(&source, &mut document, &map, &bundle, factor);
     masters::materialize_groups(&mut document);
     masters::arrange_masters(&mut document);
-    let imported_symbols = crate::commands::symbols::page_import::import(&source, &mut document, &map, &new_ids, Some(&directory))?;
+    masters::lock_positions(&mut document);
+    let imported_symbols = crate::commands::symbols::page_import::import(&source, &mut document, &map, &new_ids, Some(directory))?;
     let omitted_links = navigation::copy(&source, target, &mut document, &bundle, &map, &excerpts,
         navigation::PageTransfer::Import { indices: &indices, at })?;
     document.validate_refs().map_err(CommandError::from)?;
 
-    let incoming: Option<crate::guides::Guides> = extras.get(crate::workspace::NATIVE_GUIDES_KEY)
-        .and_then(|value| serde_json::from_value(value.clone()).ok());
     for mut guide in incoming.into_iter().flat_map(|guides| guides.items) {
-        let Some(&page) = guide.page_id.and_then(|id| new_ids.get(&id)) else { continue };
+        if let Some(id) = guide.master_id {
+            let Some(&master) = map.get(&id) else { continue };
+            guide.master_id = Some(master);
+        } else {
+            let Some(&page) = guide.page_id.and_then(|id| new_ids.get(&id)) else { continue };
+            guide.page_id = Some(page);
+        }
         guide.id = guides.next_id();
-        guide.page_id = Some(page);
         guide.position *= factor;
         guides.insert(guide).map_err(|_| CommandError::invalid_params())?;
     }
     let ids: Vec<_> = document.pages[at..end].iter().map(|page| page.id).collect();
-    document_change::commit_guides(session, IMPORT, document, selection, guides, json!({"id": ids[0], "ids": ids, "replaced": replacing, "omitted_links": omitted_links, "imported_symbols": imported_symbols}))
+    Ok(PageImport {
+        document, selection, guides,
+        result: json!({"id": ids[0], "ids": ids, "replaced": replacing, "omitted_links": omitted_links, "imported_symbols": imported_symbols}),
+    })
 }
 
-fn copy_document_metadata(
+fn remap_master(
+    source: &masters::InheritedMaster, ids: &HashMap<ObjectId, ObjectId>,
+) -> Result<masters::InheritedMaster, CommandError> {
+    Ok(masters::InheritedMaster {
+        master: *ids.get(&source.master).ok_or_else(CommandError::not_found)?,
+        group: source.group.and_then(|id| ids.get(&id).copied()),
+        group_basis: source.group_basis,
+        links: source.links.iter().filter_map(|(original, instance)| Some((*ids.get(original)?, *ids.get(instance)?))).collect(),
+        placement: source.placement,
+        matching_overrides: source.matching_overrides.iter()
+            .filter_map(|(id, keys)| Some((ids.get(&ObjectId(*id))?.0, keys.clone()))).collect(),
+    })
+}
+
+pub(crate) fn copy_document_metadata(
     source: &Document,
     destination: &mut Document,
     map: &HashMap<ObjectId, ObjectId>,
@@ -307,6 +462,13 @@ fn copy_document_metadata(
             frame.object = id;
             frame.image = destination.placed_resource(id);
             frame.content.offset = frame.content.offset.map(|value| value * factor);
+            if let Some(layout) = &mut frame.manual_layout {
+                layout.fit_size = layout.fit_size.map(|value| value * factor);
+                layout.anchor_size = layout.anchor_size.map(|value| value * factor);
+                if frame.fit == crate::commands::picture_frame::ImageFit::Native {
+                    frame.content.scale = frame.content.scale.map(|value| value * factor);
+                }
+            }
             destination.picture_frames.push(frame);
         }
     }

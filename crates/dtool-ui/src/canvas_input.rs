@@ -89,12 +89,35 @@ pub enum Drag {
     Shape { kind: ShapeKind, start: [f32; 2], current: [f32; 2] },
     ArtText { start: [f32; 2], current: [f32; 2] },
     Crop { target: ObjectId, start: [f32; 2], current: [f32; 2] },
-    Slice { start: [f32; 2], current: [f32; 2] },
+    Slice { start: [f32; 2], current: [f32; 2], edit: Option<SliceDrag> },
     Gradient { kind: Option<GradientKind>, transparency: bool, target: ObjectId, start: [f32; 2], current: [f32; 2] },
     MaskGradient { kind: GradientKind, start: [f32; 2], current: [f32; 2] },
     Line { start: [f32; 2], current: [f32; 2] },
     ShapeParam { target: ObjectId, kind: ShapeParamKind, start: [f32; 2], current: [f32; 2], grab_offset: [f32; 2] },
     PictureFrame { shape: FrameShape, start: [f32; 2], current: [f32; 2] },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SliceDrag {
+    id: dtool_core::slice::SliceId,
+    bounds: [f32; 4],
+    corner: Option<usize>,
+}
+
+impl SliceDrag {
+    fn bounds_at(self, start: [f32; 2], end: [f32; 2]) -> [f32; 4] {
+        let [x, y, right, bottom] = self.bounds;
+        let dx = end[0] - start[0];
+        let dy = end[1] - start[1];
+        let min = 0.01;
+        match self.corner {
+            Some(0) => [(x + dx).min(right - min), (y + dy).min(bottom - min), right, bottom],
+            Some(1) => [x, (y + dy).min(bottom - min), (right + dx).max(x + min), bottom],
+            Some(2) => [x, y, (right + dx).max(x + min), (bottom + dy).max(y + min)],
+            Some(_) => [(x + dx).min(right - min), y, right, (bottom + dy).max(y + min)],
+            None => [x + dx, y + dy, right + dx, bottom + dy],
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -679,6 +702,23 @@ pub fn handle_cursor(handle: Handle) -> egui::CursorIcon {
         Handle::Rotate => egui::CursorIcon::Alias,
         Handle::ShearTop | Handle::ShearBottom => egui::CursorIcon::ResizeColumn,
     }
+}
+
+fn slice_hit(session: &Session, rect: Rect, pointer: Pos2, [x, y]: [f32; 2]) -> Option<SliceDrag> {
+    let slices = &session.document.slices;
+    if let Some(slice) = slices.iter().find(|slice| session.active_slice == Some(slice.id))
+        && let Ok(bounds @ [left, top, right, bottom]) = slice.resolved_bounds(&session.document)
+    {
+        let corners = [[left, top], [right, top], [right, bottom], [left, bottom]];
+        if let Some(corner) = corners.iter().position(|&point| screen(rect, &session.view, point).distance(pointer) <= 8.0) {
+            return Some(SliceDrag { id: slice.id, bounds, corner: Some(corner) });
+        }
+    }
+    slices.iter().rev().find_map(|slice| {
+        let bounds @ [left, top, right, bottom] = slice.resolved_bounds(&session.document).ok()?;
+        (x >= left && x <= right && y >= top && y <= bottom)
+            .then_some(SliceDrag { id: slice.id, bounds, corner: None })
+    })
 }
 
 fn screen(rect: Rect, view: &ViewState, point: [f32; 2]) -> Pos2 {
@@ -1293,7 +1333,13 @@ impl CanvasInput {
         self.preselected = false;
         if !on_handle {
             let hit = self.hit(scene, session, point);
-            if let Some(id) = hit.filter(|id| !session.selection.ids.contains(id)) {
+            let on_selected_master = hit.is_some_and(|id| {
+                session.document.master_pages.inherited_content().any(|binding| {
+                    binding.group.is_some_and(|group| session.selection.ids.contains(&group)
+                        && session.document.subtree_ids(group).contains(&id))
+                })
+            });
+            if let Some(id) = hit.filter(|id| !on_selected_master && !session.selection.ids.contains(id)) {
                 let op = if mods.shift { "Add" } else { "Replace" };
                 self.preselected = self.run(session, Some(Command::with_params("selection.set", json!({ "ids": [id.0], "op": op }))));
                 self.move_tool.set_selection_frame(selection_frame(scene, &session.document, &session.selection.ids));
@@ -1404,12 +1450,18 @@ impl CanvasInput {
             Some(Drag::PictureFrame { shape, start, .. }) => picture_frame_command(shape, start, end, mods),
             Some(Drag::ArtText { start, .. }) => return self.create_art_text(session, start, end),
             Some(Drag::Crop { target, start, .. }) => crate::canvas_tools::crop_command(session, target, start, end),
-            Some(Drag::Slice { start, .. }) => {
+            Some(Drag::Slice { start, edit, .. }) => {
                 let zoom = session.view.zoom;
-                ((start[0] - end[0]).abs() * zoom >= 4.0 && (start[1] - end[1]).abs() * zoom >= 4.0)
-                    .then(|| Command::with_params("slice.create", json!({
+                let delta = [(start[0] - end[0]).abs() * zoom, (start[1] - end[1]).abs() * zoom];
+                if let Some(edit) = edit {
+                    (delta[0].hypot(delta[1]) >= 2.0).then(|| {
+                        Command::with_params("slice.update", json!({ "id": edit.id, "rect": edit.bounds_at(start, end) }))
+                    })
+                } else {
+                    (delta[0] >= 4.0 && delta[1] >= 4.0).then(|| Command::with_params("slice.create", json!({
                         "rect": [start[0].min(end[0]), start[1].min(end[1]), start[0].max(end[0]), start[1].max(end[1])]
                     })))
+                }
             }
             Some(Drag::Gradient { kind, transparency, target, start, .. }) => {
                 crate::canvas_tools::gradient_command_for_tool(session, target, kind, transparency, start, end)
@@ -1744,7 +1796,14 @@ impl CanvasInput {
                 }
                 if response.double_clicked() && !param_gesture && !mods.alt {
                     if let Some(p) = point {
-                        changed |= self.enter_group(scene, session, p);
+                        let hit = self.hit(scene, session, p).filter(|id|
+                            session.document.get_object(*id).is_none_or(|object| object.kind != dtool_core::ObjectKind::Artboard));
+                        let opened = crate::table::canvas::edit_at(session, scene, p, hit);
+                        match opened {
+                            Ok(true) => { response.request_focus(); changed = true; }
+                            Ok(false) => changed |= self.enter_group(scene, session, p),
+                            Err(error) => { self.error_key = Some(error.message_key); self.last_error = Some(error.code); }
+                        }
                     }
                 }
                 if let (Some(p), false) = (point.filter(|_| response.hovered()), self.move_tool.dragging) {
@@ -1991,8 +2050,11 @@ impl CanvasInput {
                 if let Some(start) = down.filter(|pos| response.enabled() && response.interact_rect.contains(*pos)
                     && ui.ctx().layer_id_at(*pos) == Some(response.layer_id) && !egui::Popup::is_any_open(ui.ctx()))
                 {
-                    let start = to_doc(start);
-                    self.drag = Some(Drag::Slice { start, current: start });
+                    let pointer = start;
+                    let start = to_doc(pointer);
+                    let edit = if mods.shift { None } else { slice_hit(session, rect, pointer, start) };
+                    let _ = session.run_named("slice.select", json!({ "id": edit.map(|target| target.id) }));
+                    self.drag = Some(Drag::Slice { start, current: start, edit });
                 }
                 if let (Some(Drag::Slice { current, .. }), Some(p)) = (self.drag.as_mut(), point) {
                     *current = p;
@@ -2532,13 +2594,21 @@ impl CanvasInput {
             for slice in &session.document.slices {
                 if let Ok(bounds) = slice.resolved_bounds(&session.document) {
                     let points = corners(bounds);
-                    painter.add(egui::Shape::closed_line(points.to_vec(), border));
+                    let selected = session.active_slice == Some(slice.id);
+                    let line = if selected { Stroke::new(2.0, border.color) } else { border };
+                    painter.add(egui::Shape::closed_line(points.to_vec(), line));
+                    if selected {
+                        for corner in points {
+                            painter.rect_filled(Rect::from_center_size(corner, egui::vec2(6.0, 6.0)), 1.0, line.color);
+                        }
+                    }
                     painter.text(points[0] + egui::vec2(4.0, 3.0), egui::Align2::LEFT_TOP, &slice.name,
                         egui::FontId::proportional(11.0), border.color);
                 }
             }
-            if let Some(Drag::Slice { start, current }) = self.drag {
-                let points = corners([start[0], start[1], current[0], current[1]]);
+            if let Some(Drag::Slice { start, current, edit }) = self.drag {
+                let bounds = edit.map_or([start[0], start[1], current[0], current[1]], |edit| edit.bounds_at(start, current));
+                let points = corners(bounds);
                 painter.add(egui::Shape::convex_polygon(points.to_vec(), border.color.gamma_multiply(0.10), border));
             }
         }

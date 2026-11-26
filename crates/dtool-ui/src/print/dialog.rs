@@ -22,6 +22,12 @@ enum SettingsTab {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
+enum PrintPane {
+    Settings,
+    Preview,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum Source {
     Pages,
     Spreads,
@@ -44,6 +50,7 @@ pub(crate) struct PrintDialog {
     profile_name: Option<String>,
     profile_error: Option<&'static str>,
     tab: SettingsTab,
+    compact_pane: PrintPane,
     sheet: usize,
     preview: Option<(u64, Vec<Sheet>, Vec<TextureHandle>)>,
     error: Option<&'static str>,
@@ -67,7 +74,8 @@ impl PrintDialog {
         Self {
             owner, printer, printer_name, default_icc, selected_icc: None, to_file: false, source, from: 1, to: count.max(1),
             options: PrintOptions::default(), profiles, active_profile: None, profile_name: None,
-            profile_error, tab: SettingsTab::Layout, sheet: 0, preview: None, error: None,
+            profile_error, tab: SettingsTab::Layout, compact_pane: PrintPane::Settings,
+            sheet: 0, preview: None, error: None,
         }
     }
 
@@ -90,7 +98,7 @@ impl PrintDialog {
             let height = (viewport.height() - 154.0).clamp(170.0, 560.0);
             let inset = 2.0 * (dtool_design::space("sm") + dtool_design::stroke_width("thin"));
             ui.set_width(width);
-            if width >= 670.0 {
+            if width >= 700.0 {
                 let gap = 12.0;
                 let settings_width = (width * 0.48).clamp(324.0, 442.0);
                 let preview_width = width - settings_width - gap;
@@ -99,6 +107,7 @@ impl PrintDialog {
                     body.left_top() + Vec2::new(preview_width + gap, 0.0), Vec2::new(settings_width, height),
                 );
                 let mut settings = ui.new_child(egui::UiBuilder::new().id_salt("print.settings_panel").max_rect(settings_bounds));
+                settings.set_clip_rect(settings.clip_rect().intersect(settings_bounds));
                 dtool_design::dialog_section(&mut settings, |ui| {
                     ui.set_width(settings_width - inset);
                     options_scroll(ui, "print.settings", height - inset, |ui| self.controls(ui, doc, &mut regions));
@@ -109,24 +118,52 @@ impl PrintDialog {
                 dtool_design::dialog_section(&mut preview, |ui| {
                     ui.set_width(preview_width - inset);
                     ui.set_min_height(height - inset);
-                    self.preview(ui, doc, &context.title, &sheets, height - inset);
+                    self.preview(ui, doc, &context.title, &sheets, height - inset, true);
                 });
             } else {
-                options_scroll(ui, "print.compact", height, |ui| {
-                        dtool_design::dialog_section(ui, |ui| self.controls(ui, doc, &mut regions));
-                        sheets = self.sheets(doc, &regions);
-                        dtool_design::dialog_section(ui, |ui| self.preview(ui, doc, &context.title, &sheets, 380.0));
-                    });
+                let tabs = ui.horizontal_wrapped(|ui| {
+                    for (pane, key) in [(PrintPane::Settings, "print.native.settings"), (PrintPane::Preview, "print.native.preview")] {
+                        if dtool_design::tab(ui, self.compact_pane == pane, text(key)).clicked() {
+                            self.compact_pane = pane;
+                        }
+                    }
+                });
+                let height = (height - inset - tabs.response.rect.height() - ui.spacing().item_spacing.y).max(110.0);
+                dtool_design::dialog_section(ui, |ui| {
+                    ui.set_width(width - inset);
+                    match self.compact_pane {
+                        PrintPane::Settings => {
+                            options_scroll(ui, "print.settings", height, |ui| self.controls(ui, doc, &mut regions));
+                            sheets = self.sheets(doc, &regions);
+                        }
+                        PrintPane::Preview => {
+                            sheets = self.sheets(doc, &regions);
+                            options_scroll(ui, "print.preview", height, |ui| {
+                                self.preview(ui, doc, &context.title, &sheets, height, false);
+                            });
+                        }
+                    }
+                });
             }
             ui.separator();
             if let Some(error) = self.error {
                 ui.colored_label(ui.visuals().error_fg_color, text(error));
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let ready = !sheets.is_empty() && self.printer.as_ref().and_then(Printer::paper).is_some();
-                let print = ui.add_enabled_ui(ready, |ui| {
-                    dtool_design::primary_button(ui, text("print.print"), Vec2::new(80.0, 24.0)).clicked()
+                let blocked = if sheets.is_empty() {
+                    Some("print.native.no_sheets")
+                } else if self.printer.as_ref().and_then(Printer::paper).is_none() {
+                    Some("print.native.no_paper")
+                } else {
+                    None
+                };
+                let mut response = ui.add_enabled_ui(blocked.is_none(), |ui| {
+                    dtool_design::primary_button(ui, text("print.print"), Vec2::new(80.0, 24.0))
                 }).inner;
+                if let Some(reason) = blocked {
+                    response = response.on_disabled_hover_text(text(reason));
+                }
+                let print = response.clicked();
                 let cancel = dtool_design::button(ui, text("print.cancel")).clicked();
                 (cancel, print)
             }).inner
@@ -169,15 +206,17 @@ impl PrintDialog {
             ui.label(text("print.profile"));
             let pick = egui::ComboBox::from_id_salt("print_profile").width(150.0).truncate()
                 .selected_text(current_text).show_ui(ui, |ui| {
-                    if ui.selectable_label(at_defaults, text("print.native.profile_defaults")).clicked() {
-                        return Some(None);
-                    }
-                    for name in self.profiles.keys() {
-                        if ui.selectable_label(current == Some(name), name).clicked() {
-                            return Some(Some(name.clone()));
+                    dtool_design::with_icon_selection(ui, |ui| {
+                        if ui.selectable_label(at_defaults, text("print.native.profile_defaults")).clicked() {
+                            return Some(None);
                         }
-                    }
-                    None
+                        for name in self.profiles.keys() {
+                            if ui.selectable_label(current == Some(name), name).clicked() {
+                                return Some(Some(name.clone()));
+                            }
+                        }
+                        None
+                    })
                 }).inner.flatten();
             if dtool_design::button(ui, text("print.native.profile_save_as")).clicked() {
                 self.profile_name = Some(self.active_profile.clone().unwrap_or_default());
@@ -260,9 +299,8 @@ impl PrintDialog {
                 ui.weak(text("print.native.to_file_hint"));
             }
             SettingsTab::Rasterization => {
-                ui.horizontal(|ui| {
-                    ui.label(text("print.rasterize_dpi"));
-                    ui.add(egui::DragValue::new(&mut self.options.dpi).range(72..=600));
+                print_row(ui, "print.rasterize_dpi", |ui, label| {
+                    self.options.dpi = number(ui, "print.raster_dpi", label, self.options.dpi as usize, 72..=600, "") as u32;
                 });
                 dtool_design::toggle(ui, &mut self.options.clip_transparency, text("print.native.clip_transparent_margins"))
                     .on_hover_text(text("print.native.clip_transparent_margins_hint"));
@@ -282,35 +320,34 @@ impl PrintDialog {
     }
 
     fn colour(&mut self, ui: &mut Ui, doc: &Document) {
-        egui::Grid::new("print_colour_options").num_columns(2).spacing([10.0, 7.0]).show(ui, |ui| {
-            ui.label(text("print.native.source_profile"));
-            ui.add(egui::Label::new(&doc.colour.profile).truncate());
-            ui.end_row();
-            ui.label(text("print.native.colour_handling"));
+        print_row(ui, "print.native.source_profile", |ui, _| {
+            ui.add(egui::Label::new(&doc.colour.profile).truncate()).on_hover_text(&doc.colour.profile);
+        });
+        print_row(ui, "print.native.colour_handling", |ui, label| {
             let mode = self.options.colour_mode;
-            choose(ui, "print_colour_mode", &mut self.options.colour_mode, &[
+            choose(ui, "print_colour_mode", label, &mut self.options.colour_mode, &[
                 (ColourMode::Driver, "print.native.colour_driver"),
                 (ColourMode::Windows, "print.native.colour_windows"),
             ]);
-            if mode != self.options.colour_mode { self.error = None; }
-            ui.end_row();
-            if self.options.colour_mode == ColourMode::Windows {
-                ui.label(text("print.native.output_profile"));
-                let name = self.selected_icc.as_deref().or(self.default_icc.as_deref());
-                let label = name.and_then(Path::file_name).map(|name| name.to_string_lossy());
-                ui.add(egui::Label::new(label.as_deref().unwrap_or_else(|| text("print.native.output_default"))).truncate());
-                ui.end_row();
-                ui.label(text("settings.colour.intent"));
-                choose(ui, "print_rendering_intent", &mut self.options.intent, &[
+            if mode != self.options.colour_mode {
+                self.error = None;
+            }
+        });
+        if self.options.colour_mode == ColourMode::Windows {
+            print_row(ui, "print.native.output_profile", |ui, _| {
+                let path = self.selected_icc.as_deref().or(self.default_icc.as_deref());
+                let name = path.and_then(Path::file_name).map(|name| name.to_string_lossy());
+                let caption = name.as_deref().unwrap_or_else(|| text("print.native.output_default"));
+                ui.add(egui::Label::new(caption).truncate()).on_hover_text(caption);
+            });
+            print_row(ui, "settings.colour.intent", |ui, label| {
+                choose(ui, "print_rendering_intent", label, &mut self.options.intent, &[
                     (RenderingIntent::Perceptual, "colour.intent.perceptual"),
                     (RenderingIntent::RelativeColorimetric, "colour.intent.relative"),
                     (RenderingIntent::Saturation, "colour.intent.saturation"),
                     (RenderingIntent::AbsoluteColorimetric, "colour.intent.absolute"),
                 ]);
-                ui.end_row();
-            }
-        });
-        if self.options.colour_mode == ColourMode::Windows {
+            });
             ui.horizontal_wrapped(|ui| {
                 if dtool_design::button(ui, text("print.native.pick_icc")).clicked() {
                     match crate::dialogs::pick_file_path_with_extensions(
@@ -356,14 +393,12 @@ impl PrintDialog {
     }
 
     fn job_controls(&mut self, ui: &mut Ui, doc: &Document, selected: &mut Vec<PrintRegion>) {
-        egui::Grid::new("print_job_options").num_columns(2).spacing([10.0, 7.0]).show(ui, |ui| {
-            ui.label(text("print.copies"));
-            ui.horizontal(|ui| {
-                ui.add(egui::DragValue::new(&mut self.options.copies).range(1..=99));
-                dtool_design::toggle_with(ui, &mut self.options.collate, text("print.native.collate"), &dtool_design::ControlState::enabled(self.options.copies > 1));
-            });
-            ui.end_row();
-            ui.label(text("print.range"));
+        print_row(ui, "print.copies", |ui, label| ui.horizontal_wrapped(|ui| {
+            self.options.copies = number(ui, "print.copies", label, self.options.copies, 1..=99, "");
+            dtool_design::toggle_with(ui, &mut self.options.collate, text("print.native.collate"),
+                &dtool_design::ControlState::enabled(self.options.copies > 1));
+        }).inner);
+        print_row(ui, "print.range", |ui, label| {
             let source = self.source;
             let mut choices = vec![(Source::Pages, "print.native.pages")];
             if dtool_core::data_merge::layout::spread_ranges(doc).iter().any(|range| range.len() > 1)
@@ -375,7 +410,7 @@ impl PrintDialog {
                 choices.push((Source::Artboards, "print.native.artboards"));
             }
             ui.add_enabled_ui(choices.len() > 1, |ui| {
-                choose(ui, "print_source", &mut self.source, &choices);
+                choose(ui, "print_source", label, &mut self.source, &choices);
             });
             if source != self.source {
                 *selected = regions(doc, self.source);
@@ -383,36 +418,31 @@ impl PrintDialog {
                 self.to = source_count(doc, self.source).max(1);
                 self.sheet = 0;
             }
-            ui.end_row();
-            ui.label(text("print.native.first_last"));
-            ui.horizontal(|ui| {
-                let count = source_count(doc, self.source).max(1);
-                self.to = self.to.clamp(1, count);
-                self.from = self.from.clamp(1, self.to);
-                ui.add(egui::DragValue::new(&mut self.from).range(1..=self.to));
-                ui.label("–");
-                ui.add(egui::DragValue::new(&mut self.to).range(self.from..=count));
-            });
-            ui.end_row();
-            ui.label(text("print.include"));
-            ui.horizontal(|ui| {
-                choose(ui, "print_include", &mut self.options.subset, &[
-                    (PageSubset::All, "print.native.all"), (PageSubset::Odd, "print.native.odd"), (PageSubset::Even, "print.native.even"),
-                ]);
-                dtool_design::toggle(ui, &mut self.options.reverse, text("print.reverse"));
-            });
-            ui.end_row();
-            ui.label(text("print.fit_type"));
-            choose(ui, "print_sizing", &mut self.options.size_mode, &[
+        });
+        print_row(ui, "print.native.first_last", |ui, label| ui.horizontal_wrapped(|ui| {
+            let count = source_count(doc, self.source).max(1);
+            self.to = self.to.clamp(1, count);
+            self.from = self.from.clamp(1, self.to);
+            self.from = number(ui, "print.from", label, self.from, 1..=self.to, "");
+            ui.label("–");
+            self.to = number(ui, "print.to", label, self.to, self.from..=count, "");
+        }).inner);
+        print_row(ui, "print.include", |ui, label| ui.horizontal_wrapped(|ui| {
+            choose(ui, "print_include", label, &mut self.options.subset, &[
+                (PageSubset::All, "print.native.all"), (PageSubset::Odd, "print.native.odd"), (PageSubset::Even, "print.native.even"),
+            ]);
+            dtool_design::toggle(ui, &mut self.options.reverse, text("print.reverse"));
+        }).inner);
+        print_row(ui, "print.fit_type", |ui, label| {
+            choose(ui, "print_sizing", label, &mut self.options.size_mode, &[
                 (SizeMode::Actual, "print.native.actual"), (SizeMode::Fit, "print.native.fit"), (SizeMode::Scale, "print.native.custom"),
             ]);
-            ui.end_row();
-            if self.options.size_mode == SizeMode::Scale {
-                ui.label(text("print.native.custom"));
-                ui.add(egui::DragValue::new(&mut self.options.scale).range(1..=500).suffix("%"));
-                ui.end_row();
-            }
         });
+        if self.options.size_mode == SizeMode::Scale {
+            print_row(ui, "print.native.custom", |ui, label| {
+                self.options.scale = number(ui, "print.scale", label, self.options.scale as usize, 1..=500, "%") as u32;
+            });
+        }
     }
 
     fn layout(&mut self, ui: &mut Ui) {
@@ -423,8 +453,7 @@ impl PrintDialog {
                 ui.label(format!("{width:.1} × {height:.1} mm"));
             });
         }
-        ui.horizontal(|ui| {
-            ui.label(text("print.native.page_layout"));
+        print_row(ui, "print.native.page_layout", |ui, caption| ui.horizontal_wrapped(|ui| {
             let old_layout = self.options.page_layout;
             for (layout, columns, rows, key) in [
                 (PageLayout::Single, 1, 1, "print.native.page_layout_one"),
@@ -447,7 +476,7 @@ impl PrintDialog {
                     ui.painter().hline(sheet.x_range(), sheet.center().y, stroke);
                 }
                 response.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, ui.is_enabled(), selected, text(key)));
-                if response.on_hover_text(text(key)).clicked() {
+                if response.labelled_by(caption).on_hover_text(text(key)).clicked() {
                     self.options.page_layout = layout;
                 }
             }
@@ -457,7 +486,7 @@ impl PrintDialog {
                     self.options.size_mode = SizeMode::Fit;
                 }
             }
-        });
+        }).inner);
     }
 
     fn sheets(&self, doc: &Document, selected: &[PrintRegion]) -> Vec<Sheet> {
@@ -482,8 +511,10 @@ impl PrintDialog {
         sheets
     }
 
-    fn preview(&mut self, ui: &mut Ui, doc: &Document, title: &str, regions: &[Sheet], height: f32) {
-        dtool_design::panel_header(ui, text("print.native.preview"));
+    fn preview(&mut self, ui: &mut Ui, doc: &Document, title: &str, regions: &[Sheet], height: f32, show_title: bool) {
+        if show_title {
+            dtool_design::panel_header(ui, text("print.native.preview"));
+        }
         let layout = self.options.page_layout;
         let per_side = layout.per_side();
         let count = regions.len().div_ceil(per_side);
@@ -571,13 +602,41 @@ impl PrintDialog {
     }
 }
 
-fn choose<T: Copy + PartialEq>(ui: &mut Ui, id: &str, field: &mut T, choices: &[(T, &str)]) {
+fn print_row<R>(ui: &mut Ui, key: &str, draw: impl FnOnce(&mut Ui, egui::Id) -> R) -> R {
+    let label = text(key);
+    if ui.available_width() < 280.0 {
+        let caption = ui.label(label);
+        draw(ui, caption.id)
+    } else {
+        dtool_design::studio_row(ui, label, draw)
+    }
+}
+
+fn number(
+    ui: &mut Ui, key: &str, label: egui::Id, value: usize, range: std::ops::RangeInclusive<usize>, suffix: &str,
+) -> usize {
+    use dtool_design::{NumericEvent, NumericSpec, NumericValue, numeric_field};
+    let spec = NumericSpec::new("").decimals(0).suffix(suffix).width(61.0)
+        .range(*range.start() as f64..=*range.end() as f64);
+    let id = ui.make_persistent_id(key);
+    let (response, event) = numeric_field(ui, id, NumericValue::Value(value as f64), &spec);
+    response.labelled_by(label);
+    match event {
+        NumericEvent::Commit(value) => value.round() as usize,
+        _ => value,
+    }
+}
+
+fn choose<T: Copy + PartialEq>(ui: &mut Ui, id: &str, label: egui::Id, field: &mut T, choices: &[(T, &str)]) {
     let selected = choices.iter().find(|(value, _)| value == field).map_or("", |(_, key)| text(key));
-    egui::ComboBox::from_id_salt(id).selected_text(selected).show_ui(ui, |ui| {
-        for &(value, key) in choices {
-            ui.selectable_value(field, value, text(key));
-        }
-    });
+    egui::ComboBox::from_id_salt(id).width(ui.available_width().clamp(1.0, 150.0)).truncate()
+        .selected_text(selected).show_ui(ui, |ui| {
+            dtool_design::with_icon_selection(ui, |ui| {
+                for &(value, key) in choices {
+                    ui.selectable_value(field, value, text(key));
+                }
+            });
+        }).response.labelled_by(label).on_hover_text(selected);
 }
 
 fn print_artboards(doc: &Document) -> impl Iterator<Item = &dtool_core::Object> {

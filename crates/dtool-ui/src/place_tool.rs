@@ -268,8 +268,8 @@ impl PlaceTool {
         Ok(())
     }
 
-    pub fn show_dialog(&mut self, ui: &mut egui::Ui, workspace: &mut Workspace) {
-        if !self.dialog_open { return; }
+    pub fn show_dialog(&mut self, ui: &mut egui::Ui, workspace: &mut Workspace) -> Vec<std::path::PathBuf> {
+        if !self.dialog_open { return Vec::new(); }
         let (mut confirm, mut cancel) = (false, false);
         egui::Window::new(text("menu.file.place")).collapsible(false).show(ui.ctx(), |ui| {
             dtool_design::dialog_frame(ui, |ui| {
@@ -286,16 +286,17 @@ impl PlaceTool {
         if cancel { self.cancel(workspace); }
         else if confirm {
             let paths = split_paths(&self.path);
-            let files: Vec<std::path::PathBuf> = paths.iter().map(std::path::PathBuf::from).collect();
+            let (pdfs, files): (Vec<_>, Vec<_>) = paths.iter().map(std::path::PathBuf::from)
+                .partition(|path| crate::pdf_import_dialog::is_pdf(path));
             let (texts, opens) = drop_commands(&files);
-            if !texts.is_empty() || !opens.is_empty() {
+            if !pdfs.is_empty() || !texts.is_empty() || !opens.is_empty() {
                 self.cancel(workspace);
                 self.dialog_open = false;
                 if let Err(error) = self.drop_files(workspace, &files) {
                     self.dialog_open = true;
                     self.error_key = Some(error.message_key);
                 }
-                return;
+                return pdfs;
             }
             let result = if paths.len() > 1 {
                 self.queue_set(workspace, paths)
@@ -305,6 +306,7 @@ impl PlaceTool {
             };
             if let Err(error) = result { self.error_key = Some(error.message_key); }
         }
+        Vec::new()
     }
 
     pub fn canvas(&mut self, ui: &mut egui::Ui, response: &egui::Response, id: ContextId, session: &mut Session, input: bool) {

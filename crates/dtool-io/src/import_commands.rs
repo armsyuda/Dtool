@@ -10,7 +10,8 @@ use serde_json::{Map, Value, json};
 use crate::af::inspect::FeatureStatus;
 use crate::{
     IoError, IoErrorKind, ImportFormat, ImportOptions, ImportProfile, ImportReport, PageSel, admit, admit_ai,
-    admit_svg, import_pdf, import_svg, inspect_af,
+    admit_svg, import_svg, inspect_af,
+    import_pdf::{ImportAs, ImportColour, import_pdf_document},
 };
 
 pub const ENGINE_IO: &str = "io";
@@ -33,9 +34,60 @@ pub fn handle(workspace: &mut Workspace, command: &Command) -> Option<(Option<Co
         IMPORT_AI => Some(import_command(workspace, params, ImportFormat::Ai)),
         IMPORT_SVG => Some(import_command(workspace, params, ImportFormat::Svg)),
         IMPORT_EPS => Some(import_eps_command(workspace, params)),
-        IMPORT_PLACE => Some((workspace.active(), path_param(params).and_then(|path| crate::import_into_current(workspace, path)))),
+        IMPORT_PLACE => Some((workspace.active(), place_command(workspace, params))),
         _ => None,
     }
+}
+
+fn place_command(workspace: &mut Workspace, params: &Value) -> CommandResult {
+    let path = path_param(params)?;
+    if !path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("pdf")) {
+        return crate::import_into_current(workspace, path);
+    }
+    let target = workspace.active().ok_or_else(CommandError::no_document)?;
+    place_pdf(workspace, target, path, &options_from(params)?)
+}
+
+pub fn place_pdf(workspace: &mut Workspace, target: ContextId, path: &Path, options: &ImportOptions) -> CommandResult {
+    let layout = workspace.get(target).ok_or_else(CommandError::context_not_found)?
+        .session.document.layout_artboard_origins.is_some();
+    let (document, report) = prepare_pdf(path, options, layout)?;
+    let mut result = place_prepared_pdf(workspace, target, path, document, layout)?;
+    result["report"] = report_value(&report);
+    Ok(result)
+}
+
+pub fn prepare_pdf(path: &Path, options: &ImportOptions, structured: bool) -> Result<(dtool_core::Document, ImportReport), CommandError> {
+    let imported = if structured {
+        import_pdf_document(path, options)
+    } else {
+        crate::import_pdf(path, options)
+    };
+    imported.map_err(|error| map_error(&error, options.password.is_some()))
+}
+
+pub fn place_prepared_pdf(workspace: &mut Workspace, target: ContextId, path: &Path, document: dtool_core::Document, layout: bool) -> CommandResult {
+    let context = workspace.get(target).ok_or_else(CommandError::context_not_found)?;
+    if context.session.document.layout_artboard_origins.is_some() != layout {
+        return Err(CommandError::invalid_params());
+    }
+    workspace.finish_pending_edit(target, true)?;
+    let session = &mut workspace.get_mut(target).ok_or_else(CommandError::context_not_found)?.session;
+    if layout {
+        dtool_core::longdoc::insert_imported_pages(session, document, path)
+    } else {
+        crate::place_current::place_document(session, &document)
+    }
+}
+
+pub fn open_prepared_pdf(workspace: &mut Workspace, title: &str, document: dtool_core::Document) -> ContextId {
+    let layout = document.layout_artboard_origins.is_some();
+    let id = workspace.insert_context(title, None, document, 0);
+    if let Some(session) = workspace.get_mut(id).map(|context| &mut context.session) {
+        let persona = if layout { "layout" } else { "vector" };
+        let _ = session.run(&Command::with_params("ui.persona.set", json!({"id": persona})));
+    }
+    id
 }
 
 fn format_name(format: ImportFormat) -> &'static str {
@@ -150,12 +202,28 @@ pub fn options_from(params: &Value) -> Result<ImportOptions, CommandError> {
     match raw.get("pages") {
         None | Some(Value::Null) => {}
         Some(Value::String(all)) if all == "all" => options.pages = PageSel::All,
+        Some(Value::String(range)) => options.pages = PageSel::Selection(range.clone()),
         Some(Value::Array(range)) if range.len() == 2 => {
             let start = range[0].as_u64().ok_or_else(CommandError::invalid_params)? as u32;
             let end = range[1].as_u64().ok_or_else(CommandError::invalid_params)? as u32;
             options.pages = PageSel::Range(start, end);
         }
         Some(_) => return Err(CommandError::invalid_params()),
+    }
+    if let Some(mode) = raw.get("import_as").and_then(Value::as_str) {
+        options.import_as = match mode {
+            "pages" => ImportAs::Pages,
+            "artboards" => ImportAs::Artboards,
+            _ => return Err(CommandError::invalid_params()),
+        };
+    }
+    if let Some(colour) = raw.get("colour").and_then(Value::as_str) {
+        options.colour = match colour {
+            "rgb" => ImportColour::Rgb,
+            "cmyk" => ImportColour::Cmyk,
+            "grey" => ImportColour::Grey,
+            _ => return Err(CommandError::invalid_params()),
+        };
     }
     if let Some(flag) = raw.get("favour_editable_text").and_then(Value::as_bool) {
         options.favour_editable_text = flag;
@@ -200,7 +268,7 @@ fn import_command(workspace: &mut Workspace, params: &Value, format: ImportForma
         let options = options_from(params)?;
         let password = options.password.is_some();
         let imported = match format {
-            ImportFormat::Pdf => import_pdf(path, &options),
+            ImportFormat::Pdf => import_pdf_document(path, &options),
             ImportFormat::Ai => crate::import_ai::import_ai(path, &options),
             ImportFormat::Svg => import_svg(path),
         };
@@ -219,10 +287,15 @@ fn import_command(workspace: &mut Workspace, params: &Value, format: ImportForma
     })();
     match result {
         Ok((title, document, report)) => {
-            let id = workspace.new_document(&title);
-            if let Some(context) = workspace.get_mut(id) {
-                context.session = Session::new(document);
-            }
+            let id = if format == ImportFormat::Pdf {
+                open_prepared_pdf(workspace, &title, document)
+            } else {
+                let id = workspace.new_document(&title);
+                if let Some(context) = workspace.get_mut(id) {
+                    context.session = Session::new(document);
+                }
+                id
+            };
             let value = json!({
                 "context": id.0,
                 "title": title,

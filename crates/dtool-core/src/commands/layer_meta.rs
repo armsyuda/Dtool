@@ -147,6 +147,10 @@ fn valid_colour(text: &str) -> bool {
     matches!(hex.len(), 3 | 6 | 8) && hex.chars().all(|c| c.is_ascii_hexdigit())
 }
 
+pub(super) fn read_tag_colour(params: &Value) -> Result<Option<String>, CommandError> {
+    optional_text(params, "colour", valid_colour)?.ok_or_else(CommandError::invalid_params)
+}
+
 fn parse(document: &Document, params: &Value) -> Result<Patch, CommandError> {
     let single_keys = ["object", "id", "node"];
     let objects = if let Some(values) = params.get("ids") {

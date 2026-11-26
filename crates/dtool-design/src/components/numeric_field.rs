@@ -170,6 +170,11 @@ pub fn format_number(value: f64, decimals: usize) -> String {
     text
 }
 
+/// A caption used to reset a numeric control without making its text selectable.
+pub fn numeric_caption(label: impl Into<egui::WidgetText>) -> egui::Label {
+    egui::Label::new(label).selectable(false).sense(Sense::click())
+}
+
 fn default_parse(text: &str, suffix: Option<&str>) -> Option<f64> {
     let mut body = text.trim();
     if let Some(suffix) = suffix.filter(|suffix| !suffix.is_empty()) {
@@ -317,15 +322,32 @@ fn paint_value(ui: &Ui, rect: egui::Rect, response: &Response, text: &str, place
     }
     let visuals = ui.style().interact(response);
     let fill = if response.enabled() { color("input") } else { color("input.disabled") };
-    let stroke = if response.has_focus() { egui::Stroke::new(stroke_width("thin").max(1.0), ui.visuals().selection.bg_fill) } else { visuals.bg_stroke };
+    let stroke = if response.has_focus() {
+        egui::Stroke::new(stroke_width("thin"), crate::theme::widget_token("focus").unwrap_or(ui.visuals().selection.bg_fill))
+    } else if response.hovered() {
+        egui::Stroke::new(stroke_width("thin"), color("well.border"))
+    } else {
+        visuals.bg_stroke
+    };
     ui.painter().rect(rect, visuals.corner_radius, fill, stroke, egui::StrokeKind::Inside);
-    let text_color = if placeholder { ui.visuals().weak_text_color() } else { ui.visuals().text_color() };
+    let text_color = if !response.enabled() {
+        color("disabled")
+    } else if placeholder {
+        ui.visuals().weak_text_color()
+    } else {
+        ui.visuals().text_color()
+    };
     let at = rect.left_center() + Vec2::new(ui.spacing().button_padding.x, 0.0);
     ui.painter().text(at, egui::Align2::LEFT_CENTER, text, egui::TextStyle::Body.resolve(ui.style()), text_color);
 }
 
 pub fn numeric_field(ui: &mut Ui, id: Id, value: NumericValue, spec: &NumericSpec) -> (Response, NumericEvent) {
+    let enabled = spec.enabled && ui.is_enabled();
     let mut state = numeric_state(ui.ctx(), id);
+    if !enabled && state != NumericState::default() {
+        numeric_cancel_edit(ui.ctx(), id);
+        state = NumericState::default();
+    }
     let mut event = NumericEvent::None;
     let current = match value {
         NumericValue::Value(v) if v.is_finite() => Some(spec.clamp(v)),
@@ -338,32 +360,33 @@ pub fn numeric_field(ui: &mut Ui, id: Id, value: NumericValue, spec: &NumericSpe
     let factor = if shift { 0.1 } else if ctrl { 10.0 } else { 1.0 };
     let hint = if current.is_none() { spec.mixed_hint } else { "" };
     let text_id = id.with("text");
-    let was_editing = state.buffer.is_some() || ui.memory(|memory| memory.has_focus(text_id));
+    let was_editing = enabled && (state.buffer.is_some() || ui.memory(|memory| memory.has_focus(text_id)));
     let select_now = was_editing && state.select_pending;
     let requested = std::mem::take(&mut state.edit_request);
 
     let (label, area, field, buffer, started) = ui
         .horizontal(|ui| {
+            if !enabled && ui.is_enabled() {
+                ui.disable();
+            }
             let label = if spec.label.is_empty() {
                 None
             } else {
-                let label = egui::Label::new(spec.label).sense(Sense::click_and_drag());
+                let label = numeric_caption(spec.label).sense(Sense::click_and_drag());
                 let response = if let Some(width) = spec.label_width {
-                    ui.add_enabled_ui(spec.enabled, |ui| {
-                        let (rect, _) = ui.allocate_exact_size(Vec2::new(width, ui.spacing().interact_size.y), Sense::hover());
-                        ui.put(rect, label.truncate()).on_hover_text(spec.label)
-                    }).inner
+                    let (rect, _) = ui.allocate_exact_size(Vec2::new(width, ui.spacing().interact_size.y), Sense::hover());
+                    ui.put(rect, label.truncate()).on_hover_text(spec.label)
                 } else {
-                    ui.add_enabled(spec.enabled, label)
+                    ui.add(label)
                 };
                 Some(response)
             };
             let size = Vec2::new(spec.width.unwrap_or_else(default_width), ui.spacing().interact_size.y);
-            let sense = if spec.enabled && !was_editing { Sense::click_and_drag() } else { Sense::hover() };
+            let sense = if enabled && !was_editing { Sense::click_and_drag() } else { Sense::hover() };
             let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
             let area = ui.interact(rect, numeric_area_id(id), sense);
-            let area = area.on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
-            let started = !was_editing && spec.enabled && (area.clicked() || area.gained_focus() || requested);
+            let area = if enabled { area.on_hover_cursor(egui::CursorIcon::ResizeHorizontal) } else { area };
+            let started = !was_editing && enabled && (area.clicked() || area.gained_focus() || requested);
             if was_editing || started {
                 let mut buffer = state.buffer.clone()
                     .unwrap_or_else(|| current.map(|value| spec.format(value)).unwrap_or_default());
@@ -430,7 +453,7 @@ pub fn numeric_field(ui: &mut Ui, id: Id, value: NumericValue, spec: &NumericSpe
             state.buffer = None;
         }
 
-        if wheel != 0.0 && spec.enabled && field.has_focus() && field.hovered() {
+        if wheel != 0.0 && enabled && field.has_focus() && field.hovered() {
             let base = state.buffer.as_deref().and_then(|text| spec.parse_text(text)).unwrap_or(scrub_origin);
             let next = spec.clamp(base + wheel * spec.step * factor);
             event = NumericEvent::Commit(next);
@@ -448,7 +471,7 @@ pub fn numeric_field(ui: &mut Ui, id: Id, value: NumericValue, spec: &NumericSpe
                 egui::StrokeKind::Outside,
             );
         }
-    } else if spec.enabled {
+    } else if enabled {
         if area.drag_started() {
             start_scrub(&mut state, scrub_origin);
         }
@@ -456,11 +479,11 @@ pub fn numeric_field(ui: &mut Ui, id: Id, value: NumericValue, spec: &NumericSpe
     }
 
     if let Some(label) = &label {
-        if spec.enabled && label.drag_started() {
+        if enabled && label.drag_started() {
             start_scrub(&mut state, scrub_origin);
         }
         drive_scrub(&mut state, label, spec, factor, escape, &mut event);
-        if spec.enabled && label.double_clicked()
+        if enabled && label.double_clicked()
             && let Some(value) = spec.reset_value.filter(|value| value.is_finite())
         {
             if let Some(field) = &field {
@@ -471,7 +494,7 @@ pub fn numeric_field(ui: &mut Ui, id: Id, value: NumericValue, spec: &NumericSpe
         }
     }
 
-    if spec.enabled && field.is_none() && !escape {
+    if enabled && field.is_none() && !escape {
         let released = released_scrub_delta(ui, &area, label.as_ref(), &mut state.scrub_press);
         if let Some(dx) = released.filter(|_| !state.scrubbing && event == NumericEvent::None) {
             event = NumericEvent::Commit(spec.clamp(scrub_origin + dx * spec.step * factor));

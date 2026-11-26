@@ -27,10 +27,11 @@ pub struct ImportProfile {
     pub reason_key: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PageSel {
     All,
     Range(u32, u32),
+    Selection(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -154,6 +155,14 @@ fn read_pdf_version(path: &Path) -> Result<String, IoError> {
 }
 
 pub fn import_pdf(path: &Path, opts: &ImportOptions) -> Result<(Document, ImportReport), IoError> {
+    import_pdf_path(path, opts, false)
+}
+
+pub(crate) fn import_pdf_document(path: &Path, opts: &ImportOptions) -> Result<(Document, ImportReport), IoError> {
+    import_pdf_path(path, opts, true)
+}
+
+fn import_pdf_path(path: &Path, opts: &ImportOptions, structured: bool) -> Result<(Document, ImportReport), IoError> {
     let profile = admit(path, ImportFormat::Pdf)?;
 
     if !profile.supported && profile.reason_key.as_deref() != Some("PASSWORD_REQUIRED") {
@@ -182,19 +191,31 @@ pub fn import_pdf(path: &Path, opts: &ImportOptions) -> Result<(Document, Import
         lopdf::Error::IO(error) => IoError::from_io(&error),
         _ => IoError::new(IoErrorKind::UnsupportedProfile),
     })?;
-    map_document(doc, opts)
+    map_document(doc, opts, structured)
 }
 
 pub fn import_pdf_bytes(bytes: &[u8], opts: &ImportOptions) -> Result<(Document, ImportReport), IoError> {
+    map_document(load_pdf_bytes(bytes)?, opts, false)
+}
+
+pub(super) fn single_pdf_page_size(bytes: &[u8]) -> Option<[f32; 2]> {
+    let document = load_pdf_bytes(bytes).ok()?;
+    if document.is_encrypted() { return None; }
+    let mut pages = document.get_pages().into_values();
+    let page = pages.next()?;
+    if pages.next().is_some() { return None; }
+    page_geometry(&document, page).ok().map(|page| page.size())
+}
+
+fn load_pdf_bytes(bytes: &[u8]) -> Result<PdfDocument, IoError> {
     if !bytes.starts_with(b"%PDF-") {
         return Err(IoError::new(IoErrorKind::InvalidFormat));
     }
-    let doc = PdfDocument::load_mem_with_options(bytes, LoadOptions::with_max_decompressed_size(64 * 1024 * 1024))
-        .map_err(|_| IoError::new(IoErrorKind::UnsupportedProfile))?;
-    map_document(doc, opts)
+    PdfDocument::load_mem_with_options(bytes, LoadOptions::with_max_decompressed_size(64 * 1024 * 1024))
+        .map_err(|_| IoError::new(IoErrorKind::UnsupportedProfile))
 }
 
-fn map_document(doc: PdfDocument, opts: &ImportOptions) -> Result<(Document, ImportReport), IoError> {
+fn map_document(doc: PdfDocument, opts: &ImportOptions, structured: bool) -> Result<(Document, ImportReport), IoError> {
     if doc.is_encrypted() {
         return Err(IoError::new(IoErrorKind::UnsupportedProfile));
     }
@@ -205,15 +226,23 @@ fn map_document(doc: PdfDocument, opts: &ImportOptions) -> Result<(Document, Imp
         return Err(IoError::new(IoErrorKind::UnsupportedProfile));
     }
 
-    let selected_pages: Vec<u32> = match opts.pages {
+    let selected_pages: Vec<u32> = match &opts.pages {
         PageSel::All => (1..=page_count).collect(),
         PageSel::Range(start, end) => {
-            if start == 0 || end > page_count || start > end {
+            if *start == 0 || *end > page_count || start > end {
                 return Err(IoError::new(IoErrorKind::InvalidFormat));
             }
-            (start..=end).collect()
+            (*start..=*end).collect()
         }
+        PageSel::Selection(text) => dtool_core::longdoc::helpers::parse_page_ranges(text, page_count as usize)
+            .map_err(|_| IoError::new(IoErrorKind::InvalidFormat))?
+            .into_iter()
+            .map(|page| page as u32)
+            .collect(),
     };
+    if selected_pages.is_empty() {
+        return Err(IoError::new(IoErrorKind::InvalidFormat));
+    }
 
     let dpi = if opts.dpi == 0 {
         300.0
@@ -241,12 +270,20 @@ fn map_document(doc: PdfDocument, opts: &ImportOptions) -> Result<(Document, Imp
         ImportColour::Grey => ColourFormat::GREY_8,
     };
     core_doc.colour = DocColour::for_format(format, &ColourPrefs::default());
+    let layout = structured && opts.import_as == ImportAs::Pages;
+    let origins = layout.then(|| {
+        core_doc.layout_artboard_origins = Some(Default::default());
+        core_doc.preserve_layout_page_order = true;
+        core_doc.setup.arrange_vertical = true;
+        dtool_core::scene::page_rects(&core_doc)
+    });
     let mut report = ImportReport::default();
     let mut mapper = PdfMapper::new(&doc, &mut core_doc, &mut report, opts);
     let mut x = 0.0;
     for (index, (&page_num, geometry)) in selected_pages.iter().zip(geometry).enumerate() {
         let width = geometry.size()[0];
-        mapper.map_page(page_ids[(page_num - 1) as usize], index, [x, 0.0], geometry)?;
+        let origin = origins.as_ref().map_or([x, 0.0], |rects| [rects[index][0], rects[index][1]]);
+        mapper.map_page(page_ids[(page_num - 1) as usize], index, origin, geometry, structured)?;
         x += width;
         if !x.is_finite() {
             return Err(IoError::new(IoErrorKind::InvalidFormat));

@@ -12,6 +12,7 @@ pub mod notes;
 pub mod notes_layout;
 pub mod pages;
 pub(crate) mod page_import;
+pub use page_import::insert_imported_pages;
 pub mod toc;
 
 pub use stats::DocStats;

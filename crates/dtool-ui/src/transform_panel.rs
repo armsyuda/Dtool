@@ -569,7 +569,7 @@ impl TransformPanel {
     }
 
     fn draw_standard_fields(&mut self, ui: &mut Ui, width: f32) {
-        let two_columns = width >= 120.0;
+        let two_columns = dtool_design::panel_column_count(ui, width, 2, 62.0) == 2;
         let field_width = if two_columns {
             ((width - 44.0) / 2.0).min(88.0)
         } else {

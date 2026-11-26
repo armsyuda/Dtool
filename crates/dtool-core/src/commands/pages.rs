@@ -8,9 +8,13 @@ use crate::page_fold::{FoldAxis, PageFold};
 use crate::{Command, CommandError, CommandResult, Document, ObjectId, Session};
 use serde_json::{json, Value};
 
+pub mod spreads;
+
 const LIST: &str = "page.list";
 const ADD: &str = "page.add";
 const RENAME: &str = "page.rename";
+const SET_TAG: &str = "page.tag.set";
+const MOVE_OPTIONS: &str = "page.move_options.set";
 const MOVE: &str = "page.move";
 const DUPLICATE: &str = "page.duplicate";
 const DELETE: &str = "page.delete";
@@ -23,7 +27,9 @@ pub const MAX_ADDED_PAGES: usize = 1000;
 pub fn can_execute(session: &Session, command: &Command) -> Option<bool> {
     match command.name.as_str() {
         LIST | ADD | RENAME | DUPLICATE | COLUMN_GUIDES_SET => Some(session.has_document),
-        RESIZE | SPREAD_SET | page_import::IMPORT => Some(session.has_document && session.document.layout_artboard_origins.is_some()),
+        RESIZE | SPREAD_SET | SET_TAG | MOVE_OPTIONS | spreads::REFLOW | page_import::IMPORT => {
+            Some(session.has_document && session.document.layout_artboard_origins.is_some())
+        }
         MOVE | DELETE => Some(session.has_document && session.document.pages.len() > 1),
         NAVIGATE => Some(session.has_document && viewport(session).is_some()),
         _ => None,
@@ -42,7 +48,10 @@ pub fn run(session: &mut Session, command: &Command) -> Option<CommandResult> {
             DUPLICATE => duplicate_page(session, command),
             DELETE => delete_page(session, command),
             RESIZE => resize(session, command),
+            SET_TAG => set_tag(session, command),
+            MOVE_OPTIONS => set_move_options(session, command),
             SPREAD_SET => set_spread(session, command),
+            spreads::REFLOW => spreads::set_reflow(session, command),
             COLUMN_GUIDES_SET => set_column_guides(session, command),
             NAVIGATE => navigate(session, command),
             page_import::IMPORT => page_import::run(session, command),
@@ -56,10 +65,12 @@ fn list(doc: &Document) -> Value {
         json!({
             "id": page.id,
             "master_id": doc.master_pages.for_page(page.id).map(|assignment| assignment.master),
+            "master_ids": doc.master_pages.on_page(page.id).map(|assignment| assignment.master).collect::<Vec<_>>(),
             "artboard_id": doc.linked_artboard(page.id).map(|board| board.id),
             "number": index + 1,
             "label": crate::longdoc::sections::section_page_label(doc, index),
             "name": page.name,
+            "tag_colour": page.tag_colour,
             "size": [width, height],
             "origin": [x, y],
             "fold": fold_info(page.fold, [width, height]),
@@ -68,15 +79,64 @@ fn list(doc: &Document) -> Value {
     }).collect();
     let spreads: Vec<_> = crate::data_merge::layout::spread_ranges(doc).into_iter()
         .filter(|range| range.end <= doc.pages.len()).enumerate().map(|(index, range)| {
-            let pages = &doc.pages[range];
+            let pages = &doc.pages[range.clone()];
+            let fixed = spreads::fixed_spread(doc, &range);
             json!({
                 "number": index + 1,
                 "ids": pages.iter().map(|page| page.id).collect::<Vec<_>>(),
-                "custom": doc.layout_artboard_origins.is_some() && pages[0].spread_group.is_some()
+                "spine": crate::data_merge::layout::spread_spine(doc, &range),
+                "custom": spreads::is_custom(doc, &range)
                     && !(index == 0 && crate::data_merge::layout::has_right_cover(doc)),
+                "slots": fixed.map(|spread| &spread.slots)
             })
         }).collect();
-    json!({"pages": pages, "spreads": spreads})
+    json!({"pages": pages, "spreads": spreads, "reflow": doc.fixed_spreads.is_none(),
+        "anchor_to_spine": doc.page_move_anchor_to_spine, "master_policy": doc.page_move_master_policy})
+}
+
+fn set_move_options(session: &mut Session, command: &Command) -> CommandResult {
+    let before = &session.document;
+    if before.layout_artboard_origins.is_none() {
+        return Err(CommandError::invalid_params());
+    }
+    let params = &command.params;
+    if params.get("anchor_to_spine").is_none() && params.get("master_policy").is_none() {
+        return Err(CommandError::invalid_params());
+    }
+    let anchor = params.get("anchor_to_spine")
+        .map(|value| value.as_bool().ok_or_else(CommandError::invalid_params)).transpose()?
+        .unwrap_or(before.page_move_anchor_to_spine);
+    let policy = params.get("master_policy").map(|value| serde_json::from_value(value.clone()))
+        .transpose().map_err(|_| CommandError::invalid_params())?.unwrap_or(before.page_move_master_policy);
+    if before.page_move_anchor_to_spine == anchor && before.page_move_master_policy == policy {
+        return Ok(json!({"anchor_to_spine": anchor, "master_policy": policy,
+            "doc_version": session.generation, "changes": []}));
+    }
+    let mut doc = before.clone();
+    doc.page_move_anchor_to_spine = anchor;
+    doc.page_move_master_policy = policy;
+    super::document_change::commit(session, MOVE_OPTIONS, doc, session.selection.ids.clone(),
+        json!({"anchor_to_spine": anchor, "master_policy": policy}))
+}
+
+fn set_tag(session: &mut Session, command: &Command) -> CommandResult {
+    let before = &session.document;
+    if before.layout_artboard_origins.is_none() {
+        return Err(CommandError::invalid_params());
+    }
+    let colour = super::layer_meta::read_tag_colour(&command.params)?;
+    let ids: Vec<PageId> = serde_json::from_value(command.params["ids"].clone())
+        .map_err(|_| CommandError::invalid_params())?;
+    let indices = selected_page_indices(before, &ids)?;
+    let reply = json!({"ids": ids, "tag_colour": colour});
+    if indices.iter().all(|&index| before.pages[index].tag_colour == colour) {
+        return Ok(json!({"ids": ids, "tag_colour": colour, "doc_version": session.generation, "changes": []}));
+    }
+    let mut doc = before.clone();
+    for index in indices {
+        doc.pages[index].tag_colour.clone_from(&colour);
+    }
+    super::document_change::commit(session, SET_TAG, doc, session.selection.ids.clone(), reply)
 }
 
 fn set_column_guides(session: &mut Session, command: &Command) -> CommandResult {
@@ -121,6 +181,7 @@ fn set_spread(session: &mut Session, command: &Command) -> CommandResult {
                 .find(|range| range.contains(&start)).ok_or_else(CommandError::not_found)?;
             for page in &mut doc.pages[range.clone()] {
                 page.spread_group = None;
+                page.spread_spine = None;
             }
             range
         }
@@ -139,11 +200,13 @@ fn set_spread(session: &mut Session, command: &Command) -> CommandResult {
                 if let Some(old) = old {
                     for page in &mut doc.pages[old] {
                         page.spread_group = None;
+                        page.spread_spine = None;
                     }
                 }
             }
             for page in &mut doc.pages[start..end] {
                 page.spread_group = Some(group);
+                page.spread_spine = None;
             }
             start..end
         }
@@ -239,7 +302,7 @@ fn navigate(session: &mut Session, command: &Command) -> CommandResult {
 
 fn add(session: &mut Session, command: &Command) -> CommandResult {
     let name = command.params.get("name").map(parse_name).transpose()?.unwrap_or_default();
-    let count = match command.params.get("count") {
+    let mut count = match command.params.get("count") {
         None => 1,
         Some(count) => count.as_u64().and_then(|n| usize::try_from(n).ok())
             .filter(|n| (1..=MAX_ADDED_PAGES).contains(n)).ok_or_else(CommandError::invalid_params)?,
@@ -250,6 +313,13 @@ fn add(session: &mut Session, command: &Command) -> CommandResult {
         command.params.get(key).map(|value| serde_json::from_value(value.clone())
             .map_err(|_| CommandError::invalid_params())).transpose()
     };
+    let fill = command.params.get("vacancy").map(|value| {
+        if count != 1 || ["before_id", "after_id", "spread", "conform_layout"].iter()
+            .any(|key| command.params.get(key).is_some()) {
+            return Err(CommandError::invalid_params());
+        }
+        spreads::fill_target(original, value, count)
+    }).transpose()?;
     let (index, size_index) = match (target("before_id")?, target("after_id")?) {
         (Some(before), None) => {
             let index = page_index(original, before)?;
@@ -262,24 +332,55 @@ fn add(session: &mut Session, command: &Command) -> CommandResult {
         (None, None) => (original.pages.len(), None),
         _ => return Err(CommandError::invalid_params()),
     };
-    let size = size_index.map_or_else(|| crate::data_merge::layout::page_size(original), |index| {
+    let index = fill.as_ref().map_or(index, |fill| fill.index);
+    let mut size = size_index.map_or_else(|| crate::data_merge::layout::page_size(original), |index| {
         let [_, _, width, height] = page_rect(original, index);
         [width, height]
     });
+    if let Some(fill) = &fill {
+        size = fill.size;
+    }
     let master = command.params.get("master_id").map(|id| serde_json::from_value::<ObjectId>(id.clone())
         .map_err(|_| CommandError::invalid_params())).transpose()?;
     if master.is_some_and(|id| !original.master_pages.roots.contains(&id) || original.get_object(id).is_none()) {
         return Err(CommandError::not_found());
     }
+    let conform_layout = command.params.get("conform_layout").map(|value|
+        value.as_bool().ok_or_else(CommandError::invalid_params)).transpose()?.unwrap_or(false);
+    let mut spread_template = None;
+    let mut template_spine = None;
+    if conform_layout {
+        let root = master.and_then(|id| original.get_object(id)).ok_or_else(CommandError::invalid_params)?;
+        if command.params["spread"] == "new"
+            && let Some(spread) = original.master_pages.spread(root.id)
+        {
+            let pages = spread.pages.iter().map(|&id| {
+                let object = original.get_object(id).ok_or_else(CommandError::not_found)?;
+                valid_page_size(object.size).then_some((id, object.size)).ok_or_else(CommandError::invalid_params)
+            }).collect::<Result<Vec<_>, _>>()?;
+            if command.params.get("count").is_some() && count != pages.len() {
+                return Err(CommandError::invalid_params());
+            }
+            count = pages.len();
+            spread_template = Some(pages);
+            template_spine = Some(spread.spine);
+        } else {
+            size = root.size;
+            if !valid_page_size(size) {
+                return Err(CommandError::invalid_params());
+            }
+        }
+    }
 
     let mut doc = original.clone();
     let custom = match command.params.get("spread") {
-        None => spread_at_insertion(original, index).map(|group| (group, index..index)),
+        None => fill.as_ref().map(|fill| fill.group).or_else(|| spread_at_insertion(original, index))
+            .map(|group| (group, index..index)),
         Some(value) if original.layout_artboard_origins.is_some() => match value.as_str() {
             Some("new") => Some((next_spread_group(original)?, index..index)),
             Some("extend") => {
                 let anchor = size_index.unwrap_or_else(|| original.pages.len().saturating_sub(1));
-                if anchor == 0 && original.setup.facing_pages && original.setup.start_on_right {
+                if anchor == 0 && crate::data_merge::layout::has_right_cover(original) {
                     return Err(CommandError::validation("panel.pages.spread_cover"));
                 }
                 let range = crate::data_merge::layout::spread_ranges(original).into_iter()
@@ -300,17 +401,29 @@ fn add(session: &mut Session, command: &Command) -> CommandResult {
     doc.preserve_layout_page_order |= original.layout_artboard_origins.is_some();
     for offset in 0..count {
         let id = doc.alloc_page_id();
-        let mut page = crate::document::Page::new(id, size);
+        let page_size = spread_template.as_ref().map_or(size, |pages| pages[offset].1);
+        let mut page = crate::document::Page::new(id, page_size);
         page.name.clone_from(&name);
         page.spread_group = custom.as_ref().map(|(group, _)| *group);
+        page.spread_spine = template_spine;
+        if let Some(fill) = &fill {
+            fill.set_page(&mut doc, offset, id, page_size);
+        }
         insert_page(&mut doc, index + offset, page);
         ids.push(id);
     }
     preserve_content(original, &mut doc);
     if let Some(master) = master {
-        for (offset, &id) in ids.iter().enumerate() {
-            super::masters::apply_to_page(&mut doc, master, id, index + offset);
+        let targets: Vec<_> = ids.iter().copied().enumerate().map(|(offset, id)| (index + offset, id)).collect();
+        let sources = if let Some(template) = spread_template {
+            template.into_iter().map(|(id, _)| id).collect()
+        } else {
+            super::masters::application_sources(&doc, master, &targets, None)?
+        };
+        for (&id, source) in ids.iter().zip(sources) {
+            super::masters::apply_to_page(&mut doc, source, id);
         }
+        super::masters::spread_flow::stitch_new(original, &mut doc);
     }
     let selection = session.selection.ids.clone();
     super::document_change::commit(session, ADD, doc, selection, json!({"id": ids[0], "ids": ids}))
@@ -318,7 +431,7 @@ fn add(session: &mut Session, command: &Command) -> CommandResult {
 
 pub(crate) fn spread_at_insertion(doc: &Document, index: usize) -> Option<u64> {
     if doc.layout_artboard_origins.is_none()
-        || (index == 1 && doc.setup.facing_pages && doc.setup.start_on_right)
+        || (index == 1 && crate::data_merge::layout::has_right_cover(doc))
     {
         return None;
     }
@@ -326,7 +439,7 @@ pub(crate) fn spread_at_insertion(doc: &Document, index: usize) -> Option<u64> {
     (doc.pages.get(index)?.spread_group == Some(left)).then_some(left)
 }
 
-fn insert_page(doc: &mut Document, index: usize, page: crate::document::Page) {
+pub(super) fn insert_page(doc: &mut Document, index: usize, page: crate::document::Page) {
     doc.pages.insert(index, page);
     for section in doc.sections.iter_mut().skip(1) {
         if section.start_page > index {
@@ -345,13 +458,17 @@ pub fn can_resize(doc: &Document, id: PageId) -> bool {
     })
 }
 
+pub fn valid_page_size(size: [f32; 2]) -> bool {
+    size.iter().all(|side| (0.01..=1_000_000.0).contains(side))
+}
+
 fn resize(session: &mut Session, command: &Command) -> CommandResult {
     let id = page_id(command)?;
     let source = &session.document;
     let index = page_index(source, id)?;
     let size: [f32; 2] = serde_json::from_value(command.params["size"].clone())
         .map_err(|_| CommandError::invalid_params())?;
-    if !can_resize(source, id) || size.iter().any(|side| !(0.01..=1_000_000.0).contains(side)) {
+    if !can_resize(source, id) || !valid_page_size(size) {
         return Err(CommandError::invalid_params());
     }
     let [_, _, width, height] = page_rect(source, index);
@@ -384,16 +501,7 @@ fn resize(session: &mut Session, command: &Command) -> CommandResult {
     let mut doc = source.clone();
     doc.pages[index].fold = fold;
     if resizing {
-        doc.pages[index].size = size;
-        if let Some(board) = source.linked_artboard(id) {
-            let next = doc.find_object_mut(board.id.0).ok_or_else(CommandError::not_found)?;
-            next.size = size;
-            let after = crate::geometry::object_world_bounds(next);
-            super::layer_kinds::follow_surface_resize(&mut doc, Some(board.id), crate::geometry::object_world_bounds(board), after);
-        }
-        let [x, y, w, h] = super::layer_kinds::page_rect(source, index).ok_or_else(CommandError::invalid_params)?;
-        super::layer_kinds::follow_surface_resize(&mut doc, None, [x, y, w, h], [x, y, size[0], size[1]]);
-        preserve_content(source, &mut doc);
+        resize_surfaces(source, &mut doc, &[(index, id, size)])?;
     }
     let mut result = commit(session, RESIZE, doc, id)?;
     result["size"] = json!(size);
@@ -401,7 +509,55 @@ fn resize(session: &mut Session, command: &Command) -> CommandResult {
     Ok(result)
 }
 
+pub(super) fn resize_surfaces(
+    source: &Document, doc: &mut Document, targets: &[(usize, PageId, [f32; 2])],
+) -> Result<(), CommandError> {
+    let rects = crate::scene::page_rects(source);
+    for &(index, id, size) in targets {
+        if !valid_page_size(size) || !can_resize(source, id) {
+            return Err(CommandError::invalid_params());
+        }
+        let [x, y, w, h] = rects.get(index).copied().ok_or_else(CommandError::invalid_params)?;
+        doc.pages[index].size = size;
+        if let Some(board) = source.linked_artboard(id) {
+            let next = doc.find_object_mut(board.id.0).ok_or_else(CommandError::not_found)?;
+            next.size = size;
+            let after = crate::geometry::object_world_bounds(next);
+            super::layer_kinds::follow_surface_resize(doc, Some(board.id), crate::geometry::object_world_bounds(board), after);
+        }
+        super::layer_kinds::follow_surface_resize(doc, None, [x, y, w, h], [x, y, size[0], size[1]]);
+    }
+    if !targets.is_empty() {
+        preserve_content(source, doc);
+    }
+    Ok(())
+}
+
 fn move_page(session: &mut Session, command: &Command) -> CommandResult {
+    let vacancy = command.params.get("vacancy");
+    let destination = command.params.get("destination");
+    if let Some(value) = vacancy.or(destination) {
+        if command.params.get("number").is_some() || (vacancy.is_some() && destination.is_some()) {
+            return Err(CommandError::invalid_params());
+        }
+        let ids = match (command.params.get("id"), command.params.get("ids")) {
+            (Some(_), None) => vec![page_id(command)?],
+            (None, Some(ids)) => serde_json::from_value(ids.clone()).map_err(|_| CommandError::invalid_params())?,
+            _ => return Err(CommandError::invalid_params()),
+        };
+        return if vacancy.is_some() {
+            spreads::move_into_slot(session, ids, value)
+        } else {
+            spreads::move_relative(session, ids, value)
+        };
+    }
+    if let Some(ids) = command.params.get("ids") {
+        if command.params.get("id").is_some() {
+            return Err(CommandError::invalid_params());
+        }
+        let ids = serde_json::from_value(ids.clone()).map_err(|_| CommandError::invalid_params())?;
+        return move_pages(session, command, ids);
+    }
     let source = &session.document;
     let id = PageId(crate::text_cmd::param_u64(&command.params, "id")?);
     let from = page_index(source, id)?;
@@ -419,67 +575,204 @@ fn move_page(session: &mut Session, command: &Command) -> CommandResult {
             crate::data_merge::layout::spread_ranges(source).into_iter()
                 .any(|range| range.contains(&from) && range.contains(&to));
         if !stays_in_spread {
-            page.spread_group = spread_at_insertion(&doc, to);
+            let group = spread_at_insertion(&doc, to);
+            if page.spread_group != group {
+                page.spread_spine = None;
+            }
+            page.spread_group = group;
         }
     }
     doc.pages.insert(to, page);
-    if doc.layout_artboard_origins.is_some() && crate::data_merge::layout::has_right_cover(&doc) {
+    if doc.layout_artboard_origins.is_some() && doc.fixed_spreads.is_none() && crate::data_merge::layout::has_right_cover(&doc) {
         doc.pages[0].spread_group = None;
     }
     preserve_content(source, &mut doc);
-    let result = commit(session, MOVE, doc, id)?;
-    let mut result = result;
-    result["number"] = json!(to + 1);
-    Ok(result)
+    super::masters::update_after_move(source, &mut doc)?;
+    let selection = moved_page_selection(session, &doc);
+    super::document_change::commit(session, MOVE, doc, selection, json!({"id": id, "number": to + 1}))
+}
+
+fn move_pages(session: &mut Session, command: &Command, ids: Vec<PageId>) -> CommandResult {
+    let source = &session.document;
+    let indices = selected_page_indices(source, &ids)?;
+    let selected: HashSet<_> = ids.iter().copied().collect();
+    let to = command.params["number"].as_u64().and_then(|n| usize::try_from(n).ok())
+        .and_then(|n| n.checked_sub(1)).filter(|&n| n <= source.pages.len() - ids.len())
+        .ok_or_else(CommandError::invalid_params)?;
+    let ordered_ids: Vec<_> = indices.iter().map(|&index| source.pages[index].id).collect();
+    if indices.iter().copied().eq(to..to + indices.len()) {
+        return Ok(json!({"id": ordered_ids[0], "ids": ordered_ids, "number": to + 1,
+            "doc_version": session.generation, "changes": []}));
+    }
+    if let [id] = ordered_ids.as_slice() {
+        let single = Command::with_params(MOVE, json!({"id": id, "number": to + 1}));
+        let mut result = move_page(session, &single)?;
+        result["ids"] = json!(ordered_ids);
+        return Ok(result);
+    }
+
+    let mut doc = source.clone();
+    let mut moved: Vec<_> = indices.iter().map(|&index| source.pages[index].clone()).collect();
+    doc.pages.retain(|page| !selected.contains(&page.id));
+    if doc.layout_artboard_origins.is_some() {
+        doc.preserve_layout_page_order = true;
+        let destination = spread_at_insertion(&doc, to);
+        let remaining: HashSet<_> = doc.pages.iter().filter_map(|page| page.spread_group).collect();
+        for page in &mut moved {
+            let group = destination.or_else(|| page.spread_group.filter(|group| !remaining.contains(group)));
+            if page.spread_group != group {
+                page.spread_spine = None;
+            }
+            page.spread_group = group;
+        }
+    }
+    doc.pages.splice(to..to, moved);
+    if doc.layout_artboard_origins.is_some() && doc.fixed_spreads.is_none() && crate::data_merge::layout::has_right_cover(&doc) {
+        doc.pages[0].spread_group = None;
+    }
+    preserve_content(source, &mut doc);
+    super::masters::update_after_move(source, &mut doc)?;
+    let selection = moved_page_selection(session, &doc);
+    super::document_change::commit(session, MOVE, doc, selection,
+        json!({"id": ordered_ids[0], "ids": ordered_ids, "number": to + 1}))
+}
+
+fn moved_page_selection(session: &Session, doc: &Document) -> Vec<ObjectId> {
+    session.selection.ids.iter().copied().filter(|&id| doc.get_object(id).is_some()).collect()
 }
 
 fn page_id(command: &Command) -> Result<PageId, CommandError> {
     crate::text_cmd::param_u64(&command.params, "id").map(PageId)
 }
 
-fn content_ids(doc: &Document, index: usize) -> HashSet<ObjectId> {
-    doc.objects.iter().filter(|object| {
-        !super::masters::owns_source(doc, object.id) && object_page_index(doc, object.id) == index
-    }).map(|object| object.id).collect()
+pub(crate) fn selected_page_indices(doc: &Document, ids: &[PageId]) -> Result<Vec<usize>, CommandError> {
+    let selected: HashSet<_> = ids.iter().copied().collect();
+    if selected.is_empty() || selected.len() != ids.len() {
+        return Err(CommandError::invalid_params());
+    }
+    let indices: Vec<_> = doc.pages.iter().enumerate()
+        .filter_map(|(index, page)| selected.contains(&page.id).then_some(index))
+        .collect();
+    if indices.len() != ids.len() {
+        return Err(CommandError::not_found());
+    }
+    Ok(indices)
 }
 
 fn duplicate_page(session: &mut Session, command: &Command) -> CommandResult {
     let before = &session.document;
-    let source_id = page_id(command)?;
-    let index = page_index(before, source_id)?;
-    let source = &before.pages[index];
-    let [x, y, width, height] = page_rect(before, index);
-    let members = content_ids(before, index);
+    let ids: Vec<PageId> = match command.params.get("ids") {
+        Some(value) if command.params.get("id").is_none() =>
+            serde_json::from_value(value.clone()).map_err(|_| CommandError::invalid_params())?,
+        None => vec![page_id(command)?],
+        _ => return Err(CommandError::invalid_params()),
+    };
+    let indices = selected_page_indices(before, &ids)?;
+    let target = |key| -> Result<Option<usize>, CommandError> {
+        command.params.get(key).map(|value| {
+            let page = value.as_u64().map(PageId).ok_or_else(CommandError::invalid_params)?;
+            page_index(before, page)
+        }).transpose()
+    };
+    let fill = command.params.get("vacancy").map(|value| {
+        if command.params.get("before_id").is_some() || command.params.get("after_id").is_some() {
+            return Err(CommandError::invalid_params());
+        }
+        spreads::fill_target(before, value, indices.len())
+    }).transpose()?;
+    let (at, adjacent_duplicate) = match (target("before_id")?, target("after_id")?) {
+        (Some(index), None) => (index, false),
+        (None, Some(index)) => (index + 1, false),
+        (None, None) => fill.as_ref().map_or((indices[indices.len() - 1] + 1, indices.len() == 1),
+            |fill| (fill.index, false)),
+        _ => return Err(CommandError::invalid_params()),
+    };
+    let layout = before.layout_artboard_origins.is_some();
+    if !layout && !adjacent_duplicate {
+        return Err(CommandError::invalid_params());
+    }
+    let rects = crate::scene::page_rects(before);
+    let page_of: HashMap<_, _> = before.objects.iter().filter_map(|object| {
+        if super::masters::owns_source(before, object.id) {
+            return None;
+        }
+        let index = object_page_index(before, object.id);
+        indices.binary_search(&index).ok().map(|offset| (object.id, offset))
+    }).collect();
+    let members = page_of.keys().copied().collect();
     let mut bundle = crate::clipboard::collect_bundle_members(before, &members);
     let excerpts = crate::longdoc::pages::restrict_page_copy(before, &mut bundle);
     let mut doc = before.clone();
-    doc.preserve_layout_page_order |= before.layout_artboard_origins.is_some();
-    let id = doc.alloc_page_id();
-    let mut page = crate::document::Page::new(id, [width, height]);
-    page.name.clone_from(&source.name);
-    page.fold = source.fold;
-    page.column_guides = source.column_guides;
-    if index != 0 || !crate::data_merge::layout::has_right_cover(before) {
-        page.spread_group = source.spread_group;
+    doc.preserve_layout_page_order |= layout;
+    let destination_group = fill.as_ref().map(|fill| fill.group).or_else(|| spread_at_insertion(before, at));
+    let mut copied_groups = HashMap::new();
+    let mut group_counts = HashMap::new();
+    if layout && !adjacent_duplicate && destination_group.is_none() {
+        for &index in &indices {
+            if let Some(group) = before.pages[index].spread_group {
+                *group_counts.entry(group).or_insert(0usize) += 1;
+            }
+        }
     }
-    insert_page(&mut doc, index + 1, page);
+    let mut new_ids = Vec::with_capacity(indices.len());
+    for (offset, &index) in indices.iter().enumerate() {
+        let source = &before.pages[index];
+        let [_, _, width, height] = rects[index];
+        let id = doc.alloc_page_id();
+        let mut page = crate::document::Page::new(id, [width, height]);
+        page.name.clone_from(&source.name);
+        page.tag_colour.clone_from(&source.tag_colour);
+        page.fold = source.fold;
+        page.column_guides = source.column_guides;
+        page.spread_group = if adjacent_duplicate && !(index == 0 && crate::data_merge::layout::has_right_cover(before)) {
+            source.spread_group
+        } else if let Some(group) = destination_group {
+            Some(group)
+        } else if let Some(group) = source.spread_group.filter(|group| group_counts.get(group).is_some_and(|&count| count > 1)) {
+            let new_group = if let Some(&group) = copied_groups.get(&group) {
+                group
+            } else {
+                let next = next_spread_group(&doc)?;
+                copied_groups.insert(group, next);
+                next
+            };
+            Some(new_group)
+        } else {
+            None
+        };
+        if destination_group.is_none() && page.spread_group.is_some() {
+            page.spread_spine = source.spread_spine;
+        }
+        if let Some(fill) = &fill {
+            fill.set_page(&mut doc, offset, id, [width, height]);
+        }
+        insert_page(&mut doc, at + offset, page);
+        new_ids.push(id);
+    }
+    if layout && doc.fixed_spreads.is_none() && crate::data_merge::layout::has_right_cover(&doc) {
+        doc.pages[0].spread_group = None;
+    }
     preserve_content(before, &mut doc);
-    let board = before.linked_artboard(source_id);
-    let offset = if board.is_some() && doc.layout_artboard_origins.is_none() {
-        let right = before.objects.iter().filter(|object| crate::artboard::is_artboard(object)
-            && !before.master_pages.roots.contains(&object.id)).map(|object| {
-                let [x, _, w, _] = crate::geometry::object_world_bounds(object);
-                x + w
-            }).fold(x + width, f32::max);
-        [right + crate::artboard::edit::default_spacing(before) - x, 0.0]
-    } else {
-        let [new_x, new_y] = page_origin(&doc, index + 1);
-        [new_x - x, new_y - y]
-    };
-    let mapping = crate::clipboard::copy_bundle_in_document(&mut doc, &bundle, offset);
+    let shifts: Vec<_> = indices.iter().enumerate().map(|(offset, &index)| {
+        let [x, y, width, _] = rects[index];
+        if !layout && before.linked_artboard(before.pages[index].id).is_some() {
+            let right = before.objects.iter().filter(|object| crate::artboard::is_artboard(object)
+                && !before.master_pages.roots.contains(&object.id)).map(|object| {
+                    let [x, _, w, _] = crate::geometry::object_world_bounds(object);
+                    x + w
+                }).fold(x + width, f32::max);
+            [right + crate::artboard::edit::default_spacing(before) - x, 0.0]
+        } else {
+            let [new_x, new_y] = page_origin(&doc, at + offset);
+            [new_x - x, new_y - y]
+        }
+    }).collect();
+    let mapping = crate::clipboard::copy_bundle_in_document(&mut doc, &bundle, [0.0; 2]);
     for (&source, &copy) in &mapping {
-        if let Some(object) = doc.find_object_mut(copy.0) {
-            object.page_id = Some(id);
+        if let Some(&offset) = page_of.get(&source) && let Some(object) = doc.find_object_mut(copy.0) {
+            object.page_id = Some(new_ids[offset]);
+            object.pos[0] += shifts[offset][0];
+            object.pos[1] += shifts[offset][1];
         }
         if let Some(mut frame) = super::picture_frame::get_frame(before, source) {
             frame.object = copy;
@@ -497,19 +790,24 @@ fn duplicate_page(session: &mut Session, command: &Command) -> CommandResult {
         copy.object = *mapping.get(&entry.object)?;
         Some(copy)
     }));
-    if let Some(board) = board.and_then(|board| mapping.get(&board.id).copied()) {
-        doc.pages[index + 1].artboard_id = Some(board);
-        doc.artboard_backing_pages.insert(id);
-        crate::artboard::edit::name_duplicate(&mut doc, board);
-    }
-    if let Some(assignment) = before.master_pages.for_page(source_id) {
-        let mut copy = assignment.clone();
-        copy.page = id;
-        copy.group = assignment.group.and_then(|group| mapping.get(&group).copied());
-        copy.links = assignment.links.iter().filter_map(|&(source, instance)| {
-            Some((source, *mapping.get(&instance)?))
-        }).collect();
-        doc.master_pages.assignments.push(copy);
+    let mut page_map = HashMap::new();
+    for (offset, (&index, &id)) in indices.iter().zip(&new_ids).enumerate() {
+        let source_id = before.pages[index].id;
+        page_map.insert(source_id, id);
+        if let Some(board) = before.linked_artboard(source_id).and_then(|board| mapping.get(&board.id).copied()) {
+            doc.pages[at + offset].artboard_id = Some(board);
+            doc.artboard_backing_pages.insert(id);
+            crate::artboard::edit::name_duplicate(&mut doc, board);
+        }
+        for assignment in before.master_pages.on_page(source_id) {
+            let mut copy = assignment.clone();
+            copy.page = id;
+            copy.group = assignment.group.and_then(|group| mapping.get(&group).copied());
+            copy.links = assignment.links.iter().filter_map(|&(source, instance)| {
+                Some((source, *mapping.get(&instance)?))
+            }).collect();
+            doc.master_pages.assignments.push(copy);
+        }
     }
     super::masters::lock_positions(&mut doc);
     if !before.anchors.is_empty() || !before.hyperlinks.is_empty()
@@ -518,11 +816,13 @@ fn duplicate_page(session: &mut Session, command: &Command) -> CommandResult {
     {
         use crate::longdoc::page_import::navigation::{copy, PageTransfer};
         copy(before, before, &mut doc, &bundle, &mapping, &excerpts,
-            PageTransfer::Duplicate { original: source_id, copy: id })?;
+            PageTransfer::Duplicate(&page_map))?;
     }
     let selection = session.selection.ids.clone();
     let mut guides = session.guides.clone();
-    for original in session.guides.items.iter().filter(|guide| guide.page_id == Some(source_id)) {
+    for (original, &id) in session.guides.items.iter().filter_map(|guide| {
+        Some((guide, page_map.get(&guide.page_id?)?))
+    }) {
         let mut copy = original.clone();
         copy.id = guides.next_id();
         copy.page_id = Some(id);
@@ -531,7 +831,8 @@ fn duplicate_page(session: &mut Session, command: &Command) -> CommandResult {
         }
         guides.insert(copy).map_err(|_| CommandError::invalid_params())?;
     }
-    super::document_change::commit_guides(session, DUPLICATE, doc, selection, guides, json!({"id": id}))
+    super::document_change::commit_guides(session, DUPLICATE, doc, selection, guides,
+        json!({"id": new_ids[0], "ids": new_ids}))
 }
 
 fn delete_page(session: &mut Session, command: &Command) -> CommandResult {
@@ -546,18 +847,33 @@ fn delete_page(session: &mut Session, command: &Command) -> CommandResult {
         None => vec![page_id(command)?],
         _ => return Err(CommandError::invalid_params()),
     };
-    let removed: HashSet<_> = ids.iter().copied().collect();
-    if ids.is_empty() || ids.len() != removed.len() {
-        return Err(CommandError::invalid_params());
+    prepare_page_deletion(session, ids, false)?.commit(session, DELETE)
+}
+
+pub(crate) struct PageDeletion {
+    document: Document,
+    selection: Vec<ObjectId>,
+    guides: crate::guides::Guides,
+    ids: Vec<PageId>,
+}
+
+impl PageDeletion {
+    pub(crate) fn commit(self, session: &mut Session, command: &str) -> CommandResult {
+        super::document_change::commit_guides(session, command, self.document, self.selection, self.guides,
+            json!({"id": self.ids[0], "ids": self.ids}))
     }
-    let mut indices = ids.iter().map(|id| page_index(before, *id)).collect::<Result<Vec<_>, _>>()?;
+}
+
+pub(crate) fn prepare_page_deletion(session: &Session, ids: Vec<PageId>, moving: bool) -> Result<PageDeletion, CommandError> {
+    let before = &session.document;
+    let indices = selected_page_indices(before, &ids)?;
     if indices.len() >= before.pages.len() {
         return Err(CommandError::new("LAST_PAGE"));
     }
-    indices.sort_unstable();
+    let removed: HashSet<_> = ids.iter().copied().collect();
     let mut doc = before.clone();
     doc.pages.retain(|page| !removed.contains(&page.id));
-    let doomed = remove_page_content(before, &mut doc, &indices, false)?;
+    let doomed = remove_page_content(before, &mut doc, &indices, moving)?;
     for section in &mut doc.sections {
         section.start_page -= indices.partition_point(|&index| index + 1 < section.start_page);
     }
@@ -571,7 +887,7 @@ fn delete_page(session: &mut Session, command: &Command) -> CommandResult {
     let selection = session.selection.ids.iter().copied().filter(|object| !doomed.contains(object)).collect();
     let mut guides = session.guides.clone();
     guides.items.retain(|guide| !guide.page_id.is_some_and(|id| removed.contains(&id)));
-    super::document_change::commit_guides(session, DELETE, doc, selection, guides, json!({"id": ids[0], "ids": ids}))
+    Ok(PageDeletion { document: doc, selection, guides, ids })
 }
 
 pub(crate) fn remove_page_content(before: &Document, doc: &mut Document, indices: &[usize], replacing: bool) -> Result<HashSet<ObjectId>, CommandError> {
@@ -614,6 +930,7 @@ pub(super) fn remove_layout_objects(doc: &mut Document, doomed: &HashSet<ObjectI
 }
 
 pub(crate) fn preserve_content(before: &Document, after: &mut Document) {
+    spreads::reconcile_fixed_spreads(after);
     if !after.hyperlinks.is_empty()
         && !before.pages.iter().map(|page| page.id).eq(after.pages.iter().map(|page| page.id))
     {
@@ -634,6 +951,9 @@ pub(crate) fn preserve_content(before: &Document, after: &mut Document) {
     move_page_content(before, after, |after, index| {
         flow.as_ref().map_or_else(|| page_origin(after, index), |origins| origins[index])
     });
+    if after.page_move_anchor_to_spine && flow.is_some() {
+        spreads::anchor_content_to_spine(before, after);
+    }
     crate::longdoc::xref::refresh_xrefs(after);
 }
 

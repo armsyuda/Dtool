@@ -38,20 +38,21 @@ pub fn normalize(session: &Session, command: &Command) -> Result<Command, Comman
 }
 
 fn guide_percent_position(session: &Session, command: &Command, percent: f64) -> Result<f64, CommandError> {
-    let (kind, page) = if command.name == "guides.add" {
+    let (kind, target) = if command.name == "guides.add" {
         let kind = serde_json::from_value::<GuideKind>(command.params["kind"].clone()).map_err(|_| CommandError::invalid_params())?;
         let page = serde_json::from_value::<Option<PageId>>(command.params["page_id"].clone()).map_err(|_| CommandError::invalid_params())?;
-        (kind, page)
+        let master = serde_json::from_value::<Option<crate::ObjectId>>(command.params["master_id"].clone()).map_err(|_| CommandError::invalid_params())?;
+        (kind, crate::command::guide_surface(page, master)?)
     } else {
         let id = command.params["id"].as_u64().ok_or_else(CommandError::invalid_params)?;
         let guide = session.guides.get(GuideId(id)).ok_or_else(CommandError::not_found)?;
         let kind = serde_json::from_value::<Option<GuideKind>>(command.params["kind"].clone()).map_err(|_| CommandError::invalid_params())?;
-        (kind.unwrap_or(guide.kind), guide.page_id)
+        (kind.unwrap_or(guide.kind), guide.surface())
     };
-    if page.is_some_and(|id| crate::guides::page_bounds(&session.document, id).is_none()) {
+    if target.is_some_and(|id| crate::guides::surface_bounds(&session.document, id).is_none()) {
         return Err(CommandError::not_found());
     }
-    PercentAxis::new(&session.document, page, kind).and_then(|axis| axis.from_percent(percent)).ok_or_else(CommandError::invalid_params)
+    PercentAxis::for_surface(&session.document, target, kind).and_then(|axis| axis.from_percent(percent)).ok_or_else(CommandError::invalid_params)
 }
 
 pub fn readout(session: &Session, mut value: Value) -> Value {

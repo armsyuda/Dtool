@@ -47,7 +47,8 @@ fn c17_fix2_create_rename_delete_in_persona_state() {
     assert_eq!(state.active, PersonaEntry::Builtin(PersonaId::Vector));
     assert_eq!(create_studio(&mut state, &json!({ "name": "x", "base": "liquify" })).unwrap_err().code, "NOT_IMPLEMENTED");
     assert_eq!(create_studio(&mut state, &json!({ "name": "x", "base": "typography" })).unwrap_err().code, "NOT_IMPLEMENTED");
-    assert_eq!(create_studio(&mut state, &json!({ "name": "x", "base": "pixel" })).unwrap_err().code, "INVALID_PARAMS");
+    assert_eq!(create_studio(&mut state, &json!({ "name": "픽셀", "base": "pixel" })).unwrap().0.base, PersonaId::Pixel);
+    assert_eq!(create_studio(&mut state, &json!({ "name": "레이아웃", "base": "layout" })).unwrap().0.base, PersonaId::Layout);
 }
 
 #[test]

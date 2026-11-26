@@ -3,7 +3,7 @@ use dtool_core::workspace::{ContextId, Workspace};
 use dtool_core::CommandError;
 use egui::emath::GuiRounding;
 use dtool_export::raster::{self, EncodedExport, EncodedPreview, ExportError, ExportJob, ExportOptions, JobReceipt, JobStep, OverwriteDecision, OverwritePolicy, PdfColourSpace, RgbaImage};
-use dtool_export::{ExportFormat, ExportReceipt};
+use dtool_export::{ExportArea, ExportFormat, ExportReceipt};
 use dtool_strings::text;
 use serde_json::{json, Value};
 use std::sync::mpsc;
@@ -122,10 +122,27 @@ struct PdfSave {
     result: mpsc::Receiver<Result<ExportReceipt, ExportError>>,
 }
 
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum ExportPane {
+    Formats,
+    #[default]
+    Settings,
+    Preview,
+}
+
+fn default_area(doc: &Document, format: ExportFormat) -> ExportArea {
+    if format == ExportFormat::Pdf && doc.layout_artboard_origins.is_some() {
+        ExportArea::AllPages
+    } else {
+        ExportArea::WholeDocument
+    }
+}
+
 #[derive(Default)]
 pub struct ExportDialog {
     pub open: bool,
     pub options: ExportOptions,
+    explicit_area: bool,
     pub context: dtool_export::ExportContext,
     pub document_viewport: Option<[f32; 2]>,
     pub last_paths: Vec<std::path::PathBuf>,
@@ -140,6 +157,7 @@ pub struct ExportDialog {
     pub search_query: String,
     pub show_in_explorer: bool,
     pub ask_for_location: bool,
+    compact_pane: ExportPane,
     texture: Option<egui::TextureHandle>,
     preview_checker: Option<egui::TextureHandle>,
     texture_generation: u64,
@@ -246,11 +264,14 @@ impl ExportDialog {
     pub fn open_with(&mut self, doc: &Document, format: Option<ExportFormat>) -> Value {
         let format = format.unwrap_or(self.options.format);
         if format != self.options.format || !self.open {
-            self.options = ExportOptions::for_format(format);
-            if let Some(saved) = dtool_core::commands::export_presets::current_options(doc) {
-                if let Ok(next) = serde_json::from_value::<ExportOptions>(dtool_core::commands::export_presets::merged_options(serde_json::to_value(&self.options).unwrap_or_default(), &saved)) {
-                    if next.format == format { self.options = next; }
-                }
+            self.options = ExportOptions { area: default_area(doc, format), ..ExportOptions::for_format(format) };
+            self.explicit_area = false;
+            if let Some(saved) = dtool_core::commands::export_presets::current_options(doc)
+                && let Ok(next) = serde_json::from_value::<ExportOptions>(dtool_core::commands::export_presets::merged_options(serde_json::to_value(&self.options).unwrap_or_default(), &saved))
+                && next.format == format
+            {
+                self.options = next;
+                self.explicit_area = saved.contains_key("area");
             }
         }
         self.open = true;
@@ -264,6 +285,7 @@ impl ExportDialog {
         self.error = None;
         self.last_receipt = None;
         self.search_query.clear();
+        self.compact_pane = ExportPane::Settings;
         self.show_in_explorer = false;
         self.ask_for_location = true;
         self.refresh(doc);
@@ -466,7 +488,11 @@ impl ExportDialog {
             fields.remove("path");
             fields.remove("overwrite");
         }
-        let next = self.options.merge_json(&patch)?;
+        let mut next = self.options.merge_json(&patch)?;
+        self.explicit_area |= patch.get("area").is_some();
+        if !self.explicit_area && next.format != self.options.format {
+            next.area = default_area(doc, next.format);
+        }
         if let Some(path) = params.get("path").and_then(|v| v.as_str()) {
             self.path = path.to_string();
             self.ask_for_location = path.trim().is_empty();
@@ -789,6 +815,7 @@ impl ExportDialog {
                         .and_then(|n| n.checked_sub(1)).ok_or_else(|| ExportError::InvalidArea("pages".into()))?;
                     self.select_preview(doc, index)?;
                 }
+                self.compact_pane = ExportPane::Preview;
                 Ok(self.preview_command(params))
             })()),
             UI_EXPORT_CLOSE => Some(Ok(self.close())),
@@ -875,7 +902,7 @@ impl ExportDialog {
         rows
     }
 
-    fn left_panel(&mut self, ui: &mut egui::Ui) -> (bool, bool) {
+    fn left_panel(&mut self, ui: &mut egui::Ui, doc: &Document) -> (bool, bool) {
         let mut changed = false;
         let search = ui.add(egui::TextEdit::singleline(&mut self.search_query)
             .hint_text(text("dialog.export.search")).id(egui::Id::unique(SEARCH_ID))
@@ -901,16 +928,19 @@ impl ExportDialog {
                 self.page_range_input = None;
                 self.page_range_invalid = false;
                 self.preview_index = 0;
-                self.options = ExportOptions { area: keep.area, pages: keep.pages, width: keep.width, height: keep.height, scale: keep.scale, dpi: keep.dpi, svg: keep.svg, ..ExportOptions::for_format(*format) };
+                let area = if self.explicit_area { keep.area } else { default_area(doc, *format) };
+                self.options = ExportOptions { area, pages: keep.pages, width: keep.width, height: keep.height, scale: keep.scale, dpi: keep.dpi, svg: keep.svg, ..ExportOptions::for_format(*format) };
                 changed = true;
             }
         }
         (changed, search.has_focus() || search.lost_focus())
     }
 
-    fn centre_preview(&mut self, ui: &mut egui::Ui, doc: &Document, width: f32, height: f32) {
+    fn centre_preview(&mut self, ui: &mut egui::Ui, doc: &Document, width: f32, height: f32, show_title: bool) {
         let fit = ui.horizontal(|ui| {
-            dtool_design::panel_header(ui, text("dialog.export.preview"));
+            if show_title {
+                dtool_design::panel_header(ui, text("dialog.export.preview"));
+            }
             let mut fit = dtool_design::button(ui, text("dialog.export.preview.fit")).clicked();
             if self.preview_count > 1 && self.preview.is_some() {
                 let index = self.preview_index;
@@ -1043,11 +1073,16 @@ impl ExportDialog {
         ui.horizontal(|ui| {
             let (marker, _) = ui.allocate_exact_size(egui::vec2(5.0, 14.0), egui::Sense::hover());
             ui.painter().rect_filled(marker, 2.0, format_colour(self.options.format));
-            dtool_design::panel_header(ui, format!("{} · {}", text("dialog.export.settings"), format_label(self.options.format)));
+            dtool_design::panel_header(ui, format_label(self.options.format));
         });
         options_group(ui, text("dialog.export.range_section"));
+        let document_area_label = if default_area(doc, self.options.format) == ExportArea::AllPages {
+            "dialog.export.area.first_page"
+        } else {
+            "dialog.export.area.document"
+        };
         let standard_areas = [
-            (dtool_export::ExportArea::WholeDocument, "dialog.export.area.document"),
+            (ExportArea::WholeDocument, document_area_label),
             (dtool_export::ExportArea::CurrentPage, "dialog.export.area.current_page"),
             (dtool_export::ExportArea::AllPages, "dialog.export.area.all_pages"),
             (dtool_export::ExportArea::CurrentSpread, "dialog.export.area.current_spread"),
@@ -1071,22 +1106,27 @@ impl ExportDialog {
             }
         }
         let current = areas.iter().find(|(area, _)| *area == self.options.area).unwrap_or(&areas[0]);
-        egui::ComboBox::from_id_salt("export.area").width(ui.available_width()).truncate().selected_text(&current.1).show_ui(ui, |ui| {
-            for (area, label) in &areas {
-                if ui.selectable_label(*area == self.options.area, label).clicked() && *area != self.options.area {
-                    self.options.area = area.clone();
-                    self.preview_index = 0;
-                    if !area.is_page_based() {
-                        self.options.include_bleed = false;
-                        self.options.pdf_crop_marks = false;
+        egui::ComboBox::from_id_salt("export.area").width(ui.available_width()).truncate()
+            .selected_text(&current.1).show_ui(ui, |ui| {
+                dtool_design::with_icon_selection(ui, |ui| {
+                    for (area, label) in &areas {
+                        let clicked = ui.selectable_label(*area == self.options.area, label).clicked();
+                        self.explicit_area |= clicked;
+                        if clicked && *area != self.options.area {
+                            self.options.area = area.clone();
+                            self.preview_index = 0;
+                            if !area.is_page_based() {
+                                self.options.include_bleed = false;
+                                self.options.pdf_crop_marks = false;
+                            }
+                            if !area.is_page_based() || matches!(area, dtool_export::ExportArea::WholeDocument) {
+                                self.options.pdf_fold_marks = false;
+                            }
+                            changed = true;
+                        }
                     }
-                    if !area.is_page_based() || matches!(area, dtool_export::ExportArea::WholeDocument) {
-                        self.options.pdf_fold_marks = false;
-                    }
-                    changed = true;
-                }
-            }
-        });
+                });
+            }).response.on_hover_text(&current.1);
         if self.options.area.is_multi() {
             let (range_changed, range_editing) = self.page_range_field(ui, doc);
             changed |= range_changed;
@@ -1169,9 +1209,6 @@ impl ExportDialog {
             ui.label(text("dialog.export.estimated_size"));
             ui.label(self.estimated_size_label());
         });
-        if let Some(error) = &self.error {
-            ui.label(text(error.message_key()));
-        }
         (changed, editing)
     }
 
@@ -1257,7 +1294,7 @@ impl ExportDialog {
         use dtool_core::effect_raster::{MAX_DPI, MIN_DPI};
         use dtool_design::{NumericEvent, NumericSpec, NumericValue, numeric_field};
 
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             let previous = self.options.pdf_raster_dpi;
             let value = previous.unwrap_or_else(|| dtool_core::effect_raster::pdf_dpi(doc));
             let spec = NumericSpec::new(text("dialog.export.pdf.raster_dpi"))
@@ -1317,11 +1354,13 @@ impl ExportDialog {
             .width(ui.available_width()).truncate()
             .selected_text(current.as_deref().unwrap_or(&default))
             .show_ui(ui, |ui| {
-                ui.selectable_value(&mut self.options.icc, None, format!("{} ({default})", text("dialog.export.pdf.default_profile")));
-                for profile in profiles {
-                    ui.selectable_value(&mut self.options.icc, Some(profile.clone()), profile);
-                }
-            });
+                dtool_design::with_icon_selection(ui, |ui| {
+                    ui.selectable_value(&mut self.options.icc, None, format!("{} ({default})", text("dialog.export.pdf.default_profile")));
+                    for profile in profiles {
+                        ui.selectable_value(&mut self.options.icc, Some(profile.clone()), profile);
+                    }
+                });
+            }).response.on_hover_text(current.as_deref().unwrap_or(&default));
         changed || self.options.icc != current
     }
 
@@ -1331,13 +1370,22 @@ impl ExportDialog {
         let mut editing = false;
         let mut path_changed = false;
         #[cfg(windows)]
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             dtool_design::toggle(ui, &mut self.ask_for_location, text("dialog.export.ask_for_location"));
             dtool_design::toggle(ui, &mut self.show_in_explorer, text("dialog.export.show_in_explorer"));
         });
         if !cfg!(windows) || !self.ask_for_location {
-            ui.label(text("dialog.export.choose_location.label"));
-            let input = ui.add(egui::TextEdit::singleline(&mut self.path).desired_width(ui.available_width()));
+            let label = text("dialog.export.choose_location.label");
+            let input = if ui.ctx().content_rect().height() < 320.0 {
+                dtool_design::studio_row(ui, label, |ui, caption| {
+                    ui.add(egui::TextEdit::singleline(&mut self.path).desired_width(ui.available_width()))
+                        .labelled_by(caption)
+                })
+            } else {
+                let caption = ui.label(label);
+                ui.add(egui::TextEdit::singleline(&mut self.path).desired_width(ui.available_width()))
+                    .labelled_by(caption.id)
+            };
             editing = input.has_focus() || input.lost_focus();
             path_changed = input.changed();
         }
@@ -1356,6 +1404,71 @@ impl ExportDialog {
         (export, cancel, editing, path_changed)
     }
 
+    fn formats_panel(&mut self, ui: &mut egui::Ui, doc: &Document, width: f32, height: f32) -> (bool, bool) {
+        dtool_design::dialog_section(ui, |ui| {
+            ui.set_width(width);
+            options_scroll(ui, "export.formats", height, |ui| self.left_panel(ui, doc))
+        }).inner
+    }
+
+    fn settings_panel(&mut self, ui: &mut egui::Ui, doc: &Document, width: f32, height: f32) -> (bool, bool) {
+        dtool_design::dialog_section(ui, |ui| {
+            ui.set_width(width);
+            options_scroll(ui, "export.settings", height, |ui| self.right_settings(ui, doc))
+        }).inner
+    }
+
+    fn body(&mut self, ui: &mut egui::Ui, doc: &Document, width: f32, height: f32) -> (bool, bool) {
+        let inset = 2.0 * (dtool_design::space("sm") + dtool_design::stroke_width("thin"));
+        if width < 780.0 {
+            let tabs = ui.horizontal_wrapped(|ui| {
+                for (pane, label) in [
+                    (ExportPane::Formats, "dialog.export.formats"),
+                    (ExportPane::Settings, "dialog.export.settings"),
+                    (ExportPane::Preview, "dialog.export.preview"),
+                ] {
+                    if dtool_design::tab(ui, self.compact_pane == pane, text(label)).clicked() {
+                        self.compact_pane = pane;
+                    }
+                }
+            });
+            let height = (height - tabs.response.rect.height() - ui.spacing().item_spacing.y).max(56.0);
+            return match self.compact_pane {
+                ExportPane::Formats => {
+                    let result = self.formats_panel(ui, doc, width - inset, height - inset);
+                    if result.0 {
+                        self.compact_pane = ExportPane::Settings;
+                    }
+                    result
+                }
+                ExportPane::Settings => self.settings_panel(ui, doc, width - inset, height - inset),
+                ExportPane::Preview => {
+                    options_scroll(ui, "export.preview", height, |ui| {
+                        self.centre_preview(ui, doc, width, height, false);
+                    });
+                    (false, false)
+                }
+            };
+        }
+
+        let left = (width * 0.17).clamp(104.0, 164.0);
+        let right = (width * 0.29).clamp(180.0, 288.0);
+        let gap = ui.spacing().item_spacing.x;
+        let centre = width - left - right - 2.0 * gap;
+        let (body, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
+        let mut column = |id, offset, width| {
+            let rect = egui::Rect::from_min_size(body.min + egui::vec2(offset, 0.0), egui::vec2(width, height));
+            let mut child = ui.new_child(egui::UiBuilder::new().id_salt(id).max_rect(rect));
+            child.set_clip_rect(child.clip_rect().intersect(rect));
+            child
+        };
+        let formats = self.formats_panel(&mut column("export.formats_panel", 0.0, left), doc, left - inset, height - inset);
+        self.centre_preview(&mut column("export.preview_panel", left + gap, centre), doc, centre, height, true);
+        let settings = self.settings_panel(&mut column("export.settings_panel", left + centre + 2.0 * gap, right),
+            doc, right - inset, height - inset);
+        (formats.0 || settings.0, formats.1 || settings.1)
+    }
+
     pub fn show(&mut self, ui: &mut egui::Ui, doc: &Document) -> Option<ExportOutcome> {
         if !self.open {
             return None;
@@ -1370,7 +1483,7 @@ impl ExportDialog {
         let mut changed = false;
         let mut decision = None;
         let viewport = ui.ctx().content_rect();
-        let bounds = (viewport.size() - egui::vec2(36.0, 72.0)).max(egui::vec2(460.0, 320.0));
+        let bounds = (viewport.size() - egui::vec2(36.0, 72.0)).max(egui::vec2(280.0, 160.0));
         let initial = bounds.min(egui::vec2(1040.0, 660.0));
         egui::Window::new(text("dialog.export.title"))
             .open(&mut window_open)
@@ -1383,47 +1496,27 @@ impl ExportDialog {
             .show(ui.ctx(), |ui| {
                 let width = ui.available_width().min(bounds.x);
                 let footer = if cfg!(windows) && self.ask_for_location { 104.0 } else { 126.0 };
-                let height = (ui.available_height().min(bounds.y) - footer).max(150.0);
-                let left = (width * 0.17).clamp(104.0, 164.0);
-                let right = (width * 0.29).clamp(180.0, 288.0);
-                let gap = ui.spacing().item_spacing.x;
-                let centre = (width - left - right - 2.0 * gap).max(100.0);
-                let mut editing = false;
-                let frame_inset = 2.0 * (dtool_design::space("sm") + dtool_design::stroke_width("thin"));
-                let (body, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
-                let mut column = |id, offset, width| {
-                    let rect = egui::Rect::from_min_size(body.min + egui::vec2(offset, 0.0), egui::vec2(width, height));
-                    let mut child = ui.new_child(egui::UiBuilder::new().id_salt(id).max_rect(rect));
-                    child.set_clip_rect(child.clip_rect().intersect(rect));
-                    child
-                };
-                let (picked_format, search_editing) = dtool_design::dialog_section(&mut column("export.formats_panel", 0.0, left), |ui| {
-                    ui.set_width(left - frame_inset);
-                    egui::ScrollArea::vertical()
-                        .id_salt("export.formats").max_height(height - frame_inset).auto_shrink([false, false])
-                        .show(ui, |ui| self.left_panel(ui)).inner
-                }).inner;
-                changed |= picked_format;
-                editing |= search_editing;
-                self.centre_preview(&mut column("export.preview_panel", left + gap, centre), doc, centre, height);
-                let (settings_changed, settings_editing) = dtool_design::dialog_section(&mut column("export.settings_panel", left + centre + 2.0 * gap, right), |ui| {
-                    ui.set_width(right - frame_inset);
-                    options_scroll(ui, "export.settings", height - frame_inset, |ui| self.right_settings(ui, doc))
-                }).inner;
+                let height = (ui.available_height().min(bounds.y) - footer).max(78.0);
+                let popup_active = egui::Popup::is_any_open(ui.ctx());
+                let (settings_changed, editing) = self.body(ui, doc, width, height);
                 changed |= settings_changed;
-                editing |= settings_editing;
                 ui.separator();
+                if let Some(error) = &self.error {
+                    ui.colored_label(ui.visuals().error_fg_color, text(error.message_key()));
+                }
                 let (export_clicked, cancel_clicked, path_editing, path_changed) = self.bottom_bar(ui);
                 changed |= path_changed && self.options.format == ExportFormat::Eps;
                 export = export_clicked;
                 cancel = cancel_clicked;
                 decision = self.overwrite_prompt(ui);
                 self.receipt_summary(ui);
-                match dtool_design::dialog_keys(ui) {
-                    Some(dtool_design::DialogKey::Cancel) => cancel = true,
-                    Some(dtool_design::DialogKey::Confirm) if !editing && !path_editing
-                        && self.pending_overwrite().is_none() && ui.input(|i| !i.modifiers.any()) => export = true,
-                    _ => {}
+                if !popup_active && !egui::Popup::is_any_open(ui.ctx()) {
+                    match dtool_design::dialog_keys(ui) {
+                        Some(dtool_design::DialogKey::Cancel) => cancel = true,
+                        Some(dtool_design::DialogKey::Confirm) if !editing && !path_editing
+                            && self.pending_overwrite().is_none() && ui.input(|i| !i.modifiers.any()) => export = true,
+                        _ => {}
+                    }
                 }
             });
         if changed {

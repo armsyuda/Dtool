@@ -373,7 +373,11 @@ fn pick_with(ui: &mut egui::Ui, current: Option<&serde_json::Value>, mut icons: 
     let control_height = dtool_design::size("bar.toolbar.control.height");
     let mut selected = None;
 
-    if in_sub_persona {
+    if in_sub_persona && active == "ai_image" {
+        if dtool_design::button(ui, text("ai.image.back")).clicked() {
+            selected = Some(LEAVE_CANCEL.to_string());
+        }
+    } else if in_sub_persona {
         ui.horizontal(|ui| {
             if dtool_design::button(ui, text("persona.apply")).clicked() {
                 selected = Some(LEAVE_APPLY.to_string());

@@ -72,7 +72,7 @@ pub fn before_shortcuts(session: &mut Session, events: &OsClipboardEvents) -> Op
         return (!events.key_paste).then_some("edit.paste");
     }
     if let Some(text) = events.paste.as_deref() {
-        if !accept_svg_text(&session.clipboard, text) { take_os_text(session, text); }
+        if !accept_svg_text(&session.clipboard, text, None) { take_os_text(session, text); }
         if events.key_paste || session.clipboard.get_payload().kind == ClipboardKind::Empty {
             return None;
         }
@@ -170,13 +170,13 @@ fn looks_like_svg(text: &str) -> bool {
     text.starts_with('<') && text.contains("<svg") && text.contains("http://www.w3.org/2000/svg")
 }
 
-fn accept_svg_text(clipboard: &dtool_core::clipboard::AppClipboard, text: &str) -> bool {
+fn accept_svg_text(clipboard: &dtool_core::clipboard::AppClipboard, text: &str, companion_pdf: Option<&[u8]>) -> bool {
     if !looks_like_svg(text) { return false; }
     let payload = clipboard.get_payload();
     if payload.kind == ClipboardKind::Objects && os_text_for_payload(&payload) == text.replace("\r\n", "\n") {
         return false;
     }
-    let Ok((document, _)) = dtool_io::import_svg::import_clipboard_svg(text) else { return false; };
+    let Ok((document, _)) = dtool_io::import_svg::import_clipboard_svg(text, companion_pdf) else { return false; };
     accept_vector(clipboard, &document)
 }
 
@@ -237,19 +237,76 @@ pub(crate) fn write_native_image(ctx: &egui::Context, image: NativeImage) -> Res
 }
 
 pub fn image_for_copy(session: &Session) -> Result<Option<NativeImage>, dtool_core::CommandError> {
+    Ok(prepare_graphic_copy(session, false)?.and_then(|graphic| graphic.image))
+}
+
+struct GraphicCopy {
+    image: Option<NativeImage>,
+    pdf: Option<Vec<u8>>,
+}
+
+pub(crate) fn publish_graphic_copy(ctx: &egui::Context, session: &Session) -> Result<bool, dtool_core::CommandError> {
+    if std::env::var_os("DTOOL_DISABLE_OS_CLIPBOARD").is_some() { return Ok(true); }
+    let Some(graphic) = prepare_graphic_copy(session, cfg!(windows))? else { return Ok(false); };
+    if let Some(pdf) = graphic.pdf {
+        #[cfg(windows)]
+        if native_vector::publish(&session.clipboard, &pdf, graphic.image.as_ref()) {
+            return Ok(true);
+        }
+        #[cfg(not(windows))]
+        let _ = pdf;
+        if !os_text_for_payload(&session.clipboard.get_payload()).is_empty() { return Ok(false); }
+    }
+    let image = graphic.image.ok_or_else(|| dtool_core::CommandError::new("CLIPBOARD_WRITE_FAILED"))?;
+    write_native_image(ctx, image)?;
+    Ok(true)
+}
+
+fn prepare_graphic_copy(session: &Session, vector: bool) -> Result<Option<GraphicCopy>, dtool_core::CommandError> {
+    use dtool_core::ObjectKind;
+    use dtool_export::raster::{self, ExportOptions};
+    use dtool_export::{ExportArea, ExportFormat};
+
     let payload = session.clipboard.get_payload();
-    if payload.kind != ClipboardKind::Objects || !os_text_for_payload(&payload).is_empty() { return Ok(None); }
+    let has_text = !os_text_for_payload(&payload).is_empty();
+    if payload.kind != ClipboardKind::Objects || !vector && has_text { return Ok(None); }
     if let Some(png) = &payload.image_png {
-        let pixels = dtool_export::raster::decode(png, dtool_export::ExportFormat::Png).map_err(|e| e.to_command_error())?;
-        return remember_copy(pixels, &payload).map(Some);
+        let pixels = raster::decode(png, ExportFormat::Png).map_err(|e| e.to_command_error())?;
+        return Ok(Some(GraphicCopy { image: Some(remember_copy(pixels, &payload)?), pdf: None }));
     }
     let Some(bundle) = dtool_core::clipboard::payload_bundle(&payload) else { return Ok(None) };
     let mut doc = dtool_core::Document::new([1.0, 1.0], session.document.units, session.document.dpi, 1);
     let roots = dtool_core::clipboard::paste_bundle(&mut doc, &bundle, None, [0.0, 0.0]);
-    let Some(bounds) = dtool_core::command::selection_bounds(&doc, &roots) else { return Ok(None) };
-    let options = dtool_export::raster::ExportOptions { area: dtool_export::ExportArea::Rect(bounds), transparent: true, ..Default::default() };
-    let pixels = dtool_export::raster::render_preview(&doc, &options).map_err(|e| e.to_command_error())?;
-    remember_copy(pixels, &payload).map(Some)
+    let Some(mut bounds) = dtool_core::command::selection_bounds(&doc, &roots) else { return Ok(None) };
+    let vector = vector && doc.objects.iter().any(|object| {
+        dtool_core::scene::is_drawn(&doc, object.id)
+            && !matches!(object.kind, ObjectKind::Image | ObjectKind::PictureFrame | ObjectKind::Group | ObjectKind::Artboard)
+    });
+    let bounds = if vector {
+        dtool_export::selection_output_region(&doc, &roots).map(|(x, y, w, h)| [x, y, w, h])
+    } else {
+        dtool_core::command::selection_bounds(&doc, &roots)
+    };
+    let Some(bounds) = bounds else { return Ok(None) };
+    let options = ExportOptions { area: ExportArea::Rect(bounds), ..Default::default() };
+    let pdf = if vector {
+        let options = ExportOptions {
+            format: ExportFormat::Pdf, pdf_outline_text: false, ..options.clone()
+        };
+        raster::encode_output(&doc, &options, std::path::Path::new("")).ok()
+            .map(|output| output.into_bytes()).filter(|bytes| bytes.len() <= MAX_CLIPBOARD_IMAGE_BYTES)
+    } else {
+        None
+    };
+    if pdf.is_none() && has_text { return Ok(None); }
+    let image = match raster::render_preview(&doc, &options).map_err(|e| e.to_command_error())
+        .and_then(|pixels| remember_copy(pixels, &payload))
+    {
+        Ok(image) => Some(image),
+        Err(_) if pdf.is_some() => None,
+        Err(error) => return Err(error),
+    };
+    Ok(Some(GraphicCopy { image, pdf }))
 }
 
 fn remember_copy(pixels: dtool_export::raster::RgbaImage, payload: &std::sync::Arc<dtool_core::clipboard::ClipboardPayload>) -> Result<NativeImage, dtool_core::CommandError> {

@@ -6,8 +6,8 @@ use crate::tokens::{color, font_size, radius, size, space, stroke_width};
 mod numeric_field;
 mod parts;
 
-pub use numeric_field::{format_number, numeric_area_id, numeric_cancel_edit, numeric_field, numeric_request_edit, numeric_state, numeric_value, number_drag, number_drag_with, NumericEvent, NumericSpec, NumericState, NumericValue};
-pub use parts::{frameless_button, frameless_button_with, list_row, list_row_with, small_icon_button, small_icon_button_side, small_icon_button_with};
+pub use numeric_field::{format_number, numeric_area_id, numeric_cancel_edit, numeric_caption, numeric_field, numeric_request_edit, numeric_state, numeric_value, number_drag, number_drag_with, NumericEvent, NumericSpec, NumericState, NumericValue};
+pub use parts::{frameless_button, frameless_button_with, list_row, list_row_with, preview_list_row, small_icon_button, small_icon_button_side, small_icon_button_with};
 
 fn corner(r: f32) -> egui::CornerRadius {
     egui::CornerRadius::same(r.round().clamp(0.0, 255.0) as u8)
@@ -75,8 +75,8 @@ pub fn button_visuals(ui: &mut Ui) {
     widgets.inactive.bg_fill = color("button.bg");
     widgets.hovered.weak_bg_fill = color("button.bg_hover");
     widgets.hovered.bg_fill = color("button.bg_hover");
-    widgets.active.weak_bg_fill = color("button.bg_hover");
-    widgets.active.bg_fill = color("button.bg_hover");
+    widgets.active.weak_bg_fill = color("button.bg_pressed");
+    widgets.active.bg_fill = color("button.bg_pressed");
 }
 
 fn add_button(ui: &mut Ui, button: egui::Button<'_>, state: &ControlState) -> Response {
@@ -102,7 +102,7 @@ pub fn primary_button(ui: &mut Ui, label: &str, minimum: Vec2) -> Response {
 
 pub fn button_with(ui: &mut Ui, text: impl Into<WidgetText>, state: &ControlState) -> Response {
     let button = egui::Button::new(text)
-        .corner_radius(corner(radius("sm")))
+        .corner_radius(corner(size("radius.button")))
         .min_size(Vec2::new(size("button.width"), size("button.height")));
     add_button(ui, button, state)
 }
@@ -112,8 +112,9 @@ pub fn icon_button(ui: &mut Ui, icon: impl Into<WidgetText>) -> Response {
 }
 
 pub fn icon_button_with(ui: &mut Ui, icon: impl Into<WidgetText>, state: &ControlState) -> Response {
-    let side = size("icon.size.md");
-    let button = egui::Button::new(icon).corner_radius(corner(radius("sm"))).min_size(Vec2::splat(side));
+    let button = egui::Button::new(icon)
+        .corner_radius(corner(size("radius.button")))
+        .min_size(Vec2::splat(size("control.hit_size")));
     add_button(ui, button, state)
 }
 
@@ -128,8 +129,7 @@ pub fn selected_icon_ink(ui: &Ui) -> egui::Color32 {
 pub fn with_icon_selection<R>(ui: &mut Ui, draw: impl FnOnce(&mut Ui) -> R) -> R {
     ui.scope(|ui| {
         let ink = selected_icon_ink(ui);
-        let fill = if ui.visuals().dark_mode { crate::tokens::color_in("dark", "input") }
-            else { egui::Color32::from_gray(197) };
+        let fill = color("control.selected");
         let selection = &mut ui.visuals_mut().selection;
         selection.bg_fill = fill;
         selection.stroke.color = ink;
@@ -137,11 +137,39 @@ pub fn with_icon_selection<R>(ui: &mut Ui, draw: impl FnOnce(&mut Ui) -> R) -> R
     }).inner
 }
 
+/// Use the dark control selection for text choices, preserving the document accent.
+pub fn choice_value<T: PartialEq>(ui: &mut Ui, value: &mut T, choice: T, label: impl Into<WidgetText>) -> Response {
+    with_icon_selection(ui, |ui| ui.selectable_value(value, choice, label))
+}
+
 pub fn icon_image_button_selected(ui: &mut Ui, texture: &egui::TextureHandle, selected: bool, state: &ControlState) -> Response {
     let side = size("icon.size.md");
     let image = egui::Image::new(texture).fit_to_exact_size(Vec2::splat(side));
-    let button = egui::Button::image(image).selected(selected).corner_radius(corner(radius("sm"))).min_size(Vec2::splat(side));
-    with_icon_selection(ui, |ui| add_button(ui, button, state))
+    let button = egui::Button::image(image).selected(selected)
+        .corner_radius(corner(size("radius.button")))
+        .min_size(Vec2::splat(size("control.hit_size")));
+    with_icon_selection(ui, |ui| {
+        let response = add_button(ui, button, state);
+        if selected {
+            let stroke = if response.hovered() && !response.has_focus() {
+                egui::Stroke::new(stroke_width("thin"), crate::theme::widget_token("focus").unwrap_or(ui.visuals().selection.bg_fill))
+            } else {
+                ui.style().interact(&response).bg_stroke
+            };
+            ui.painter().rect_stroke(response.rect, corner(size("radius.button")), stroke, egui::StrokeKind::Inside);
+        }
+        response
+    })
+}
+
+pub fn studio_icon_button(ui: &mut Ui, button: egui::Button<'_>, width: f32, selected: bool) -> Response {
+    with_icon_selection(ui, |ui| {
+        button_visuals(ui);
+        ui.add_sized(
+            Vec2::new(width, size("control.icon.height")),
+            button.selected(selected).corner_radius(corner(size("radius.button"))),
+        )
+    })
 }
 
 pub fn icon_texture_px(ui: &Ui) -> u32 {
@@ -157,7 +185,7 @@ pub fn menu_toggle(ui: &mut Ui, on: &mut bool, label: impl Into<WidgetText>) -> 
 }
 
 fn switch(ui: &mut Ui, on: &mut bool, label: WidgetText, mixed: bool, menu: bool) -> Response {
-    let track_size = Vec2::new(25.0, 14.0);
+    let track_size = Vec2::new(size("control.switch.width"), size("control.switch.height"));
     let gap = if label.is_empty() { 0.0 } else { ui.spacing().icon_spacing.max(6.0) };
     let padding = if menu { ui.spacing().button_padding.x } else { 0.0 };
     let name = label.text().to_owned();
@@ -166,7 +194,7 @@ fn switch(ui: &mut Ui, on: &mut bool, label: WidgetText, mixed: bool, menu: bool
     let desired = if menu {
         Vec2::new(ui.available_width(), label.size().y.max(size("menu.row.height")))
     } else {
-        Vec2::new(track_size.x + gap + label.size().x, label.size().y.max(20.0))
+        Vec2::new(track_size.x + gap + label.size().x, label.size().y.max(size("control.hit_size")))
     };
     let (rect, mut response) = ui.allocate_exact_size(desired, egui::Sense::click());
     if response.clicked() {
@@ -191,8 +219,14 @@ fn switch(ui: &mut Ui, on: &mut bool, label: WidgetText, mixed: bool, menu: bool
             egui::pos2(track_left + track_size.x * 0.5, rect.center().y), track_size,
         );
         let active = *on && !mixed;
-        let fill = if active && response.enabled() {
+        let fill = if !response.enabled() {
+            color("input.disabled")
+        } else if response.is_pointer_button_down_on() {
+            color("button.bg_pressed")
+        } else if active {
             ui.visuals().selection.bg_fill
+        } else if response.hovered() {
+            color("control.selected_hover")
         } else {
             ui.visuals().extreme_bg_color
         };
@@ -201,10 +235,11 @@ fn switch(ui: &mut Ui, on: &mut bool, label: WidgetText, mixed: bool, menu: bool
         } else {
             egui::Stroke::new(1.0, visuals.fg_stroke.color.gamma_multiply(0.58))
         };
-        ui.painter().rect(track, 7.0, fill, stroke, egui::StrokeKind::Inside);
-        let x = if mixed { track.center().x } else if active { track.right() - 7.0 } else { track.left() + 7.0 };
+        let inset = track.height() * 0.5;
+        ui.painter().rect(track, corner(inset), fill, stroke, egui::StrokeKind::Inside);
+        let x = if mixed { track.center().x } else if active { track.right() - inset } else { track.left() + inset };
         let knob = if active && response.enabled() { ui.visuals().selection.stroke.color } else { visuals.fg_stroke.color };
-        ui.painter().circle_filled(egui::pos2(x, track.center().y), 4.0, knob);
+        ui.painter().circle_filled(egui::pos2(x, track.center().y), size("control.switch.knob_radius"), knob);
         if mixed {
             let center = egui::pos2(x, track.center().y);
             ui.painter().line_segment([center - Vec2::new(2.0, 0.0), center + Vec2::new(2.0, 0.0)], egui::Stroke::new(1.0, fill));
@@ -290,11 +325,13 @@ pub fn slider_with(ui: &mut Ui, value: &mut f32, range: std::ops::RangeInclusive
     let mut response = ui.add_enabled_ui(state.enabled, |ui| ui.horizontal(|ui| {
         if !label.is_empty() { ui.label(label); }
         let mut shown = if state.mixed { *range.start() } else { *value };
-        let rail_width = (ui.available_width() - 58.0).clamp(32.0, 220.0);
+        let field_width = size("control.slider.field_width");
+        let rail_width = (ui.available_width() - field_width - ui.spacing().item_spacing.x)
+            .clamp(size("control.slider.min_width"), 220.0);
         let rail = slider_rail(ui, &mut shown, range.clone(), rail_width, label, state.enabled);
         if rail.changed() { *value = shown; }
         let spec = NumericSpec::new("").range(f64::from(*range.start())..=f64::from(*range.end()))
-            .width(52.0).decimals(2).enabled(state.enabled);
+            .width(field_width).decimals(2).enabled(state.enabled);
         let display = if state.mixed && !rail.changed() { NumericValue::Mixed } else { NumericValue::Value(f64::from(*value)) };
         let (field, event) = numeric_field(ui, id.with("value"), display, &spec);
         if let NumericEvent::Commit(next) | NumericEvent::Preview(next) = event { *value = next as f32; }
@@ -319,7 +356,7 @@ pub fn logarithmic_slider_rail(ui: &mut Ui, value: &mut f32, range: std::ops::Ra
 fn draw_slider_rail(ui: &mut Ui, value: &mut f32, range: std::ops::RangeInclusive<f32>, width: f32, label: &str, enabled: bool, logarithmic_minimum: Option<f64>) -> Response {
     ui.scope(|ui| {
         ui.spacing_mut().slider_width = width;
-        ui.spacing_mut().interact_size.y = 12.0;
+        ui.spacing_mut().interact_size.y = size("control.hit_size");
         let accent = ui.visuals().selection.bg_fill;
         ui.visuals_mut().widgets.inactive.bg_fill = accent;
         ui.visuals_mut().widgets.inactive.bg_stroke = egui::Stroke::NONE;
@@ -346,12 +383,14 @@ pub fn dropdown_value<T: PartialEq + Clone>(ui: &mut Ui, id: &str, value: &mut T
     let inner = ui.add_enabled_ui(state.enabled, |ui| {
         let mut picked = None;
         let response = egui::ComboBox::from_id_salt(id).selected_text(shown).show_ui(ui, |ui| {
-            for (option, label) in options {
-                let selected = !state.mixed && option == value;
-                if ui.selectable_label(selected, *label).clicked() {
-                    picked = Some(option.clone());
+            with_icon_selection(ui, |ui| {
+                for (option, label) in options {
+                    let selected = !state.mixed && option == value;
+                    if ui.selectable_label(selected, *label).clicked() {
+                        picked = Some(option.clone());
+                    }
                 }
-            }
+            });
         });
         (response.response, picked)
     });
@@ -419,9 +458,21 @@ pub fn dropdown(
     options: &[&str],
 ) -> Response {
     let shown = options.get(*selected).copied().unwrap_or("");
-    egui::ComboBox::from_id_salt(id)
+    let before = *selected;
+    let mut response = egui::ComboBox::from_id_salt(id)
         .selected_text(shown)
-        .show_index(ui, selected, options.len(), |i| options[i].to_string())
+        .show_ui(ui, |ui| {
+            with_icon_selection(ui, |ui| {
+                for (index, label) in options.iter().enumerate() {
+                    ui.selectable_value(selected, index, *label);
+                }
+            });
+        })
+        .response;
+    if *selected != before {
+        response.mark_changed();
+    }
+    response
 }
 
 pub fn colour_well(ui: &mut Ui, fill: egui::Color32, id: &str) -> Response {
@@ -500,6 +551,30 @@ pub fn studio_row<R>(ui: &mut Ui, label: &str, controls: impl FnOnce(&mut Ui, eg
     }).inner
 }
 
+/// Choose the largest group that fits without changing the control hit sizes.
+pub fn panel_column_count(ui: &Ui, width: f32, count: usize, minimum: f32) -> usize {
+    let gap = ui.spacing().item_spacing.x;
+    (((width.max(0.0) + gap) / (minimum + gap)).floor() as usize).clamp(1, count.max(1))
+}
+
+/// Places related controls left to right, then wraps them in reading order.
+pub fn panel_columns(ui: &mut Ui, count: usize, minimum: f32, mut draw: impl FnMut(&mut Ui, usize)) {
+    let columns = panel_column_count(ui, ui.available_width(), count.min(3), minimum);
+    if columns == 1 {
+        for index in 0..count {
+            draw(ui, index);
+        }
+    } else {
+        for start in (0..count).step_by(columns) {
+            ui.columns(columns, |cells| {
+                for (index, cell) in (start..count).zip(cells) {
+                    draw(cell, index);
+                }
+            });
+        }
+    }
+}
+
 const STUDIO_BODY: &str = "dtool.design.studio_body";
 
 pub fn in_studio(ui: &Ui) -> bool {
@@ -513,7 +588,7 @@ pub fn studio_content<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> egui::I
 }
 
 pub fn studio_content_with<R>(ui: &mut Ui, scroll: bool, add: impl FnOnce(&mut Ui) -> R) -> egui::InnerResponse<R> {
-    egui::Frame::new().fill(surface(ui.ctx(), "panel.bg")).inner_margin(4.0).show(ui, |ui| {
+    egui::Frame::new().fill(surface(ui.ctx(), "panel.bg")).inner_margin(space("sm")).show(ui, |ui| {
         ui.scope_builder(egui::UiBuilder::new().ui_stack_info(egui::UiStackInfo::default().with_tag(STUDIO_BODY)), |ui| {
             if scroll {
                 egui::ScrollArea::vertical().id_salt("studio.body").auto_shrink([false,false]).show(ui, add).inner
@@ -571,13 +646,46 @@ pub fn dialog_frame<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> egui::Inn
         .show(ui, add)
 }
 
+pub fn dialog_options_scroll<R>(ui: &mut Ui, id: &'static str, height: f32, add: impl FnOnce(&mut Ui) -> R) -> R {
+    dialog_options_scroll_with_offset(ui, id, height, None, add)
+}
+
+pub fn dialog_options_scroll_with_offset<R>(
+    ui: &mut Ui, id: &'static str, height: f32, offset: Option<f32>, add: impl FnOnce(&mut Ui) -> R,
+) -> R {
+    ui.scope(|ui| {
+        let mut scroll = egui::style::ScrollStyle::solid();
+        scroll.bar_width = size("dialog.scroll.width");
+        scroll.handle_min_length = size("dialog.scroll.min_handle");
+        scroll.bar_outer_margin = space("xs");
+        scroll.foreground_color = true;
+        ui.spacing_mut().scroll = scroll;
+        let mut area = egui::ScrollArea::vertical().id_salt(id).max_height(height).auto_shrink([false, false])
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded);
+        if let Some(offset) = offset {
+            area = area.vertical_scroll_offset(offset);
+        }
+        area.show(ui, add).inner
+    }).inner
+}
+
 pub fn dialog_section<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> egui::InnerResponse<R> {
     egui::Frame::new()
-        .fill(ui.visuals().extreme_bg_color)
-        .stroke(panel_stroke())
+        .fill(color("dialog.section"))
+        .stroke(egui::Stroke::new(stroke_width("thin"), color("dialog.separator")))
         .corner_radius(corner(radius("sm")))
         .inner_margin(space("sm"))
         .show(ui, add)
+}
+
+pub fn menu_row_style(style: &mut egui::Style) {
+    style.override_font_id = Some(egui::FontId::proportional(size("menu.font_size")));
+    style.wrap_mode = Some(egui::TextWrapMode::Truncate);
+    style.spacing.button_padding.x = size("menu.row.padding");
+    style.spacing.item_spacing.y = size("menu.row.gap");
+    style.visuals.widgets.hovered.weak_bg_fill = color("menu.row_hover");
+    style.visuals.widgets.open.weak_bg_fill = color("menu.row_hover");
+    style.visuals.widgets.active.weak_bg_fill = color("menu.row_pressed");
 }
 
 pub fn menu_item(ui: &mut Ui, text: impl Into<WidgetText>) -> Response {
@@ -595,11 +703,8 @@ pub fn tooltip(response: Response, text: impl Into<String>) -> Response {
 pub fn status_bar_frame<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> egui::InnerResponse<R> {
     egui::Frame::new()
         .fill(surface(ui.ctx(), "bars"))
-        .inner_margin(space("xs"))
-        .show(ui, |ui| {
-            ui.set_min_height(size("bar.status.height"));
-            ui.horizontal(add).inner
-        })
+        .inner_margin(egui::Margin::symmetric(space("xs").round() as i8, 0))
+        .show(ui, |ui| ui.horizontal_centered(add).inner)
 }
 
 pub fn text_input_multiline(ui: &mut Ui, value: &mut String) -> Response {

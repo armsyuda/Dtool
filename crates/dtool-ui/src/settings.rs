@@ -5,18 +5,6 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum UiStyle {
-    Dark,
-    Light,
-}
-
-impl Default for UiStyle {
-    fn default() -> Self {
-        UiStyle::Dark
-    }
-}
-
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ToolbarVisibility {
@@ -63,7 +51,6 @@ impl ToolbarArea {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct UiSettings {
-    pub ui_style: UiStyle,
     pub background_grey: f32,
     pub ui_brightness: f32,
     pub text_contrast: f32,
@@ -82,7 +69,6 @@ pub struct UiSettings {
 impl Default for UiSettings {
     fn default() -> Self {
         UiSettings {
-            ui_style: UiStyle::Dark,
             background_grey: 0.25,
             ui_brightness: 0.5,
             text_contrast: 0.5,

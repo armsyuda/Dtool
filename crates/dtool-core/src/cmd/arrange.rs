@@ -459,7 +459,7 @@ fn promotable_groups(session: &Session, command: &Command) -> Result<Vec<ObjectI
         let Some(group) = doc.get_object(*id) else { return true };
         !group.is_group() || group.layer_folder || group.locked || group.tone_blend.is_some()
             || crate::artboard::is_artboard(group)
-            || doc.master_pages.assignments.iter().any(|assignment| assignment.group == Some(*id))
+            || doc.master_pages.inherited_content().any(|assignment| assignment.group == Some(*id))
             || doc.master_pages.source_of(*id).is_some()
             || doc.symbols.instances.iter().any(|instance| instance.root == *id)
             || crate::commands::symbols::object_link(doc, *id).is_some()

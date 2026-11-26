@@ -1,4 +1,4 @@
-use dtool_core::document::PageId;
+use dtool_core::view::ViewTarget;
 use dtool_core::guides::{Guide, GuideKind, PercentAxis};
 use dtool_core::guides::column_layout::{ColumnLayout, Style};
 use dtool_core::{CommandError, Session};
@@ -95,8 +95,13 @@ pub fn add_guide(session: &mut Session, kind: GuideKind, position: f32, name: &s
     add_scoped_guide(session, kind, position, name, None)
 }
 
-fn add_scoped_guide(session: &mut Session, kind: GuideKind, position: f32, name: &str, page: Option<PageId>) -> Result<u64, CommandError> {
-    let mut params = serde_json::json!({ "kind": kind, "position": position, "page_id": page });
+fn add_scoped_guide(session: &mut Session, kind: GuideKind, position: f32, name: &str, target: Option<ViewTarget>) -> Result<u64, CommandError> {
+    let mut params = serde_json::json!({ "kind": kind, "position": position });
+    match target {
+        Some(ViewTarget::Page(id)) => params["page_id"] = serde_json::json!(id),
+        Some(ViewTarget::Artboard(id)) => params["master_id"] = serde_json::json!(id),
+        None => {}
+    }
     if let Some(n) = optional_name(name) {
         params["name"] = serde_json::Value::String(n);
     }
@@ -109,7 +114,8 @@ fn add_scoped_guide(session: &mut Session, kind: GuideKind, position: f32, name:
 
 fn position_field(ui: &mut Ui, id: egui::Id, position: f64, axis: Option<PercentAxis>, units: &str) -> NumericEvent {
     let shown = axis.map_or(position, |axis| axis.to_percent(position));
-    let spec = NumericSpec::new("").suffix(if axis.is_some() { "%" } else { units }).decimals(6).width(96.0);
+    let (suffix, decimals) = if axis.is_some() { ("%", 3) } else { (units, 6) };
+    let spec = NumericSpec::new("").suffix(suffix).decimals(decimals).width(96.0);
     let (_, event) = numeric_field(ui, id, NumericValue::Value(shown), &spec);
     let convert = |value| match axis {
         Some(axis) => axis.from_percent(value),
@@ -176,13 +182,13 @@ impl ColumnGuideEditor {
             let name = &pages[index].name;
             if name.is_empty() { label } else { format!("{label} · {name}") }
         };
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.strong(text("dialog.guides.column_layout"));
-            egui::ComboBox::from_id_salt("column-guides-page").width(115.0).selected_text(page_label(initial)).show_ui(ui, |ui| {
+            egui::ComboBox::from_id_salt("column-guides-page").width(115.0).truncate().selected_text(page_label(initial)).show_ui(ui, |ui| {
                 for index in 0..pages.len() {
                     ui.selectable_value(&mut selected, index, page_label(index));
                 }
-            });
+            }).response.on_hover_text(page_label(selected));
         });
         let page = &pages[selected];
         if self.page != Some(page.id) {
@@ -191,26 +197,24 @@ impl ColumnGuideEditor {
         }
         let current = page.column_guides.unwrap_or_default();
         let mut grid = self.draft.unwrap_or(current);
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             for (key, count) in [("dialog.guides.columns", &mut grid.columns), ("dialog.guides.rows", &mut grid.rows)] {
-                ui.label(text(key));
                 let mut value = f64::from(*count);
-                let spec = NumericSpec::new("").range(1.0..=f64::from(ColumnLayout::MAX_COUNT)).decimals(0).width(44.0);
+                let spec = NumericSpec::new(text(key)).range(1.0..=f64::from(ColumnLayout::MAX_COUNT)).decimals(0).width(44.0);
                 let id = ui.id().with((key, page.id));
                 numeric_value(ui, id, &mut value, &spec);
                 *count = value.round() as u16;
             }
-            ui.label(text("frame.gutter"));
             let mut value = f64::from(grid.gutter);
-            let spec = NumericSpec::new("").range(0.0..=1_000_000.0).suffix(units_suffix(session.document.units)).decimals(3).width(86.0);
+            let spec = NumericSpec::new(text("frame.gutter")).range(0.0..=1_000_000.0).suffix(units_suffix(session.document.units)).decimals(3).width(86.0);
             let id = ui.id().with(("column-guides-gutter", page.id));
             numeric_value(ui, id, &mut value, &spec);
             grid.gutter = value as f32;
         });
         let mut layout = None;
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             for (style, key) in [(Style::Filled, "dialog.guides.filled"), (Style::Outline, "menu.view.mode.outline")] {
-                ui.selectable_value(&mut grid.style, style, text(key));
+                dtool_design::choice_value(ui, &mut grid.style, style, text(key));
             }
             self.draft = (grid != current).then_some(grid);
             if ui.add_enabled(self.draft.is_some(), egui::Button::new(text("button.apply"))).clicked() {
@@ -307,8 +311,8 @@ impl GuidesDialog {
         self.add_in_scope(session, None)
     }
 
-    fn add_in_scope(&mut self, session: &mut Session, page: Option<PageId>) -> Result<u64, CommandError> {
-        let result = add_scoped_guide(session, kind_at(self.new_kind), self.new_position as f32, &self.new_name, page);
+    fn add_in_scope(&mut self, session: &mut Session, target: Option<ViewTarget>) -> Result<u64, CommandError> {
+        let result = add_scoped_guide(session, kind_at(self.new_kind), self.new_position as f32, &self.new_name, target);
         match &result {
             Ok(_) => {
                 self.new_name.clear();
@@ -337,7 +341,13 @@ impl GuidesDialog {
         }
         let kind_labels: Vec<String> = KINDS.iter().map(|k| text(kind_key(*k)).to_string()).collect();
         let kind_options: Vec<&str> = kind_labels.iter().map(|s| s.as_str()).collect();
-        let base = guide_rows(session);
+        let viewed_master = crate::menus::pages::viewed_master(session);
+        let base: Vec<_> = session.guides.list().iter().filter(|guide| {
+            match viewed_master {
+                Some(master) => guide.surface().is_none() || guide.master_id == Some(master),
+                None => guide.master_id.is_none(),
+            }
+        }).map(GuideRow::from_guide).collect();
         let mut rows = base.clone();
         if let Some(preview) = &self.preview {
             match rows.iter_mut().find(|row| row.id == preview.id) {
@@ -352,14 +362,15 @@ impl GuidesDialog {
         let mut renames = Vec::new();
         let mut delete_id: Option<u64> = None;
         let mut add_clicked = false;
-        let mut add_page = None;
+        let mut add_surface = None;
         let viewed_page = dtool_core::commands::pages::viewed_page(session).or_else(|| session.document.pages.first().map(|page| page.id));
+        let current_surface = viewed_master.map(ViewTarget::Artboard).or_else(|| viewed_page.map(ViewTarget::Page));
         let percent_positions = self.percent_positions;
         let mut next_percent_positions = percent_positions;
         let mut percent_axes = std::collections::HashMap::new();
-        let mut percent_axis = |doc: &dtool_core::Document, page, kind: GuideKind| {
+        let mut percent_axis = |doc: &dtool_core::Document, surface, kind: GuideKind| {
             if !percent_positions { return None; }
-            *percent_axes.entry((page, kind.axis())).or_insert_with(|| PercentAxis::new(doc, page, kind))
+            *percent_axes.entry((surface, kind.axis())).or_insert_with(|| PercentAxis::for_surface(doc, surface, kind))
         };
         let mut apply_margins = false;
         let mut column_command = None;
@@ -368,64 +379,88 @@ impl GuidesDialog {
         let reset_margin_edits = self.margin_draft.is_none();
         let margins = self.margin_draft.get_or_insert(stored_margins);
         let mut close = false;
+        let viewport = ui.ctx().content_rect();
+        let width = (viewport.width() - 52.0).clamp(180.0, 960.0);
+        let frame_width = width + space("lg") * 2.0;
+        let columns_fit = width >= 890.0;
+        let settings_height = if margins.enabled { 332.0_f32 } else { 218.0_f32 };
+        let row_height = if width < 410.0 { 74.0 } else { 24.0 };
+        let guides_height = 150.0 + rows.len() as f32 * row_height;
+        let content_height = if columns_fit { settings_height.max(guides_height) } else { settings_height + guides_height };
+        let body_height = content_height.min((viewport.height() - 100.0).clamp(110.0, 570.0));
+        let frame_height = body_height + 74.0;
+        let inset = ((viewport.size() - egui::vec2(frame_width, frame_height)) * 0.5).max(egui::Vec2::splat(space("sm")));
         egui::Area::new(egui::Id::new("dtool.dialog.guides_manager"))
+            .default_size(egui::vec2(frame_width, frame_height))
             .order(egui::Order::Foreground)
-            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .fixed_pos(viewport.min + inset)
             .show(ui.ctx(), |ui| {
                 dialog_frame(ui, |ui| {
+                    ui.set_width(width);
                     panel_header(ui, text("dialog.guides.margins_and_guides"));
-                    let edit = crate::dialogs::sides_editor(
-                        ui, margins, session.document.units, "doc_setup.margins", reset_margin_edits,
-                    );
-                    let next = edit.pending.map_or(*margins, |(_, draft)| draft);
-                    apply_margins = ui.add_enabled(!edit.invalid && next != stored_margins, egui::Button::new(text("button.apply"))).clicked();
-                    if apply_margins {
-                        *margins = next;
-                        if let Some((id, _)) = edit.pending {
-                            dtool_design::numeric_cancel_edit(ui.ctx(), id);
-                        }
-                    }
-                    if edit.invalid {
-                        ui.colored_label(ui.visuals().error_fg_color, text("error.invalid_params"));
-                    }
-                    ui.separator();
-                    ui.strong(text("ruler.origin.title"));
-                    crate::rulers::origin_controls(ui, session);
-                    ui.separator();
-                    column_command = self.column_guides.show(ui, session);
-                    ui.separator();
-                    ui.horizontal(|ui| {
-                        ui.strong(text("dialog.guides.title"));
-                        let toggle = dtool_design::toggle(ui, &mut next_percent_positions, text("dialog.guides.percent"));
-                        dtool_design::tooltip(toggle, text("dialog.guides.percent_help"));
-                    });
-                    ui.add_space(space("sm"));
-                    if rows.is_empty() {
-                        ui.label(text("dialog.guides.empty"));
-                    }
-                    egui::ScrollArea::vertical().max_height(240.0).auto_shrink([true, true]).show(ui, |ui| {
-                        egui::Grid::new("dtool.dialog.guides_manager.rows").show(ui, |ui| {
-                            ui.label(guide_number_header());
-                            ui.label(text("dialog.guides.kind"));
-                            ui.label(text("dialog.guides.name"));
-                            ui.label(text("dialog.guides.position"));
-                            ui.end_row();
-                            for (index, row) in rows.iter_mut().enumerate() {
-                                let before = base.get(index).cloned().unwrap_or_else(|| row.clone());
-                                row.name.clone_from(&before.name);
-                                let page = session.guides.get(dtool_core::guides::GuideId(row.id)).and_then(|guide| guide.page_id);
+                    let mut settings = |ui: &mut Ui, session: &mut Session| {
+                        dtool_design::dialog_section(ui, |ui| {
+                            let edit = crate::dialogs::sides_editor(
+                                ui, margins, session.document.units, "doc_setup.margins", reset_margin_edits,
+                            );
+                            let next = edit.pending.map_or(*margins, |(_, draft)| draft);
+                            apply_margins = ui.horizontal(|ui| {
+                                dtool_design::button_with(ui, text("button.apply"),
+                                    &dtool_design::ControlState::enabled(!edit.invalid && next != stored_margins)).clicked()
+                            }).inner;
+                            if apply_margins {
+                                *margins = next;
+                                if let Some((id, _)) = edit.pending {
+                                    dtool_design::numeric_cancel_edit(ui.ctx(), id);
+                                }
+                            }
+                            if edit.invalid {
+                                ui.colored_label(ui.visuals().error_fg_color, text("error.invalid_params"));
+                            }
+                            ui.separator();
+                            ui.strong(text("ruler.origin.title"));
+                            crate::rulers::origin_controls(ui, session);
+                            ui.separator();
+                            column_command = self.column_guides.show(ui, session);
+                            ui.add_space(space("sm"));
+                        });
+                    };
+                    let mut guides = |ui: &mut Ui, session: &Session| {
+                        dtool_design::dialog_section(ui, |ui| {
+                            ui.spacing_mut().combo_width = 70.0;
+                            ui.horizontal_wrapped(|ui| {
+                                ui.strong(text("dialog.guides.title"));
+                                let toggle = dtool_design::toggle(ui, &mut next_percent_positions, text("dialog.guides.percent"));
+                                dtool_design::tooltip(toggle, text("dialog.guides.percent_help"));
+                            });
+                            ui.add_space(space("sm"));
+                            if rows.is_empty() {
+                                ui.label(text("dialog.guides.empty"));
+                            }
+                            let compact = ui.available_width() < 410.0;
+                            let stacked = ui.available_width() < 216.0;
+                            let mut fields = |ui: &mut Ui, row: &mut GuideRow, before: &GuideRow| {
+                                let guide = session.guides.get(dtool_core::guides::GuideId(row.id));
+                                let page = guide.and_then(|guide| guide.page_id);
                                 let number = page
                                     .and_then(|id| session.document.pages.iter().position(|page| page.id == id))
                                     .map(|index| (index + 1).to_string());
-                                let label = number.map_or_else(|| guide_number(row), |number| {
+                                let mut label = number.map_or_else(|| guide_number(row), |number| {
                                     format!("{} · {}", guide_number(row), dtool_strings::format("panel.pages.number", &[("number", &number)]))
                                 });
-                                ui.label(label);
+                                if let Some(root) = guide.and_then(|guide| session.document.get_object(guide.master_id?)) {
+                                    label = format!("{label} · {}", dtool_core::commands::masters::master_name(root));
+                                }
+                                let label_width = if compact { 64.0 } else { 94.0 };
+                                ui.add_sized([label_width, ui.spacing().interact_size.y], egui::Label::new(&label).truncate())
+                                    .on_hover_text(label);
+                                if stacked { ui.end_row(); }
                                 let salt = format!("dtool.dialog.guides_manager.kind.{}", row.id);
                                 let kind_changed = dropdown(ui, &salt, &mut row.kind, &kind_options).changed();
+                                if compact { ui.end_row(); }
                                 let mut name = self.name_drafts.remove(&row.id).unwrap_or_else(|| before.name.clone());
-                                let name_resp = ui.add_sized([150.0, ui.spacing().interact_size.y],
-                                    egui::TextEdit::singleline(&mut name).id_salt(("guide-name", row.id)));
+                                let name_resp = ui.add_sized([104.0, ui.spacing().interact_size.y],
+                                    egui::TextEdit::singleline(&mut name).id(egui::Id::unique(("guides-manager-name", row.id))));
                                 if escape && name_resp.has_focus() {
                                     name_resp.surrender_focus();
                                 } else if !escape && name_resp.lost_focus() && name != before.name {
@@ -433,11 +468,12 @@ impl GuidesDialog {
                                 } else if name_resp.has_focus() && name != before.name {
                                     self.name_drafts.insert(row.id, name);
                                 }
-                                let axis = percent_axis(&session.document, page, kind_at(row.kind));
+                                if stacked { ui.end_row(); }
+                                let axis = percent_axis(&session.document, guide.and_then(Guide::surface), kind_at(row.kind));
                                 let event = position_field(ui, egui::Id::NULL.with(("guide_position", row.id, percent_positions)),
                                     row.position, axis, position_units);
+                                if compact { ui.end_row(); }
                                 let delete = button(ui, text("dialog.guides.delete")).clicked();
-                                ui.end_row();
                                 if delete {
                                     delete_id = Some(row.id);
                                 } else if let NumericEvent::Commit(position) = event {
@@ -449,37 +485,78 @@ impl GuidesDialog {
                                 } else if kind_changed {
                                     commits.push(row.clone());
                                 }
+                            };
+                            if compact {
+                                for (row, before) in rows.iter_mut().zip(&base) {
+                                    row.name.clone_from(&before.name);
+                                    egui::Grid::new(("guide.compact", row.id)).show(ui, |ui| fields(ui, row, before));
+                                    ui.separator();
+                                }
+                            } else {
+                                egui::Grid::new("dtool.dialog.guides_manager.rows").show(ui, |ui| {
+                                    ui.label(guide_number_header());
+                                    ui.label(text("dialog.guides.kind"));
+                                    ui.label(text("dialog.guides.name"));
+                                    ui.label(text("dialog.guides.position"));
+                                    ui.end_row();
+                                    for (row, before) in rows.iter_mut().zip(&base) {
+                                        row.name.clone_from(&before.name);
+                                        fields(ui, row, before);
+                                        ui.end_row();
+                                    }
+                                });
                             }
+                            ui.add_space(space("md"));
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label(text("dialog.guides.scope"));
+                                dtool_design::choice_value(ui, &mut self.new_on_page, false, text("dialog.guides.document"));
+                                if let Some(surface) = current_surface {
+                                    let scope = match surface {
+                                        ViewTarget::Page(_) => "dialog.guides.current_page",
+                                        ViewTarget::Artboard(_) => "dialog.guides.current_master",
+                                    };
+                                    dtool_design::choice_value(ui, &mut self.new_on_page, true, text(scope));
+                                }
+                            });
+                            add_surface = current_surface.filter(|_| self.new_on_page);
+                            ui.horizontal_wrapped(|ui| {
+                                dropdown(ui, "dtool.dialog.guides_manager.new_kind", &mut self.new_kind, &kind_options);
+                                ui.label(text("dialog.guides.name"));
+                                ui.add(egui::TextEdit::singleline(&mut self.new_name).desired_width(104.0));
+                            });
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label(text("dialog.guides.position"));
+                                let axis = percent_axis(&session.document, add_surface, kind_at(self.new_kind));
+                                let id = egui::Id::NULL.with(("guide_new_position", percent_positions));
+                                if let NumericEvent::Commit(position) = position_field(ui, id, self.new_position, axis, position_units) {
+                                    self.new_position = position;
+                                }
+                                add_clicked = button(ui, text("dialog.guides.add")).clicked();
+                            });
+                        });
+                    };
+                    ui.allocate_ui_with_layout(egui::vec2(width, body_height), egui::Layout::top_down(egui::Align::Min), |ui| {
+                        ui.set_max_width(width);
+                        dtool_design::dialog_options_scroll(ui, "guides.settings", body_height, |ui| {
+                            let columns = dtool_design::panel_column_count(ui, ui.available_width(), 2, 430.0);
+                            dtool_design::panel_columns(ui, 2, 430.0, |ui, index| {
+                                if (index == 0) == (columns == 1) {
+                                    settings(ui, session);
+                                } else {
+                                    guides(ui, session);
+                                }
+                            });
                         });
                     });
-                    ui.add_space(space("md"));
-                    ui.horizontal(|ui| {
-                        ui.label(text("dialog.guides.scope"));
-                        ui.selectable_value(&mut self.new_on_page, false, text("dialog.guides.document"));
-                        if viewed_page.is_some() {
-                            ui.selectable_value(&mut self.new_on_page, true, text("dialog.guides.current_page"));
-                        }
-                    });
-                    add_page = viewed_page.filter(|_| self.new_on_page);
-                    ui.horizontal(|ui| {
-                        dropdown(ui, "dtool.dialog.guides_manager.new_kind", &mut self.new_kind, &kind_options);
-                        ui.label(text("dialog.guides.name"));
-                        ui.text_edit_singleline(&mut self.new_name);
-                        ui.label(text("dialog.guides.position"));
-                        let axis = percent_axis(&session.document, add_page, kind_at(self.new_kind));
-                        let id = egui::Id::NULL.with(("guide_new_position", percent_positions));
-                        if let NumericEvent::Commit(position) = position_field(ui, id, self.new_position, axis, position_units) {
-                            self.new_position = position;
-                        }
-                        add_clicked = button(ui, text("dialog.guides.add")).clicked();
-                    });
                     if let Some(key) = &self.error {
-                        ui.label(text(key));
+                        ui.colored_label(ui.visuals().error_fg_color, text(key));
                     }
-                    ui.add_space(space("md"));
-                    if button(ui, text("button.close")).clicked() {
-                        close = true;
-                    }
+                    ui.scope(|ui| {
+                        ui.set_width(width);
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            close = button(ui, text("button.close")).clicked();
+                        });
+                    });
                 });
             });
         if apply_margins {
@@ -514,7 +591,7 @@ impl GuidesDialog {
             let _ = self.delete(session, id);
         }
         if add_clicked {
-            let _ = self.add_in_scope(session, add_page);
+            let _ = self.add_in_scope(session, add_surface);
         }
         self.percent_positions = next_percent_positions;
         if close {

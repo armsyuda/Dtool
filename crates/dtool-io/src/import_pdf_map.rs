@@ -1,4 +1,4 @@
-use std::{cell::OnceCell, rc::Rc};
+use std::{cell::OnceCell, collections::HashMap, rc::Rc};
 
 use dtool_core::colour::Colour as ManagedColour;
 use dtool_core::blend::BlendMode;
@@ -296,6 +296,7 @@ struct FontInfo {
     family: String,
     style: String,
     decode: Dictionary,
+    unicode_map: Option<lopdf::Encoding<'static>>,
     two_byte: bool,
     first_char: i64,
     widths: Vec<Option<f64>>,
@@ -499,6 +500,7 @@ pub(super) struct PdfMapper<'a> {
     image_bytes: usize,
     profiles: icc::Profiles,
     cmyk_output_space: Option<Space>,
+    fonts: HashMap<PdfId, Rc<FontInfo>>,
 }
 
 impl<'a> PdfMapper<'a> {
@@ -535,6 +537,7 @@ impl<'a> PdfMapper<'a> {
             image_bytes: 0,
             profiles,
             cmyk_output_space,
+            fonts: HashMap::new(),
         }
     }
 
@@ -572,6 +575,7 @@ impl<'a> PdfMapper<'a> {
         index: usize,
         origin: [f32; 2],
         geometry: PageGeometry,
+        structured: bool,
     ) -> Result<(), IoError> {
         self.geometry = geometry;
         self.origin = origin;
@@ -586,7 +590,10 @@ impl<'a> PdfMapper<'a> {
         } else {
             "Artboard"
         };
-        if self.opts.import_as == ImportAs::Artboards {
+        let artboard = structured && self.opts.import_as == ImportAs::Artboards;
+        let first_object = self.doc.objects.len();
+        let page_id = self.doc.pages[index].id;
+        if !structured && self.opts.import_as == ImportAs::Artboards {
             self.report.add_loss(
                 LossKind::Other,
                 1,
@@ -598,9 +605,9 @@ impl<'a> PdfMapper<'a> {
             name: format!("{} {}", label, index + 1),
             pos: origin,
             size: geometry.size(),
-            kind: ObjectKind::Group,
+            kind: if artboard { ObjectKind::Artboard } else { ObjectKind::Group },
             vector_crop: Some(VectorCrop {
-                rect: [origin[0], origin[1], geometry.size()[0], geometry.size()[1]],
+                rect: [0.0, 0.0, geometry.size()[0], geometry.size()[1]],
             }),
             ..Object::default()
         });
@@ -624,6 +631,15 @@ impl<'a> PdfMapper<'a> {
             .into_iter()
             .collect::<Vec<_>>();
         self.run(&content.operations, &resources, GState::new(layer), 0);
+        if structured {
+            for object in &mut self.doc.objects[first_object..] {
+                object.page_id = Some(page_id);
+            }
+        }
+        if artboard {
+            self.doc.pages[index].artboard_id = Some(layer);
+            self.doc.artboard_backing_pages.insert(page_id);
+        }
         Ok(())
     }
 
@@ -865,7 +881,7 @@ impl<'a> PdfMapper<'a> {
                 "Tr" => gs.render_mode = v.first().copied().unwrap_or(0.0) as i64,
                 "Tf" => {
                     gs.font = match operands.first() {
-                        Some(PdfObject::Name(name)) => self.font_info(name, resources).map(Rc::new),
+                        Some(PdfObject::Name(name)) => self.font_info(name, resources),
                         _ => None,
                     };
                     if gs.font.is_none() {
@@ -1702,9 +1718,24 @@ impl<'a> PdfMapper<'a> {
         self.report.images += 1;
     }
 
-    fn font_info(&mut self, name: &[u8], resources: &[Dictionary]) -> Option<FontInfo> {
-        let object = self.lookup(resources, b"Font", name)?;
-        let font = dict_of(self.pdf, &object)?.clone();
+    fn font_info(&mut self, name: &[u8], resources: &[Dictionary]) -> Option<Rc<FontInfo>> {
+        let object = resources.iter().find_map(|dict| {
+            let fonts = dict_of(self.pdf, dict.get(b"Font").ok()?)?;
+            fonts.get(name).ok()
+        })?;
+        let reference = object.as_reference().ok();
+        if let Some(font) = reference.and_then(|id| self.fonts.get(&id)) {
+            return Some(Rc::clone(font));
+        }
+        let font = dict_of(self.pdf, object)?.clone();
+        let font = Rc::new(self.read_font(name, font));
+        if let Some(id) = reference {
+            self.fonts.insert(id, Rc::clone(&font));
+        }
+        Some(font)
+    }
+
+    fn read_font(&mut self, name: &[u8], font: Dictionary) -> FontInfo {
         let base = name_of(self.pdf, &font, b"BaseFont")
             .unwrap_or_else(|| String::from_utf8_lossy(name).into_owned());
         let mut family = match base.split_once('+') {
@@ -1753,6 +1784,20 @@ impl<'a> PdfMapper<'a> {
         let mut decode = font.clone();
         if font.has(b"ToUnicode") {
             decode.remove(b"Encoding");
+            if let Ok(stream) = font.get_deref(b"ToUnicode", self.pdf).and_then(PdfObject::as_stream)
+                && let Ok(bytes) = stream.get_plain_content_with_limit(MAX_BYTES)
+                && bytes.windows(5).any(|window| window == b">>def")
+            {
+                // lopdf requires whitespace after this dictionary delimiter.
+                let mut normalized = Vec::with_capacity(bytes.len());
+                for (index, &byte) in bytes.iter().enumerate() {
+                    if bytes.get(index.saturating_sub(2)..index + 3) == Some(b">>def") {
+                        normalized.push(b' ');
+                    }
+                    normalized.push(byte);
+                }
+                decode.set(b"ToUnicode", lopdf::Stream::new(Dictionary::new(), normalized));
+            }
         }
         if two_byte
             && (!font.has(b"ToUnicode") || !(encoding == "Identity-H" || encoding == "Identity-V"))
@@ -1793,10 +1838,26 @@ impl<'a> PdfMapper<'a> {
         });
         let embedded_cid = (two_byte && encoding == "Identity-H")
             .then(|| text_outline::descendant(self.pdf, &font)).flatten().cloned();
-        Some(FontInfo {
+        let unicode_map = if decode.has(b"ToUnicode") {
+            match decode.get_font_encoding_with_limit(self.pdf, MAX_BYTES) {
+                Ok(lopdf::Encoding::UnicodeMapEncoding(map)) => Some(lopdf::Encoding::UnicodeMapEncoding(map)),
+                _ => {
+                    self.loss(LossKind::Glyph, "ToUnicode map could not be parsed; fallback encoding used");
+                    decode.remove(b"ToUnicode");
+                    if let Ok(encoding) = font.get(b"Encoding") {
+                        decode.set(b"Encoding", encoding.clone());
+                    }
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        FontInfo {
             family,
             style,
             decode,
+            unicode_map,
             two_byte,
             first_char,
             widths,
@@ -1806,23 +1867,20 @@ impl<'a> PdfMapper<'a> {
             reference_only,
             embedded_cid,
             embedded: OnceCell::new(),
-        })
+        }
     }
 
     fn decode_string(&mut self, font: Option<&FontInfo>, bytes: &[u8]) -> String {
         if let Some(font) = font {
-            if let Ok(encoding) = font
-                .decode
-                .get_font_encoding_with_limit(self.pdf, MAX_BYTES)
+            if let Some(encoding) = &font.unicode_map
+                && let Ok(text) = PdfDocument::decode_text(encoding, bytes)
             {
-                if font.decode.has(b"ToUnicode")
-                    && !matches!(encoding, lopdf::Encoding::UnicodeMapEncoding(_))
-                {
-                    self.loss(
-                        LossKind::Glyph,
-                        "ToUnicode map could not be parsed; fallback encoding used",
-                    );
+                if text.contains('\u{fffd}') {
+                    self.loss(LossKind::Glyph, "text contains unmapped Unicode glyphs");
                 }
+                return text;
+            }
+            if let Ok(encoding) = font.decode.get_font_encoding_with_limit(self.pdf, MAX_BYTES) {
                 if matches!(
                     encoding,
                     lopdf::Encoding::OneByteEncoding(_) | lopdf::Encoding::Differences(_)
@@ -1870,7 +1928,10 @@ impl<'a> PdfMapper<'a> {
         let fills = matches!(mode, 0 | 2);
         let strokes = matches!(mode, 1 | 2);
         let translucent = (fills && gs.fill_alpha < 1.0) || (strokes && gs.stroke_alpha < 1.0);
-        let outlines_paint = self.opts.outline_embedded_text && (fills || strokes);
+        let prefer_embedded = self.opts.outline_embedded_text
+            || (!self.opts.favour_editable_text
+                && font.is_some_and(|font| font.embedded_cid.is_some()));
+        let outlines_paint = prefer_embedded && (fills || strokes);
         let program = font.filter(|_| outlines_paint || clips).and_then(|font| {
             font.embedded.get_or_init(|| {
                 text_outline::EmbeddedFont::read(self.pdf, font.embedded_cid.as_ref()?)
@@ -1990,7 +2051,7 @@ impl<'a> PdfMapper<'a> {
         if text.is_empty() {
             return None;
         }
-        if self.opts.outline_embedded_text {
+        if outlines_paint {
             self.loss(LossKind::Font, "embedded text could not be outlined; editable text retained");
         }
         if !gs.text_knockout && translucent {

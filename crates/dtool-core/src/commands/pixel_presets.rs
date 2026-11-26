@@ -1,7 +1,7 @@
 use crate::brush::{BrushImage, BrushLibrary, BrushTip, MAX_SUB_BRUSHES, TipKind, fit_stamp_size};
 use crate::{Command, CommandError, CommandResult, Session};
 use serde_json::{json, Value};
-use std::{fs, io::Read, path::{Path, PathBuf}, sync::{Mutex, OnceLock}};
+use std::{fs, io::Read, path::{Path, PathBuf}, sync::{Arc, Mutex, OnceLock}};
 
 const MAX_FILE: u64 = 64 * 1024 * 1024;
 const MAX_TIPS: usize = 512;
@@ -26,7 +26,7 @@ pub fn register_external_importer(importer: ExternalImporter) {
     let _ = EXTERNAL_IMPORTER.set(importer);
 }
 
-static LIBRARY: Mutex<Option<BrushLibrary>> = Mutex::new(None);
+static LIBRARY: Mutex<Option<Arc<BrushLibrary>>> = Mutex::new(None);
 
 fn path() -> PathBuf {
     crate::prefs::Prefs::default_path().with_file_name("pixel_brush_presets.json")
@@ -146,19 +146,26 @@ fn apply_tip(session: &mut Session, tool: &str, tip: BrushTip) {
     session.tool_options.set_raster_tip(tool, tip);
 }
 
-pub fn library() -> Result<BrushLibrary, CommandError> {
-    let mut cache = LIBRARY.lock().map_err(|_| library_error())?;
-    if let Some(library) = cache.as_ref() { return Ok(library.clone()); }
+fn cached_library(cache: &mut Option<Arc<BrushLibrary>>) -> Result<Arc<BrushLibrary>, CommandError> {
+    if let Some(library) = cache { return Ok(Arc::clone(library)); }
     let path = path();
-    let library = if path.exists() { decode(&path)? } else { BrushLibrary::builtin() };
-    *cache = Some(library.clone());
+    let library = Arc::new(if path.exists() { decode(&path)? } else { BrushLibrary::builtin() });
+    *cache = Some(Arc::clone(&library));
     Ok(library)
 }
 
-fn update(edit: impl FnOnce(&mut BrushLibrary) -> CommandResult) -> CommandResult {
-    let _ = library()?;
+pub fn library_snapshot() -> Result<Arc<BrushLibrary>, CommandError> {
     let mut cache = LIBRARY.lock().map_err(|_| library_error())?;
-    let mut candidate = cache.as_ref().ok_or_else(library_error)?.clone();
+    cached_library(&mut cache)
+}
+
+pub fn library() -> Result<BrushLibrary, CommandError> {
+    Ok(library_snapshot()?.as_ref().clone())
+}
+
+fn update(edit: impl FnOnce(&mut BrushLibrary) -> CommandResult) -> CommandResult {
+    let mut cache = LIBRARY.lock().map_err(|_| library_error())?;
+    let mut candidate = cached_library(&mut cache)?.as_ref().clone();
     let result = edit(&mut candidate)?;
     validate(&candidate)?;
     let path = path();
@@ -168,7 +175,7 @@ fn update(edit: impl FnOnce(&mut BrushLibrary) -> CommandResult) -> CommandResul
     let data = serde_json::to_vec_pretty(&candidate).map_err(|_| library_error())?;
     if data.len() as u64 > MAX_FILE { return Err(CommandError::new("REQUEST_TOO_LARGE")); }
     crate::native_io::write_atomic(&path, &data).map_err(|_| library_error())?;
-    *cache = Some(candidate);
+    *cache = Some(Arc::new(candidate));
     Ok(result)
 }
 
@@ -219,7 +226,7 @@ fn execute(session: &mut Session, verb: &str, params: &Value) -> CommandResult {
             let id = params.get("id").map(|_| label(params, "id")).transpose()?;
             if verb == "editor.query" {
                 let tip = if let Some(id) = id {
-                    library()?.get(id).ok_or_else(CommandError::not_found)?.clone()
+                    library_snapshot()?.get(id).ok_or_else(CommandError::not_found)?.clone()
                 } else {
                     editor_tip(session, tool)?
                 };
@@ -247,7 +254,7 @@ fn execute(session: &mut Session, verb: &str, params: &Value) -> CommandResult {
             Ok(json!({"tool": tool, "changes": []}))
         }
         "list" => {
-            let library = library()?;
+            let library = library_snapshot()?;
             let tool = params.get("tool").and_then(Value::as_str).unwrap_or(&session.active_tool);
             Ok(json!({"categories": library.categories, "presets": library.tips,
                 "active": session.tool_options.raster_tip(tool).map(|tip| &tip.id)}))
@@ -255,7 +262,7 @@ fn execute(session: &mut Session, verb: &str, params: &Value) -> CommandResult {
         "apply" => {
             if !session.has_document { return Err(CommandError::no_document()); }
             let id = label(params, "id")?;
-            let library = library()?;
+            let library = library_snapshot()?;
             let tip = library.get(id).ok_or_else(CommandError::not_found)?.clone();
             let tool = params.get("tool").and_then(Value::as_str).unwrap_or(&session.active_tool);
             let tool = editor_tool(tool).unwrap_or("tool.paint.brush");
@@ -426,6 +433,10 @@ fn execute(session: &mut Session, verb: &str, params: &Value) -> CommandResult {
                 library.categories.retain(|name| name == category);
             }
             let data = serde_json::to_vec_pretty(&library).map_err(|_| library_error())?;
+            if params["replace_existing"].as_bool() == Some(true) {
+                crate::native_io::write_atomic(path, &data).map_err(|_| library_error())?;
+                return Ok(json!({"exported": library.tips.len(), "changes": []}));
+            }
             let mut output = fs::OpenOptions::new().create_new(true).write(true).open(path).map_err(|_| library_error())?;
             if output.write_all(&data).and_then(|()| output.sync_all()).is_err() {
                 drop(output);

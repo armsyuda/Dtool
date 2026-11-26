@@ -56,6 +56,14 @@ impl Default for ContentTransform {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ManualLayout {
+    /// Frame dimensions at the transition from automatic fit.
+    pub(crate) fit_size: [f32; 2],
+    /// Frame dimensions when the user last positioned the content by its anchor.
+    pub(crate) anchor_size: [f32; 2],
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PictureFrame {
     pub object: ObjectId,
@@ -63,6 +71,8 @@ pub struct PictureFrame {
     pub fit: ImageFit,
     pub anchor: Anchor9,
     pub content: ContentTransform,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manual_layout: Option<ManualLayout>,
     pub image: Option<ResourceId>,
 }
 
@@ -74,6 +84,7 @@ impl PictureFrame {
             fit: ImageFit::MinFit,
             anchor: Anchor9::Center,
             content: ContentTransform::default(),
+            manual_layout: None,
             image: None,
         }
     }
@@ -122,7 +133,10 @@ pub fn frame_layout(document: &Document, object: &Object) -> Option<FrameLayout>
     let frame = document.picture_frames.iter().find(|frame| frame.object == object.id)?;
     let size = frame_image_size(document, object, frame)?;
     let pos = [object.pos[0].min(object.pos[0] + object.size[0]), object.pos[1].min(object.pos[1] + object.size[1])];
-    Some(FrameLayout { shape: frame.shape, content: content_rect(pos, object.size, size, frame.fit, frame.anchor, frame.content) })
+    let (fit_size, anchor_size) = frame.manual_layout.map_or((object.size, object.size),
+        |layout| (layout.fit_size, layout.anchor_size));
+    let content = positioned_content(pos, fit_size, anchor_size, size, frame.fit, frame.anchor, frame.content);
+    Some(FrameLayout { shape: frame.shape, content })
 }
 
 pub fn frame_contains(shape: FrameShape, u: f32, v: f32) -> bool {
@@ -305,11 +319,15 @@ fn anchor_origin(anchor: Anchor9) -> [f32; 2] {
 }
 
 pub fn content_rect(frame_pos: [f32; 2], frame_size: [f32; 2], image_size: [f32; 2], fit: ImageFit, anchor: Anchor9, content: ContentTransform) -> [f32; 4] {
+    positioned_content(frame_pos, frame_size, frame_size, image_size, fit, anchor, content)
+}
+
+pub(crate) fn fitted_size(frame_size: [f32; 2], image_size: [f32; 2], fit: ImageFit) -> [f32; 2] {
     let frame_w = frame_size[0].abs().max(0.0);
     let frame_h = frame_size[1].abs().max(0.0);
     let image_w = image_size[0].abs().max(0.0);
     let image_h = image_size[1].abs().max(0.0);
-    let (mut width, mut height) = match fit {
+    let (width, height) = match fit {
         ImageFit::Native => (image_w, image_h),
         ImageFit::Stretch => (frame_w, frame_h),
         ImageFit::MinFit => {
@@ -329,6 +347,15 @@ pub fn content_rect(frame_pos: [f32; 2], frame_size: [f32; 2], image_size: [f32;
             (image_w * scale, image_h * scale)
         }
     };
+    [width, height]
+}
+
+fn positioned_content(
+    frame_pos: [f32; 2], fit_size: [f32; 2], anchor_size: [f32; 2], image_size: [f32; 2],
+    fit: ImageFit, anchor: Anchor9, content: ContentTransform,
+) -> [f32; 4] {
+    let [frame_w, frame_h] = anchor_size.map(f32::abs);
+    let [mut width, mut height] = fitted_size(fit_size, image_size, fit);
     width *= if content.scale[0].is_finite() { content.scale[0] } else { 1.0 };
     height *= if content.scale[1].is_finite() { content.scale[1] } else { 1.0 };
     let origin = anchor_origin(anchor);
@@ -435,25 +462,15 @@ fn commit(session: &mut Session, name: &str, before_document: bool, before_frame
     Ok(reply)
 }
 
-fn image_size_of(session: &Session, frame: &PictureFrame) -> Option<[f32; 2]> {
-    let resource = session.document.placed_resource(frame.object).or(frame.image)?;
-    let image = session.document.image_resource(resource)?;
-    Some(image.native_size_pt())
-}
-
 fn frame_payload(session: &Session, frame: &PictureFrame) -> Value {
-    let object = session.document.get_object(frame.object);
-    let image_size = image_size_of(session, frame).or_else(|| {
-        object.and_then(|item| item.raster_size.map(|(w, h)| [w as f32, h as f32]))
-    });
-    let rect = object.and_then(|item| {
-        image_size.map(|size| content_rect(item.pos, item.size, size, frame.fit, frame.anchor, frame.content))
-    });
+    let rect = session.document.get_object(frame.object).and_then(|object| frame_layout(&session.document, object))
+        .map(|layout| layout.content);
     json!({
         "id": frame.object.0,
         "object_id": frame.object.0,
         "shape": match frame.shape { FrameShape::Rect => "rect", FrameShape::Ellipse => "ellipse" },
         "fit": match frame.fit { ImageFit::Native => "native", ImageFit::MinFit => "min", ImageFit::MaxFit => "max", ImageFit::Stretch => "stretch" },
+        "manual": frame.manual_layout.is_some(),
         "anchor": format!("{:?}", frame.anchor),
         "content": frame.content,
         "image": session.document.placed_resource(frame.object).or(frame.image).map(|id| id.0),
@@ -537,9 +554,13 @@ fn require_frame(session: &Session, command: &Command) -> Result<PictureFrame, C
 
 fn set_fit(session: &mut Session, command: &Command) -> CommandResult {
     let mut frame = require_frame(session, command)?;
-    let fit = command.params.get("fit").and_then(parse_fit).ok_or_else(CommandError::invalid_params)?;
     let before = frames(&session.document);
-    frame.fit = fit;
+    if command.params["fit"] == "manual" {
+        freeze_layout(session, &mut frame)?;
+    } else {
+        frame.fit = command.params.get("fit").and_then(parse_fit).ok_or_else(CommandError::invalid_params)?;
+        frame.manual_layout = None;
+    }
     let mut after = before.clone();
     after.insert(frame.object, frame.clone());
     commit(session, FRAME_IMAGE_FIT, false, before, after, frame_payload(session, &frame))
@@ -550,31 +571,49 @@ fn set_anchor(session: &mut Session, command: &Command) -> CommandResult {
     let anchor = command.params.get("anchor").and_then(parse_anchor).ok_or_else(CommandError::invalid_params)?;
     let before = frames(&session.document);
     frame.anchor = anchor;
+    if let Some(layout) = &mut frame.manual_layout {
+        layout.anchor_size = session.document.get_object(frame.object).ok_or_else(CommandError::not_found)?.size.map(f32::abs);
+    }
     let mut after = before.clone();
     after.insert(frame.object, frame.clone());
     commit(session, FRAME_IMAGE_ANCHOR, false, before, after, frame_payload(session, &frame))
 }
 
+fn freeze_layout(session: &Session, frame: &mut PictureFrame) -> Result<(), CommandError> {
+    if frame.manual_layout.is_none() {
+        let size = session.document.get_object(frame.object).ok_or_else(CommandError::not_found)?.size.map(f32::abs);
+        frame.manual_layout = Some(ManualLayout { fit_size: size, anchor_size: size });
+    }
+    Ok(())
+}
+
 fn set_content(session: &mut Session, command: &Command) -> CommandResult {
     let mut frame = require_frame(session, command)?;
-    if let Some(offset) = command.params.get("offset").and_then(|value| serde_json::from_value::<[f32; 2]>(value.clone()).ok()) {
-        if offset.iter().any(|n| !n.is_finite()) {
-            return Err(CommandError::invalid_params());
-        }
-        frame.content.offset = offset;
+    let pair = |key| command.params.get(key)
+        .map(|value| serde_json::from_value::<[f32; 2]>(value.clone()).map_err(|_| CommandError::invalid_params()))
+        .transpose();
+    let offset = pair("offset")?;
+    let scale = pair("scale")?;
+    let rotation = command.params.get("rotation")
+        .map(|value| value.as_f64().map(|angle| angle as f32).ok_or_else(CommandError::invalid_params)).transpose()?;
+    let reset = command.params.get("reset")
+        .map(|value| value.as_bool().ok_or_else(CommandError::invalid_params)).transpose()?.unwrap_or(false);
+    let has_edits = offset.is_some() || scale.is_some() || rotation.is_some();
+    if reset == has_edits
+        || offset.is_some_and(|offset| offset.iter().any(|n| !n.is_finite()))
+        || scale.is_some_and(|scale| scale.iter().any(|n| !n.is_finite() || *n <= 0.0))
+        || rotation.is_some_and(|angle| !angle.is_finite())
+    {
+        return Err(CommandError::invalid_params());
     }
-    if let Some(scale) = command.params.get("scale").and_then(|value| serde_json::from_value::<[f32; 2]>(value.clone()).ok()) {
-        if scale.iter().any(|n| !n.is_finite() || *n <= 0.0) {
-            return Err(CommandError::invalid_params());
-        }
-        frame.content.scale = scale;
-    }
-    if let Some(rotation) = command.params.get("rotation").and_then(Value::as_f64) {
-        let rotation = rotation as f32;
-        if !rotation.is_finite() {
-            return Err(CommandError::invalid_params());
-        }
-        frame.content.rotation = rotation;
+    if reset {
+        frame.manual_layout = None;
+        frame.content = ContentTransform::default();
+    } else {
+        freeze_layout(session, &mut frame)?;
+        frame.content.offset = offset.unwrap_or(frame.content.offset);
+        frame.content.scale = scale.unwrap_or(frame.content.scale);
+        frame.content.rotation = rotation.unwrap_or(frame.content.rotation);
     }
     let before = frames(&session.document);
     let mut after = before.clone();

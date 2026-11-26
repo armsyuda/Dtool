@@ -1,6 +1,6 @@
 use crate::command::Session;
 use crate::object::ObjectId;
-use crate::slice::{Slice, SliceId, SliceSource, create_linked_slice, create_manual_slice};
+use crate::slice::{OutputId, OutputSize, Slice, SliceId, SliceOutput, SliceSource, create_linked_slice, create_manual_slice};
 use dtool_protocol::{Command, CommandError, CommandResult};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -25,7 +25,7 @@ fn geometry_update(command: &Command) -> Option<serde_json::Map<String, Value>> 
 }
 pub fn can_execute(session: &Session, command: &Command) -> Option<bool> {
     if geometry_update(command).is_some() { return Some(session.has_document); }
-    matches!(command.name.as_str(), "slice.create" | "slice.list" | "slice.update" | "slice.reset_auto").then_some(session.has_document)
+    matches!(command.name.as_str(), "slice.create" | "slice.list" | "slice.update" | "slice.reset_auto" | "slice.select" | "slice.delete").then_some(session.has_document)
 }
 pub fn apply(session: &mut Session, command: &Command) -> Option<Result<(), CommandError>> {
     if command.name != "slice.restore" { return None; }
@@ -34,6 +34,9 @@ pub fn apply(session: &mut Session, command: &Command) -> Option<Result<(), Comm
         let version = session.document.version.checked_add(1).ok_or_else(CommandError::invalid_params)?;
         session.document.slices = restored.slices;
         session.document.next_slice_id = session.document.next_slice_id.max(restored.next_slice_id);
+        if session.active_slice.is_some_and(|active| !session.document.slices.iter().any(|slice| slice.id == active)) {
+            session.active_slice = None;
+        }
         crate::slice::refresh_auto_bounds(&mut session.document);
         session.document.version = version;
         Ok(())
@@ -60,7 +63,22 @@ pub fn run(session: &mut Session, command: &Command) -> Option<CommandResult> {
         if command.name == "slice.list" {
             let mut slices = session.document.slices.clone();
             for slice in &mut slices { slice.bounds = slice.resolved_bounds(&session.document)?; }
-            return Ok(json!({"slices": slices, "doc_version": session.generation}));
+            return Ok(json!({"slices": slices, "selected_id": session.active_slice, "doc_version": session.generation}));
+        }
+        if command.name == "slice.select" {
+            let fields = command.params.as_object().ok_or_else(CommandError::invalid_params)?;
+            if fields.keys().any(|key| key != "id") { return Err(CommandError::invalid_params()); }
+            let active = if fields.get("id").is_none_or(Value::is_null) {
+                None
+            } else {
+                let selected = id(command)?;
+                if !session.document.slices.iter().any(|slice| slice.id == selected) {
+                    return Err(CommandError::not_found());
+                }
+                Some(selected)
+            };
+            session.active_slice = active;
+            return Ok(json!({"selected_id": active, "doc_version": session.generation}));
         }
         let before = state(session);
         let mut slices = session.document.slices.clone();
@@ -78,7 +96,7 @@ pub fn run(session: &mut Session, command: &Command) -> Option<CommandResult> {
                     Some(Value::String(name)) if !name.trim().is_empty() => name.clone(),
                     _ => return Err(CommandError::invalid_params()),
                 };
-                let slice = match (params.get("rect"), params.get("source")) {
+                let mut slice = match (params.get("rect"), params.get("source")) {
                     (Some(value), None) => create_manual_slice(bounds(value)?, name, target),
                     (None, Some(value)) => {
                         let source = value.as_u64().map(ObjectId).ok_or_else(CommandError::invalid_params)?;
@@ -88,11 +106,23 @@ pub fn run(session: &mut Session, command: &Command) -> Option<CommandResult> {
                     },
                     _ => return Err(CommandError::invalid_params()),
                 };
+                let output_id = slices.iter().flat_map(|slice| &slice.outputs).map(|output| output.id.0)
+                    .max().unwrap_or(0).checked_add(1).ok_or_else(CommandError::invalid_params)?;
+                slice.outputs.push(SliceOutput {
+                    id: OutputId(output_id), enabled: true, format: "png".into(),
+                    size: OutputSize::Scale(1.0), suffix: String::new(), path: None, options: None,
+                });
                 slices.push(slice);
             },
             "slice.update" => {
                 target = id(command)?;
                 slices = crate::slice::updated_slices(&session.document, &command.params)?;
+            },
+            "slice.delete" => {
+                if params.keys().any(|key| key != "id") { return Err(CommandError::invalid_params()); }
+                target = id(command)?;
+                let index = slices.iter().position(|slice| slice.id == target).ok_or_else(CommandError::not_found)?;
+                slices.remove(index);
             },
             "slice.reset_auto" => {
                 if params.keys().any(|key| key != "id") { return Err(CommandError::invalid_params()); }
@@ -109,6 +139,11 @@ pub fn run(session: &mut Session, command: &Command) -> Option<CommandResult> {
         let after = json!({"slices": slices, "next_slice_id": next});
         session.undo.push(crate::undo::Change { name: command.name.clone(), undo: Command::with_params("slice.restore", before), redo: Command::with_params("slice.restore", after) });
         session.document.slices = slices;
+        if command.name == "slice.create" {
+            session.active_slice = Some(target);
+        } else if command.name == "slice.delete" && session.active_slice == Some(target) {
+            session.active_slice = None;
+        }
         session.document.next_slice_id = next;
         session.document.version = version;
         session.generation = generation;

@@ -230,18 +230,21 @@ pub(crate) fn group_content_bounds(doc: &Document, root: &crate::Object, scene: 
         return None;
     }
     let symbol = doc.symbols.instances.iter().any(|entry| entry.root == root.id);
-    if !symbol && root.is_layer_folder() {
+    let applied_master = root.is_layer_folder()
+        && doc.master_pages.inherited_content().any(|binding| binding.group == Some(root.id));
+    let uses_content_bounds = symbol || applied_master;
+    if !uses_content_bounds && root.is_layer_folder() {
         return None;
     }
     let subtree = doc.subtree_ids(root.id);
-    if !symbol && doc.layer_masks.iter().any(|mask| subtree.contains(&mask.object)) {
+    if !uses_content_bounds && doc.layer_masks.iter().any(|mask| subtree.contains(&mask.object)) {
         return None;
     }
     let mut members = std::collections::HashSet::new();
     let mut has_hidden_member = !crate::scene::is_drawn(doc, root.id);
     for object in doc.objects.iter().filter(|object| subtree.contains(&object.id)) {
         // Constraints and masks can use the stored frame independently of the children.
-        if !symbol && (object.vector_crop.is_some() || !object.clip_role.is_none()
+        if !uses_content_bounds && (object.vector_crop.is_some() || !object.clip_role.is_none()
             || (object.id != root.id && object.constraint.is_some()))
         {
             return None;

@@ -165,27 +165,35 @@ impl StatusBar {
             .show_separator_line(true)
             .show(ui, |ui| {
                 status_bar_frame(ui, |ui| {
-                    ui.allocate_space(egui::vec2(size("bar.status.left_slot"), size("bar.status.height")));
-
+                    let ink = color("status.hint");
                     let hint_text = dtool_strings::text(&self.hint_key);
-                    for (part, bold) in Self::hint_parts(&hint_text) {
-                        let mut rich_text = RichText::new(part).color(color("status.hint"));
-                        if bold {
-                            rich_text = rich_text.strong();
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if let Some(zoom) = &self.zoom_text {
+                            ui.label(RichText::new(zoom).color(ink));
                         }
-                        ui.label(rich_text);
-                    }
-
-                    if self.stats_text.is_some() || self.zoom_text.is_some() {
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if let Some(zoom) = &self.zoom_text {
-                                ui.label(RichText::new(zoom).color(color("status.hint")));
+                        if let Some(stats) = &self.stats_text {
+                            let font = egui::TextStyle::Body.resolve(ui.style());
+                            let text_width = ui.painter().layout_no_wrap(stats.clone(), font, ink).size().x;
+                            let width = text_width.min(ui.available_width() * 0.55);
+                            ui.allocate_ui_with_layout(
+                                egui::vec2(width, ui.text_style_height(&egui::TextStyle::Body)),
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| ui.add(egui::Label::new(RichText::new(stats).color(ink)).truncate()),
+                            );
+                        }
+                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                            ui.add_space(left_slot_width().min(ui.available_width() / 3.0));
+                            let mut job = egui::text::LayoutJob::default();
+                            for (part, bold) in Self::hint_parts(&hint_text) {
+                                let mut span = RichText::new(part).color(ink);
+                                if bold {
+                                    span = span.strong();
+                                }
+                                span.append_to(&mut job, ui.style(), egui::FontSelection::Default, egui::Align::Center);
                             }
-                            if let Some(stats) = &self.stats_text {
-                                ui.label(RichText::new(stats).color(color("status.hint")));
-                            }
+                            ui.add(egui::Label::new(job).truncate());
                         });
-                    }
+                    });
                 });
             });
     }

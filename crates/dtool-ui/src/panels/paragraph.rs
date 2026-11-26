@@ -302,7 +302,7 @@ fn paragraph_field<R>(
     let width = panel_width(ui);
     let caption_width = (width - control_width - ui.spacing().item_spacing.x).min(110.0);
     if caption_width < 48.0 {
-        let caption = ui.add(egui::Label::new(label).sense(egui::Sense::click()));
+        let caption = ui.add(dtool_design::numeric_caption(label));
         control(ui, caption)
     } else {
         ui.horizontal(|ui| {
@@ -311,7 +311,7 @@ fn paragraph_field<R>(
                 egui::Layout::left_to_right(egui::Align::Center),
                 |ui| {
                     ui.set_min_width(caption_width);
-                    ui.add(egui::Label::new(label).truncate().sense(egui::Sense::click()))
+                    ui.add(dtool_design::numeric_caption(label).truncate())
                 },
             ).inner;
             control(ui, caption)

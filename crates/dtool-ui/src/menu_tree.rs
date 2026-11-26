@@ -1364,16 +1364,19 @@ impl MenuItem {
 }
 
 fn host_app_dialog(id: &str) -> bool {
-    matches!(id, crate::dialogs::NEW_DOCUMENT_MENU | crate::shell::CUSTOMISE_TOOLBAR_MENU_ID)
+    matches!(id, crate::dialogs::NEW_DOCUMENT_MENU | crate::shell::CUSTOMISE_TOOLBAR_MENU_ID
+        | crate::snapping_dialog::MENU_ID)
         || panels_action(id).is_some()
 }
 
 pub(crate) fn host_document_dialog(id: &str) -> bool {
     crate::grid_dialog::GridMenu::from_id(id).is_some()
+        || crate::selection_modify_dialog::Kind::from_menu(id).is_some()
         || matches!(id, crate::shell::DOCUMENT_SETUP_MENU_ID | crate::shell::FONT_MANAGER_MENU_ID
             | crate::shell::RESOURCE_MANAGER_MENU_ID | crate::guides_dialog::SHOW_GUIDES_MANAGER
             | crate::guides_dialog::MARGINS_AND_GUIDES | BLEND_OPTIONS_MENU_ID | LAYER_EFFECTS_MENU_ID
-            | crate::shell::CUSTOMISE_TOOLS_MENU_ID | crate::resize_canvas_dialog::MENU_ID)
+            | crate::shell::CUSTOMISE_TOOLS_MENU_ID | crate::resize_canvas_dialog::MENU_ID
+            | crate::selection_refine_dialog::MENU_ID)
 }
 
 impl MenuTree {
@@ -2089,20 +2092,15 @@ fn draw_file_menu(ui: &mut egui::Ui, rows: &[Value], has_document: bool,
 }
 
 fn command_menu_hover(style: &mut egui::Style) {
-    let visuals = &mut style.visuals;
-    let colour = visuals.window_fill.lerp_to_gamma(visuals.text_color(), 0.18);
-    visuals.widgets.hovered.weak_bg_fill = colour;
-    visuals.widgets.active.weak_bg_fill = colour;
-    visuals.widgets.open.weak_bg_fill = colour;
+    style.visuals.widgets.hovered.weak_bg_fill = dtool_design::color("menu.row_hover");
+    style.visuals.widgets.active.weak_bg_fill = dtool_design::color("menu.row_pressed");
+    style.visuals.widgets.open.weak_bg_fill = dtool_design::color("menu.row_hover");
 }
 
 pub(crate) fn configure_command_menu(ui: &mut egui::Ui) {
     let available = ui.ctx().content_rect().width() - 16.0;
     ui.set_width(dtool_design::size("menu.width").min(available.max(1.0)));
-    let style = ui.style_mut();
-    style.override_font_id = Some(egui::FontId::proportional(dtool_design::size("menu.font_size")));
-    style.wrap_mode = Some(egui::TextWrapMode::Truncate);
-    command_menu_hover(style);
+    dtool_design::menu_row_style(ui.style_mut());
 }
 
 pub(crate) fn menu_choice(ui: &mut egui::Ui, label: &str, selected: bool) -> egui::Response {
@@ -2122,7 +2120,7 @@ pub(crate) fn command_menu_tooltip(
     path: Option<&str>,
 ) -> egui::Response {
     let spacing = ui.spacing();
-    let icon_space = if has_icon { spacing.icon_width.max(25.0) + spacing.icon_spacing.max(6.0) } else { 0.0 };
+    let icon_space = if has_icon { spacing.icon_width.max(dtool_design::size("control.switch.width")) + spacing.icon_spacing.max(6.0) } else { 0.0 };
     let text_width = response.rect.width() - 2.0 * spacing.button_padding.x - icon_space;
     let truncated = ui.fonts_mut(|fonts| {
         fonts.layout_no_wrap(label.to_owned(), egui::FontId::proportional(dtool_design::size("menu.font_size")), egui::Color32::WHITE).size().x > text_width

@@ -124,6 +124,17 @@ pub fn named_panel_ids() -> Vec<PanelId> {
     NAMED_PANELS.to_vec()
 }
 
+/// Panels available in the workspace editor and in saved custom workspaces.
+pub fn studio_panel_ids() -> Vec<PanelId> {
+    let mut ids = named_panel_ids();
+    for id in crate::panels::WINDOW_PANELS.iter().filter_map(|action| crate::panels::window_panel(action)) {
+        if !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
+    ids
+}
+
 pub fn remaining_panel_ids() -> Vec<PanelId> {
     remaining_panels().to_vec()
 }
