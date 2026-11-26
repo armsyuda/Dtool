@@ -3,6 +3,9 @@ use crate::settings::UiSettings;
 use crate::shell::AppShell;
 use dtool_design::{menu_item, toggle};
 
+const MORE_WIDTH: f32 = 32.0;
+const MIN_TAB_WIDTH: f32 = 108.0;
+
 pub fn tab_title(ctx: &dtool_core::workspace::DocContext, s: &UiSettings) -> String {
     let name = if ctx.title.is_empty() {
         dtool_strings::text("doc.untitled").to_string()
@@ -35,7 +38,9 @@ fn document_picker(
     let previous = ui.data(|data| data.get_temp::<String>(search_id));
     let mut search = previous.clone().unwrap_or_default();
     let config = MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
-    let (button, popup) = MenuButton::new("⋯").config(config).ui(ui, |ui| {
+    let size = egui::vec2(ui.available_width().min(MORE_WIDTH), ui.spacing().interact_size.y);
+    let control = egui::Button::new("⋯").min_size(size).frame_when_inactive(false);
+    let (button, popup) = MenuButton::from_button(control).config(config).ui(ui, |ui| {
         configure_command_menu(ui);
         let start = ui.cursor().top();
         let caption = text("tab.menu.search");
@@ -73,7 +78,9 @@ fn document_picker(
             for context in matches {
                 let title = tab_title(context, settings);
                 let path = context.path.as_ref().map(|path| path.to_string_lossy());
-                let response = ui.selectable_label(active == Some(context.id), &title);
+                let response = dtool_design::with_icon_selection(ui, |ui| {
+                    ui.selectable_label(active == Some(context.id), &title)
+                });
                 if command_menu_tooltip(ui, response, &title, false, path.as_deref()).clicked() {
                     requested = Some(context.id);
                     ui.close();
@@ -96,15 +103,17 @@ fn document_picker(
 }
 
 pub fn tab_row(shell: &mut AppShell, ui: &mut egui::Ui) {
+    if shell.workspace.contexts().is_empty() {
+        return;
+    }
     let shade = if ui.visuals().dark_mode { 0.36 } else { 0.06 };
     let fill = dtool_design::theme::surface(ui.ctx(), "tab_row").lerp_to_gamma(egui::Color32::BLACK, shade);
     let tab_height = dtool_design::size("bar.tab.height");
-    let margin = egui::Margin::symmetric(4, 3);
     egui::Panel::top("dtool.shell.document_tabs")
-        .exact_size(tab_height + margin.sum().y)
+        .exact_size(tab_height)
         .resizable(false)
         .show_separator_line(false)
-        .frame(egui::Frame::new().fill(fill).inner_margin(margin))
+        .frame(egui::Frame::new().fill(fill))
         .show(ui, |ui| {
             ui.spacing_mut().interact_size.y = tab_height;
             show_tabs(shell, ui, tab_height);
@@ -117,24 +126,17 @@ fn show_tabs(shell: &mut AppShell, ui: &mut egui::Ui, tab_height: f32) {
     let contexts: Vec<ContextId> = shell.workspace.contexts().iter().map(|c| c.id).collect();
     let active_id = shell.workspace.active();
 
-    ui.horizontal_centered(|ui| {
-        let width = ui.available_width();
-        let spacing = ui.spacing().item_spacing.x;
-        let close_width = 22.0;
-        let minimum_slot = 108.0;
-        let count_for = |width: f32| ((width + spacing) / (minimum_slot + spacing)).max(1.0) as usize;
-        let overflow = contexts.len() > count_for(width);
-        let overflow_width = if overflow { 32.0 + spacing } else { 0.0 };
-        let available = width - overflow_width;
-        let count = if available > close_width + spacing * 2.0 {
-            contexts.len().min(count_for(available))
-        } else {
-            0
-        };
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        ui.spacing_mut().button_padding.x = 0.0;
+        let width = ui.available_width().max(0.0);
+        let capacity = |width: f32| (width / MIN_TAB_WIDTH).max(1.0) as usize;
+        let overflow = contexts.len() > capacity(width);
+        let available = if overflow { (width - MORE_WIDTH).max(0.0) } else { width };
+        let count = if available >= 24.0 { contexts.len().min(capacity(available)) } else { 0 };
         let active_index = contexts.iter().position(|id| Some(*id) == active_id).unwrap_or(0);
         let first = (active_index + 1).saturating_sub(count).min(contexts.len() - count);
-        let title_width = ((available + spacing) / count.max(1) as f32 - close_width - spacing)
-            .clamp(1.0, 220.0);
+        let tab_width = available / count.max(1) as f32;
 
         for &id in &contexts[first..first + count] {
             let title = match shell.workspace.get(id) {
@@ -142,37 +144,44 @@ fn show_tabs(shell: &mut AppShell, ui: &mut egui::Ui, tab_height: f32) {
                 None => continue,
             };
             let is_active = active_id == Some(id);
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(tab_width, tab_height), egui::Sense::hover());
+            let close_width = 24.0_f32.min(tab_width * 0.45);
+            let mut caption_rect = rect;
+            caption_rect.max.x -= close_width;
+            let close_rect = egui::Rect::from_min_max(caption_rect.right_top(), rect.max);
+            let tab_id = ui.make_persistent_id(("document_tab", id.0));
+            let response = ui.interact(caption_rect, tab_id, egui::Sense::click());
+            let response_close = ui.interact(close_rect, tab_id.with("close"), egui::Sense::click());
+            response.widget_info(|| egui::WidgetInfo::selected(egui::Role::Tab, true, is_active, &title));
+            let close = dtool_strings::text("tab.menu.close");
+            response_close.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, close));
             let fill = dtool_design::color(if is_active { "document_tab.active" } else { "document_tab.inactive" });
-            let tab = egui::Frame::new().fill(fill).corner_radius(3).show(ui, |ui| {
-                ui.spacing_mut().item_spacing.x = 0.0;
-                ui.horizontal(|ui| {
-                    let padding = 12.0;
-                    let caption = egui::WidgetText::from(title.as_str()).into_galley(
-                        ui, Some(egui::TextWrapMode::Truncate), (title_width - padding).max(1.0), egui::TextStyle::Button,
-                    );
-                    let width = (caption.size().x + padding).clamp(64.0_f32.min(title_width), title_width);
-                    let elided = caption.elided;
-                    let response = ui.add(egui::Button::new(caption).frame(false).min_size(egui::vec2(width, tab_height)));
-                    response.widget_info(|| egui::WidgetInfo::selected(egui::Role::Tab, true, is_active, &title));
-                    let response = if elided { response.on_hover_text(&title) } else { response };
-                    let close = dtool_strings::text("tab.menu.close");
-                    let response_close = ui.add(egui::Button::new("×").frame_when_inactive(false)
-                        .min_size(egui::vec2(close_width, tab_height)));
-                    response_close.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, close));
-                    (response, response_close.on_hover_text(close))
-                }).inner
-            });
-            if is_active {
-                let rect = tab.response.rect.shrink(2.0);
-                ui.painter().hline(rect.x_range(), rect.bottom(), egui::Stroke::new(1.0, ui.visuals().selection.bg_fill));
+            let painter = ui.painter_at(rect);
+            painter.rect_filled(rect, 0.0, if response.hovered() { fill.lerp_to_gamma(ui.visuals().widgets.hovered.bg_fill, 0.35) } else { fill });
+            if response_close.hovered() || response_close.has_focus() {
+                painter.rect_filled(close_rect.shrink(3.0), 3.0, ui.visuals().widgets.hovered.bg_fill);
             }
-            let (response, response_close) = tab.inner;
+            let caption = egui::WidgetText::from(title.as_str()).into_galley(
+                ui, Some(egui::TextWrapMode::Truncate), (caption_rect.width() - 16.0).max(1.0), egui::TextStyle::Button,
+            );
+            let elided = caption.elided;
+            let ink = ui.visuals().text_color();
+            painter.galley(egui::pos2(caption_rect.left() + 8.0, rect.center().y - caption.size().y * 0.5), caption, ink);
+            painter.text(close_rect.center(), egui::Align2::CENTER_CENTER, "×", egui::TextStyle::Button.resolve(ui.style()), ink);
+            painter.vline(rect.right() - 0.5, rect.y_range(), egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color));
+            if is_active || response.has_focus() {
+                painter.hline(rect.x_range(), rect.bottom() - 0.5, egui::Stroke::new(1.0, ui.visuals().selection.bg_fill));
+            }
+            let response = if elided { response.on_hover_text(&title) } else { response };
+            let response_close = response_close.on_hover_text(close);
 
             if response.clicked() {
                 let _ = shell.activate_context(id);
+                ui.ctx().request_repaint();
             }
             if response_close.clicked() {
                 shell.request_close(id);
+                ui.ctx().request_repaint();
             }
 
             {
@@ -241,6 +250,7 @@ fn show_tabs(shell: &mut AppShell, ui: &mut egui::Ui, tab_height: f32) {
             && let Some(id) = document_picker(ui, shell, &contexts, active_id, &settings)
         {
             let _ = shell.activate_context(id);
+            ui.ctx().request_repaint();
         }
     });
 

@@ -27,6 +27,8 @@ pub enum TextBarEdit {
     Align(Align),
     VerticalAlign(&'static str),
     Tracking(f32),
+    PreviewNumber(Box<TextBarEdit>),
+    CancelNumber,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -371,7 +373,9 @@ impl TextBarState {
                             ui.set_min_width(180.0);
                             for &control in &controls[visible..] {
                                 ui.horizontal(|ui| {
-                                    ui.label(control.menu_label());
+                                    if !matches!(control, Size | Tracking) {
+                                        ui.label(control.menu_label());
+                                    }
                                     draw(ui, control, true);
                                 });
                             }
@@ -437,15 +441,15 @@ impl TextBarState {
                 ).then_some(TextBarEdit::FontStyle(style))
             }
             Size => {
-                let size = NumericSpec::new("").range(1.0..=1296.0).suffix("pt").width(48.0).mixed_hint(mixed);
-                self.number(ui, "char.size", self.size_pt, &size).map(TextBarEdit::Size)
+                let size = NumericSpec::new(text("char.size")).range(1.0..=1296.0)
+                    .suffix("pt").width(56.0).mixed_hint(mixed)
+                    .reset_to(f64::from(dtool_core::text_cmd::DEFAULT_SIZE_PT));
+                self.number(ui, "char.size", self.size_pt, &size, TextBarEdit::Size)
             }
             Tracking => {
-                if !menu {
-                    ui.label(text("ctx.text.tracking"));
-                }
-                let tracking = NumericSpec::new("").range(-1000.0..=10000.0).width(43.0).mixed_hint(mixed);
-                self.number(ui, "ctx.text.tracking", self.tracking, &tracking).map(TextBarEdit::Tracking)
+                let tracking = NumericSpec::new(text("ctx.text.tracking")).range(-1000.0..=10000.0)
+                    .width(43.0).mixed_hint(mixed).reset_to(0.0);
+                self.number(ui, "ctx.text.tracking", self.tracking, &tracking, TextBarEdit::Tracking)
             }
             Emphasis => {
                 let bold = self.bold().unwrap_or(false);
@@ -472,7 +476,7 @@ impl TextBarState {
         (edit, hover)
     }
 
-    fn number(&self, ui: &mut egui::Ui, key: &str, current: Option<f32>, spec: &NumericSpec) -> Option<f32> {
+    fn number(&self, ui: &mut egui::Ui, key: &str, current: Option<f32>, spec: &NumericSpec, edit: fn(f32) -> TextBarEdit) -> Option<TextBarEdit> {
         let id = ui.make_persistent_id((key, &self.targets));
         let state = numeric_state(ui.ctx(), id);
         let display = if state.scrubbing {
@@ -483,8 +487,10 @@ impl TextBarState {
         let (response, event) = numeric_field(ui, id, display, spec);
         response.on_hover_text(text(key));
         match event {
-            NumericEvent::Commit(value) if current != Some(value as f32) => Some(value as f32),
-            _ => None,
+            NumericEvent::Preview(value) => Some(TextBarEdit::PreviewNumber(Box::new(edit(value as f32)))),
+            NumericEvent::Commit(value) if current != Some(value as f32) => Some(edit(value as f32)),
+            NumericEvent::Commit(_) | NumericEvent::Cancel => Some(TextBarEdit::CancelNumber),
+            NumericEvent::None => None,
         }
     }
 }

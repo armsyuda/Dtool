@@ -351,6 +351,14 @@ fn push_object_body(doc: &Document, object: &Object, paint: &ObjectPaint,
         push_dimension(object, paint, scene);
         return;
     }
+    if outline_only && is_text(&object.kind) {
+        if let Some(contours) = crate::text_lines::text_outlines(doc, id) {
+            scene.prims.extend(contours.into_iter().filter(|points| points.len() > 2).map(|points| {
+                Prim::Stroke { object: id, points, closed: true, width: 0.0, paint: Paint::Solid { colour: HAIRLINE }, opacity: 1.0 }
+            }));
+        }
+        return;
+    }
     if let ObjectKind::PathText(data) = &object.kind {
         if let Some(path) = doc.get_object(data.path) {
             let contours = crate::outline::path_text_layout_contours(object, path);

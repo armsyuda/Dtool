@@ -262,7 +262,16 @@ fn translated_objects(
 }
 
 fn bounds(session: &Session, id: ObjectId) -> Result<[f32; 4], CommandError> {
-    selection_bounds(&session.document, &[id]).ok_or_else(CommandError::not_found)
+    let doc = &session.document;
+    let object = doc.get_object(id).ok_or_else(CommandError::not_found)?;
+    // Frame text aligns by its container, while free and path text use their visible glyphs.
+    if matches!(object.kind, crate::ObjectKind::ArtText { .. } | crate::ObjectKind::PathText(_))
+        && let Some([left, top, right, bottom]) = crate::scene::text_glyph_bounds(doc, id)
+        && right > left && bottom > top
+    {
+        return Ok([left, top, right - left, bottom - top]);
+    }
+    selection_bounds(doc, &[id]).ok_or_else(CommandError::not_found)
 }
 
 fn deltas(

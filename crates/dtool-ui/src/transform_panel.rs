@@ -105,6 +105,7 @@ pub struct TransformPanel {
     pub error: Option<String>,
     pub edits: Vec<PanelEdit>,
     scrub_origin: Option<(TransformField, f32)>,
+    preview_edit: Option<PanelEdit>,
     selection_available: bool,
     selection_length: Option<f32>,
     binding: Option<(dtool_core::ContextId, Vec<dtool_core::ObjectId>)>,
@@ -142,6 +143,7 @@ impl Default for TransformPanel {
             error: None,
             edits: Vec::new(),
             scrub_origin: None,
+            preview_edit: None,
             selection_available: true,
             selection_length: None,
             binding: None,
@@ -209,6 +211,11 @@ fn is_plain(field: TransformField) -> bool {
     matches!(field, TransformField::R | TransformField::S)
 }
 
+fn scrub_value(ui: &Ui, id: egui::Id) -> Option<f32> {
+    let state = numeric_state(ui.ctx(), id);
+    (state.scrubbing && state.previewed).then_some(state.scrub as f32)
+}
+
 impl TransformPanel {
     pub fn show(&mut self, ui: &mut Ui) -> Response {
         self.draw(ui)
@@ -240,6 +247,9 @@ impl TransformPanel {
     pub fn show_with_session(&mut self, ui: &mut Ui, session: &mut Session) -> Response {
         self.sync_from_session(session);
         let response = self.draw(ui);
+        if let Some(command) = self.preview_edit.take().and_then(|edit| self.command_for(session, edit)) {
+            crate::app_canvas::stage_geometry_preview(ui, session, command);
+        }
         self.apply_edits(session);
         response
     }
@@ -295,33 +305,8 @@ impl TransformPanel {
     pub fn apply_edits(&mut self, session: &mut Session) {
         let edits: Vec<PanelEdit> = self.edits.drain(..).collect();
         for edit in edits {
-            let result = match edit {
-                PanelEdit::Set(params) => {
-                    if let (Some(angle), Some(origin)) = (params["rotation_deg"].as_f64(), session.selection_transform_origin())
-                        && let Some(object) = session.selection.ids.first().and_then(|id| session.document.get_object(*id))
-                    {
-                        let delta = (angle - f64::from(object.rotation_deg)).rem_euclid(360.0);
-                        session.run_named("transform.selection_box", serde_json::json!({
-                            "origin": origin,
-                            "rotation_deg": delta,
-                        }))
-                    } else {
-                        session.run_named("transform.set", params)
-                    }
-                }
-                PanelEdit::SelectionBox(mut params) => match session.selection_bounds() {
-                    Some(bounds) => {
-                        let frac = dtool_core::command::anchor_fraction(self.anchor);
-                        let origin = session.selection_transform_origin()
-                            .unwrap_or([bounds[0] + bounds[2] * frac[0], bounds[1] + bounds[3] * frac[1]]);
-                        params["origin"] = serde_json::json!(origin);
-                        session.run_named("transform.selection_box", params)
-                    }
-                    None => continue,
-                },
-                PanelEdit::Flip(params) => session.run_named("transform.flip", params),
-                PanelEdit::Rotate90(params) => session.run_named("transform.rotate_90", params),
-            };
+            let Some(command) = self.command_for(session, edit) else { continue };
+            let result = session.run(&command);
             match result {
                 Ok(_) => self.error = None,
                 Err(err) => {
@@ -339,7 +324,34 @@ impl TransformPanel {
         }
     }
 
+    fn command_for(&self, session: &Session, edit: PanelEdit) -> Option<dtool_core::Command> {
+        let (name, params) = match edit {
+            PanelEdit::Set(params) => {
+                if let (Some(angle), Some(origin)) = (params["rotation_deg"].as_f64(), session.selection_transform_origin())
+                    && let Some(object) = session.selection.ids.first().and_then(|id| session.document.get_object(*id))
+                {
+                    let delta = (angle - f64::from(object.rotation_deg)).rem_euclid(360.0);
+                    ("transform.selection_box", serde_json::json!({ "origin": origin, "rotation_deg": delta }))
+                } else {
+                    ("transform.set", params)
+                }
+            }
+            PanelEdit::SelectionBox(mut params) => {
+                let bounds = session.selection_bounds()?;
+                let frac = dtool_core::command::anchor_fraction(self.anchor);
+                let origin = session.selection_transform_origin()
+                    .unwrap_or([bounds[0] + bounds[2] * frac[0], bounds[1] + bounds[3] * frac[1]]);
+                params["origin"] = serde_json::json!(origin);
+                ("transform.selection_box", params)
+            }
+            PanelEdit::Flip(params) => ("transform.flip", params),
+            PanelEdit::Rotate90(params) => ("transform.rotate_90", params),
+        };
+        Some(dtool_core::Command::with_params(name, params))
+    }
+
     fn draw(&mut self, ui: &mut Ui) -> Response {
+        self.preview_edit = None;
         if let Some(field) = self.pending_focus.take() {
             if field == TransformField::Anchor {
                 self.anchor_focus_request = true;
@@ -527,6 +539,9 @@ impl TransformPanel {
         if let Some(width) = label_width {
             spec = spec.label_width(width);
         }
+        if is_plain(field) {
+            spec = spec.reset_to(0.0);
+        }
         let value = if !self.selection_available || self.is_mixed(field) {
             NumericValue::Mixed
         } else {
@@ -534,6 +549,9 @@ impl TransformPanel {
         };
         let (_, event) = numeric_field(ui, id, value, &spec);
         self.handle_event(field, event);
+        if ui.is_enabled() && let Some(value) = scrub_value(ui, id) {
+            self.preview_edit = self.set_edit(field, value);
+        }
         self.track_focus(ui, field, id);
     }
 
@@ -600,13 +618,18 @@ impl TransformPanel {
                 _ => "°",
             };
             let spec = NumericSpec::new(&label).decimals(3).parser(&parse)
-                .width(field_width).label_width(label_width).suffix(suffix).enabled(ui.is_enabled());
-            let (_, event) = numeric_field(ui, relative_field_id(slot), NumericValue::Value(f64::from(self.relative[slot])), &spec);
+                .width(field_width).label_width(label_width).suffix(suffix).enabled(ui.is_enabled())
+                .reset_to(f64::from(RELATIVE_NEUTRAL[slot]));
+            let id = relative_field_id(slot);
+            let (_, event) = numeric_field(ui, id, NumericValue::Value(f64::from(self.relative[slot])), &spec);
             match event {
                 NumericEvent::Preview(v) => self.relative[slot] = v as f32,
                 NumericEvent::Commit(v) => self.commit_relative(slot, v as f32),
                 NumericEvent::Cancel => self.relative[slot] = RELATIVE_NEUTRAL[slot],
                 NumericEvent::None => {}
+            }
+            if ui.is_enabled() && let Some(value) = scrub_value(ui, id) {
+                self.preview_edit = Self::relative_edit(slot, value);
             }
         }
         self.draw_anchor(ui);
@@ -630,6 +653,9 @@ impl TransformPanel {
         let (_, event) = numeric_field(ui, length_field_id(), NumericValue::Value(f64::from(length)), &spec);
         if let NumericEvent::Commit(v) = event {
             self.commit_length(v as f32);
+        }
+        if ui.is_enabled() && let Some(value) = scrub_value(ui, length_field_id()) {
+            self.preview_edit = self.length_edit(value);
         }
         self.field_row(ui, TransformField::R, "panel.transform.r", field_width, Some(label_width));
         self.draw_anchor(ui);
@@ -716,6 +742,14 @@ impl TransformPanel {
     }
 
     pub fn commit_value(&mut self, field: TransformField, value: f32) {
+        if !value.is_finite() {
+            self.error = Some(text("error.invalid_params").to_string());
+        } else if let Some(edit) = self.set_edit(field, value) {
+            self.edits.push(edit);
+        }
+    }
+
+    fn set_edit(&self, field: TransformField, value: f32) -> Option<PanelEdit> {
         let key = match field {
             TransformField::X => "x",
             TransformField::Y => "y",
@@ -723,18 +757,14 @@ impl TransformPanel {
             TransformField::H => "h",
             TransformField::R => "rotation_deg",
             TransformField::S => "shear_deg",
-            TransformField::Anchor => return,
+            TransformField::Anchor => return None,
         };
-        if !value.is_finite() {
-            self.error = Some(text("error.invalid_params").to_string());
-            return;
-        }
         let mut params = serde_json::json!({
             "anchor": self.anchor_json(),
             "aspect_locked": self.aspect_locked
         });
         params[key] = serde_json::json!(value);
-        self.edits.push(PanelEdit::Set(params));
+        Some(PanelEdit::Set(params))
     }
 
     pub fn commit_relative(&mut self, slot: usize, value: f32) {
@@ -742,37 +772,23 @@ impl TransformPanel {
         self.relative[slot] = RELATIVE_NEUTRAL[slot];
         if !value.is_finite() {
             self.error = Some(text("error.invalid_params").to_string());
-            return;
+        } else if let Some(edit) = Self::relative_edit(slot, value) {
+            self.edits.push(edit);
         }
-        let mut params = serde_json::json!({});
-        match slot {
-            0 => {
-                if value == 0.0 {
-                    return;
-                }
-                params["translate"] = serde_json::json!([value, 0.0]);
+    }
+
+    fn relative_edit(slot: usize, value: f32) -> Option<PanelEdit> {
+        let params = match slot {
+            0 if value != 0.0 => serde_json::json!({"translate": [value, 0.0]}),
+            1 if value != 0.0 => serde_json::json!({"translate": [0.0, value]}),
+            2 if value > 0.0 && value != 100.0 => {
+                let scale = value / 100.0;
+                serde_json::json!({"scale": [scale, scale]})
             }
-            1 => {
-                if value == 0.0 {
-                    return;
-                }
-                params["translate"] = serde_json::json!([0.0, value]);
-            }
-            2 => {
-                if value <= 0.0 || value == 100.0 {
-                    return;
-                }
-                let s = value / 100.0;
-                params["scale"] = serde_json::json!([s, s]);
-            }
-            _ => {
-                if value == 0.0 {
-                    return;
-                }
-                params["rotation_deg"] = serde_json::json!(value);
-            }
-        }
-        self.edits.push(PanelEdit::SelectionBox(params));
+            3 if value != 0.0 => serde_json::json!({"rotation_deg": value}),
+            _ => return None,
+        };
+        Some(PanelEdit::SelectionBox(params))
     }
 
     pub fn menu_flip(&mut self, axis: FlipAxis) {
@@ -796,26 +812,23 @@ impl TransformPanel {
     pub fn commit_length(&mut self, length: f32) {
         if !(length.is_finite() && length > 0.0) {
             self.error = Some(text("error.invalid_params").to_string());
-            return;
+        } else if let Some(edit) = self.length_edit(length) {
+            self.edits.push(edit);
         }
-        let (w, h) = (self.w, self.h);
-        let current = self.selection_length.unwrap_or_else(|| w.hypot(h));
-        if current <= 0.0 {
-            return;
-        }
-        let k = length / current;
-        if !k.is_finite() || (k - 1.0).abs() < 1e-6 {
-            return;
+    }
+
+    fn length_edit(&self, length: f32) -> Option<PanelEdit> {
+        let current = self.selection_length.unwrap_or_else(|| self.w.hypot(self.h));
+        let scale = length / current;
+        if !scale.is_finite() || scale <= 0.0 || (scale - 1.0).abs() < 1e-6 {
+            return None;
         }
         if self.selection_length.is_some() {
-            self.edits.push(PanelEdit::SelectionBox(serde_json::json!({ "scale": [k, k] })));
-            return;
+            return Some(PanelEdit::SelectionBox(serde_json::json!({ "scale": [scale, scale] })));
         }
-        self.edits.push(PanelEdit::Set(serde_json::json!({
-            "w": w * k,
-            "h": h * k,
-            "anchor": self.anchor_json()
-        })));
+        Some(PanelEdit::Set(serde_json::json!({
+            "w": self.w * scale, "h": self.h * scale, "anchor": self.anchor_json()
+        })))
     }
 
     pub fn get_transform(&self) -> Transform {

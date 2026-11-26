@@ -196,6 +196,9 @@ pub struct CharacterPanel {
     pub error: Option<String>,
     fonts: crate::font_combo::FontComboState,
     icons: crate::icon_cache::IconCache,
+    numeric_preview: Option<Command>,
+    previewing_number: bool,
+    cancel_number: bool,
 }
 
 fn icon(ui: &mut egui::Ui, symbol: &str, key: &str, active: bool) -> bool {
@@ -211,7 +214,7 @@ fn panel_width(ui: &egui::Ui) -> f32 {
 
 fn field_row<R>(ui: &mut egui::Ui, label: &str, control: impl FnOnce(&mut egui::Ui, egui::Id) -> R) -> R {
     if panel_width(ui) < 190.0 {
-        let caption = ui.label(label);
+        let caption = ui.add(egui::Label::new(label).sense(egui::Sense::click()));
         control(ui, caption.id)
     } else {
         ui.horizontal(|ui| {
@@ -221,7 +224,7 @@ fn field_row<R>(ui: &mut egui::Ui, label: &str, control: impl FnOnce(&mut egui::
                 egui::Layout::left_to_right(egui::Align::Center),
                 |ui| {
                     ui.set_min_width(caption_width);
-                    ui.add(egui::Label::new(label).truncate()).on_hover_text(label)
+                    ui.add(egui::Label::new(label).truncate().sense(egui::Sense::click())).on_hover_text(label)
                 },
             ).inner;
             control(ui, caption.id)
@@ -238,14 +241,16 @@ fn font_row<R>(ui: &mut egui::Ui, label: &str, control: impl FnOnce(&mut egui::U
     })
 }
 
-fn number_field(ui: &mut egui::Ui, key: &str, label: egui::Id, value: Option<f64>, unit: &str) -> Option<f64> {
+fn number_field(ui: &mut egui::Ui, key: &str, label: egui::Id, value: Option<f64>, unit: &str, default: f64) -> NumericEvent {
     let display = value.map_or(NumericValue::Mixed, NumericValue::Value);
-    let spec = NumericSpec::new("").width(58.0).suffix(unit);
+    let range = if key == "char.size" { 1.0..=1296.0 } else { -10000.0..=10000.0 };
+    let spec = NumericSpec::new("").width(58.0).suffix(unit).range(range);
     let (response, event) = numeric_field(ui, ui.make_persistent_id(key), display, &spec);
-    let response = response.labelled_by(label);
-    match event {
-        NumericEvent::Commit(edited) if response.changed() => Some(edited),
-        _ => None,
+    response.labelled_by(label);
+    if ui.is_enabled() && ui.ctx().read_response(label).is_some_and(|response| response.double_clicked()) {
+        NumericEvent::Commit(default)
+    } else {
+        event
     }
 }
 
@@ -275,7 +280,21 @@ impl CharacterPanel {
             let scales: Vec<_> = targets.iter().map(|target| {
                 crate::context::text_bar::font_size_scale(session, dtool_core::StoryId(target.story))
             }).collect();
-            if let Some(command) = self.edits_for(ui, &selection, targets, &scales) {
+            let command = self.edits_for(ui, &selection, targets, &scales);
+            use dtool_tools::dtool_text::font_preview::{cancel_style_preview, set_style_preview};
+            if self.previewing_number && (self.cancel_number || command.is_some()
+                || !ui.input(|input| input.pointer.primary_down()))
+            {
+                cancel_style_preview();
+                self.previewing_number = false;
+            }
+            if let Some(preview) = self.numeric_preview.take() {
+                match set_style_preview(&session.document, &preview) {
+                    Ok(()) => self.previewing_number = true,
+                    Err(error) => self.error = Some(text(&error.message_key).to_string()),
+                }
+            }
+            if let Some(command) = command {
                 self.error = apply(session, &command).err().map(|error| text(&error.message_key).to_string());
             }
             if let Some(message) = &self.error {
@@ -288,7 +307,24 @@ impl CharacterPanel {
         self.edits_for(ui, selection, std::slice::from_ref(selection), &[1.0])
     }
 
+    fn numeric_command(&mut self, event: NumericEvent, command: impl FnOnce(f64) -> Option<Command>) -> Option<Command> {
+        match event {
+            NumericEvent::Preview(value) => {
+                self.numeric_preview = command(value);
+                None
+            }
+            NumericEvent::Commit(value) => command(value),
+            NumericEvent::Cancel => {
+                self.cancel_number = true;
+                None
+            }
+            NumericEvent::None => None,
+        }
+    }
+
     fn edits_for(&mut self, ui: &mut egui::Ui, selection: &CharSelection, targets: &[CharSelection], size_scales: &[f64]) -> Option<Command> {
+        self.cancel_number = false;
+        self.numeric_preview = None;
         let patch = |value: Value| batched(targets.iter().filter(|target| target.can_style()).map(|target| {
             target.style_command(target.start, target.end, value.clone())
         }).collect());
@@ -326,15 +362,16 @@ impl CharacterPanel {
         let mut sizes = targets.iter().zip(size_scales)
             .map(|(target, scale)| target.number("size_pt", 12.0).map(|size| size * scale));
         let size_pt = sizes.next().flatten().filter(|first| sizes.all(|size| size == Some(*first)));
-        if let Some(size) = field_row(ui, text("char.size"), |ui, label| {
-            number_field(ui, "char.size", label, size_pt, "pt")
+        let size = field_row(ui, text("char.size"), |ui, label| {
+            number_field(ui, "char.size", label, size_pt, "pt", f64::from(dtool_core::text_cmd::DEFAULT_SIZE_PT))
+        });
+        if let Some(change) = self.numeric_command(size, |size| {
+            (size_pt != Some(size)).then(|| batched(targets.iter().zip(size_scales)
+                .filter(|(target, _)| target.can_style())
+                .map(|(target, scale)| target.style_command(target.start, target.end, json!({"size_pt": size / scale})))
+                .collect())).flatten()
         }) {
-            if size > 0.0 {
-                command = batched(targets.iter().zip(size_scales).filter(|(target, _)| target.can_style())
-                    .map(|(target, scale)| target.style_command(
-                        target.start, target.end, json!({"size_pt": size / scale})
-                    )).collect());
-            }
+            command = Some(change);
         }
         let wrap_position = panel_width(ui) < 6.0 * 24.0 + 5.0 * ui.spacing().item_spacing.x;
         ui.horizontal_wrapped(|ui| {
@@ -376,8 +413,12 @@ impl CharacterPanel {
         ui.separator();
         field_row(ui, text("char.tracking"), |ui, label| {
             ui.horizontal(|ui| {
-                if let Some(tracking) = number_field(ui, "char.tracking", label, selection.number("tracking", 0.0), "") {
-                    command = patch(json!({"tracking": tracking}));
+                let tracking = selection.number("tracking", 0.0);
+                let event = number_field(ui, "char.tracking", label, tracking, "", 0.0);
+                if let Some(change) = self.numeric_command(event, |value| {
+                    (tracking != Some(value)).then(|| patch(json!({"tracking": value}))).flatten()
+                }) {
+                    command = Some(change);
                 }
                 if icon(ui, "−", "menu.text.tighten", false) {
                     command = nudge("tracking", tracking_tighten);
@@ -389,8 +430,12 @@ impl CharacterPanel {
         });
         field_row(ui, text("char.baseline"), |ui, label| {
             ui.horizontal(|ui| {
-                if let Some(baseline) = number_field(ui, "char.baseline", label, selection.number("baseline_pt", 0.0), "pt") {
-                    command = patch(json!({"baseline_pt": baseline}));
+                let baseline = selection.number("baseline_pt", 0.0);
+                let event = number_field(ui, "char.baseline", label, baseline, "pt", 0.0);
+                if let Some(change) = self.numeric_command(event, |value| {
+                    (baseline != Some(value)).then(|| patch(json!({"baseline_pt": value}))).flatten()
+                }) {
+                    command = Some(change);
                 }
                 if icon(ui, "↑", "menu.text.raise", false) {
                     command = nudge("baseline_pt", baseline_raise);

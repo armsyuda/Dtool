@@ -12,7 +12,7 @@ use dtool_core::{Command, Session};
 use egui::{Color32, Rect, Stroke, StrokeKind, Ui, vec2};
 use serde_json::json;
 
-pub(crate) fn show_paint_wells(ui: &mut Ui, session: &Session, wells: &FillStrokeWells, can_paint: bool) -> Option<ColourTarget> {
+pub(crate) fn show_paint_wells(ui: &mut Ui, session: &Session, wells: &FillStrokeWells, can_paint: bool) -> Option<(ColourTarget, egui::Pos2)> {
     let text = dtool_strings::text;
     let display = DisplayColourCtx::for_optional(Some(&session.document));
     let mut paint = None;
@@ -37,18 +37,16 @@ pub(crate) fn show_paint_wells(ui: &mut Ui, session: &Session, wells: &FillStrok
         }
         painter.rect_stroke(rect, 3.0, ui.visuals().widgets.inactive.bg_stroke, StrokeKind::Inside);
         response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, can_paint, text(label)));
-        if response.on_hover_text(text(label)).clicked() { paint = Some(target); }
+        let anchor = response.rect.left_bottom();
+        if response.on_hover_text(text(label)).clicked() { paint = Some((target, anchor)); }
     }
     paint
 }
 
-pub(crate) fn show(ui: &mut Ui, session: &Session, edit: &mut NodeEdit, wells: &FillStrokeWells, icons: &mut IconCache)
-    -> (Option<Command>, Option<ColourTarget>)
-{
+pub(crate) fn show_stroke_controls(ui: &mut Ui, session: &Session) -> Option<Command> {
     let text = dtool_strings::text;
     let objects: Vec<_> = session.selection.ids.iter().filter_map(|id| session.document.get_object(*id)).collect();
     let can_paint = objects.iter().any(|object| !object.locked);
-    let paint = show_paint_wells(ui, session, wells, can_paint);
     let mut action = None;
     let ids = objects.iter().filter(|object| !object.locked).map(|object| object.id.0).collect::<Vec<_>>();
     let style = ui.add_enabled(can_paint, egui::Button::new("").min_size(vec2(24.0, 26.0)));
@@ -80,15 +78,45 @@ pub(crate) fn show(ui: &mut Ui, session: &Session, edit: &mut NodeEdit, wells: &
         session.document.units, session.document.dpi);
     let common_width = objects.first().map(|object| object.stroke.width)
         .filter(|width| objects.iter().all(|object| object.stroke.width == *width));
-    let mut points = common_width.unwrap_or(0.0) / scale;
-    let mut field = egui::DragValue::new(&mut points).speed(0.1).range(0.0..=100_000.0).suffix(" pt");
-    if common_width.is_none() { field = field.custom_formatter(|_, _| "—".into()); }
-    if ui.add_enabled(can_paint, field).on_hover_text(text("stroke.width")).changed() {
+    let field = egui::Id::new("dtool.context.stroke.width").with((session.context, &ids));
+    let spec = dtool_design::NumericSpec::new("").range(0.0..=100_000.0)
+        .step(0.1).suffix("pt").width(56.0).enabled(can_paint);
+    let value = common_width.map_or(dtool_design::NumericValue::Mixed, |width| {
+        dtool_design::NumericValue::Value(f64::from(width / scale))
+    });
+    let (response, event) = dtool_design::numeric_field(ui, field, value, &spec);
+    response.on_hover_text(text("stroke.width"));
+    if let dtool_design::NumericEvent::Commit(points) = event {
         action = Some(Command::with_params("stroke.set", json!({
             "ids": ids,
-            "width": points * scale,
+            "width": points * f64::from(scale),
         })));
     }
+    action
+}
+
+pub(crate) fn stroke_preview(ctx: &egui::Context, session: &Session) -> Option<crate::stroke_panel::StrokeWidthPreview> {
+    let ids: Vec<_> = session.selection.ids.iter().copied().filter(|id| {
+        session.document.get_object(*id).is_some_and(|object| !object.locked)
+    }).collect();
+    let raw_ids: Vec<_> = ids.iter().map(|id| id.0).collect();
+    let field = egui::Id::new("dtool.context.stroke.width").with((session.context, &raw_ids));
+    let state = dtool_design::numeric_state(ctx, field);
+    if !state.scrubbing || !ctx.input(|input| input.pointer.primary_down()) {
+        return None;
+    }
+    let scale = dtool_core::units::units_per_point(session.document.units, session.document.dpi);
+    Some(crate::stroke_panel::StrokeWidthPreview { ids, index: 0, width: state.scrub as f32 * scale })
+}
+
+pub(crate) fn show(ui: &mut Ui, session: &Session, edit: &mut NodeEdit, wells: &FillStrokeWells, icons: &mut IconCache)
+    -> (Option<Command>, Option<(ColourTarget, egui::Pos2)>)
+{
+    let text = dtool_strings::text;
+    let objects: Vec<_> = session.selection.ids.iter().filter_map(|id| session.document.get_object(*id)).collect();
+    let can_paint = objects.iter().any(|object| !object.locked);
+    let paint = show_paint_wells(ui, session, wells, can_paint);
+    let mut action = show_stroke_controls(ui, session);
     ui.separator();
 
     let target = edit.target.filter(|id| session.selection.ids.contains(id));

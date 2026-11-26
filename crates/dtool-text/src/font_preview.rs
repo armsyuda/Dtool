@@ -28,6 +28,45 @@ pub enum FontReply {
 
 static PREVIEW: Mutex<Vec<FontPreview>> = Mutex::new(Vec::new());
 
+struct StylePreview {
+    document: u64,
+    version: u64,
+    stories: Vec<dtool_core::Story>,
+}
+
+static STYLE_PREVIEW: Mutex<Option<StylePreview>> = Mutex::new(None);
+
+pub fn set_style_preview(doc: &dtool_core::Document, command: &dtool_core::Command) -> Result<(), dtool_core::CommandError> {
+    let mut view = doc.clone();
+    let commands = if command.name == "edit.batch" {
+        dtool_core::serde_json::from_value(command.params["commands"].clone())
+            .map_err(|_| dtool_core::CommandError::invalid_params())?
+    } else {
+        vec![command.clone()]
+    };
+    for edit in &commands {
+        dtool_core::text_cmd::apply(edit, &mut view)?;
+    }
+    let stories = view.stories.into_iter().filter(|story| {
+        commands.iter().any(|edit| edit.params["story"].as_u64() == Some(story.id.0))
+    }).collect();
+    *STYLE_PREVIEW.lock().unwrap_or_else(|error| error.into_inner()) = Some(StylePreview {
+        document: doc.instance.0,
+        version: doc.version,
+        stories,
+    });
+    bump_view();
+    Ok(())
+}
+
+pub fn cancel_style_preview() -> bool {
+    let cancelled = STYLE_PREVIEW.lock().unwrap_or_else(|error| error.into_inner()).take().is_some();
+    if cancelled {
+        bump_view();
+    }
+    cancelled
+}
+
 fn preview_slot() -> std::sync::MutexGuard<'static, Vec<FontPreview>> {
     PREVIEW.lock().unwrap_or_else(|e| e.into_inner())
 }
@@ -183,6 +222,12 @@ fn preview_range(range: &dtool_core::serde_json::Value, start: usize, end: usize
 
 /// Core story with the active preview family applied; None when no preview targets it.
 pub fn previewed_core_story(doc: &dtool_core::Document, core: &dtool_core::Story) -> Option<dtool_core::Story> {
+    if let Some(story) = STYLE_PREVIEW.lock().unwrap_or_else(|error| error.into_inner()).as_ref()
+        .filter(|preview| preview.document == doc.instance.0 && preview.version == doc.version)
+        .and_then(|preview| preview.stories.iter().find(|story| story.id == core.id)).cloned()
+    {
+        return Some(story);
+    }
     let preview = preview_slot().iter()
         .find(|p| p.doc == doc.instance.0 && p.story == core.id.0 && p.start < p.end).cloned()?;
     let (start, end) = (preview.start, preview.end);

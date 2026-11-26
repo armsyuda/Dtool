@@ -382,10 +382,66 @@ struct CompositionDraft {
     canvas: AppCanvas,
 }
 
+#[derive(Clone)]
+struct GeometryPreview {
+    revision: (dtool_core::document::DocInstance, u64, u64),
+    selection: Vec<ObjectId>,
+    command: dtool_core::Command,
+    pass: u64,
+}
+
+impl GeometryPreview {
+    fn revision(session: &Session) -> (dtool_core::document::DocInstance, u64, u64) {
+        (session.document.instance, session.generation, session.document.version)
+    }
+
+    fn same_edit(&self, other: &Self) -> bool {
+        self.revision == other.revision && self.selection == other.selection
+            && self.command.name == other.command.name && self.command.params == other.command.params
+    }
+}
+
+const GEOMETRY_PREVIEW_ID: &str = "dtool.canvas.numeric_geometry_preview";
+
+pub(crate) fn stage_geometry_preview(ui: &Ui, session: &Session, command: dtool_core::Command) {
+    let preview = GeometryPreview {
+        revision: GeometryPreview::revision(session),
+        selection: session.selection.ids.clone(),
+        command,
+        pass: ui.ctx().cumulative_pass_nr(),
+    };
+    let changed = ui.data_mut(|data| {
+        let id = egui::Id::unique(GEOMETRY_PREVIEW_ID);
+        let changed = data.get_temp::<GeometryPreview>(id).is_none_or(|old| !old.same_edit(&preview));
+        data.insert_temp(id, preview);
+        changed
+    });
+    if changed {
+        ui.ctx().request_repaint();
+    }
+}
+
+pub(crate) fn clear_geometry_preview(ui: &Ui) {
+    let id = egui::Id::unique(GEOMETRY_PREVIEW_ID);
+    let cleared = ui.data_mut(|data| {
+        let present = data.get_temp::<GeometryPreview>(id).is_some();
+        data.remove::<GeometryPreview>(id);
+        present
+    });
+    if cleared { ui.ctx().request_repaint(); }
+}
+
+struct GeometryDraft {
+    preview: GeometryPreview,
+    session: Session,
+    canvas: AppCanvas,
+}
+
 #[derive(Default)]
 pub struct AppCanvas {
     scene: Scene,
     key: Option<(Option<dtool_core::workspace::ContextId>, u64, u64, dtool_core::CanvasFlags, i32)>,
+    font_generation: u64,
     textures: HashMap<TextureKey, egui::TextureHandle>,
     fill_textures: HashMap<usize, FillTexture>,
     glyph_ink: HashMap<ObjectId, Option<GlyphInk>>,
@@ -405,6 +461,7 @@ pub struct AppCanvas {
     mesh_preview: Option<crate::canvas_input::warp_mesh::MeshPreview>,
     node_preview: Option<(Vec<(ObjectId, Vec<dtool_core::curve::Contour>)>, Box<AppCanvas>)>,
     composition_draft: Option<Box<CompositionDraft>>,
+    geometry_draft: Option<Box<GeometryDraft>>,
     transform_draft: Option<(ObjectId, dtool_core::command::TransformSelectionBoxArgs, Box<AppCanvas>)>,
     pub(crate) blend_preview: Option<Vec<BlendPreview>>,
     pub(crate) tone_preview: Option<crate::dialogs::tone_blend::Preview>,
@@ -412,6 +469,8 @@ pub struct AppCanvas {
     painted_layer_opacity: Option<LayerOpacityPreview>,
     pub(crate) stroke_width_preview: Option<crate::stroke_panel::StrokeWidthPreview>,
     painted_stroke_width: Option<crate::stroke_panel::StrokeWidthPreview>,
+    pub(crate) toolbar_paint_preview: Vec<crate::fill_stroke::PaintUpdate>,
+    painted_toolbar_paint: Vec<crate::fill_stroke::PaintUpdate>,
     painted_gradient: Option<crate::canvas_input::GradientPreview>,
     pub show_invisibles: bool,
     pub document_viewport: Option<[f32; 2]>,
@@ -577,14 +636,17 @@ impl AppCanvas {
         let flags = &session.view.canvas_flags;
         let detail = canvas_detail(&session.view);
         let key = (session.context, session.generation, session.document.version, flags.clone(), detail);
-        let same_scene_key = self.key.as_ref() == Some(&key);
+        let font_generation = dtool_core::text_lines::font_generation();
+        let font_changed = !session.document.stories.is_empty() && self.font_generation != font_generation;
+        self.font_generation = font_generation;
+        let same_scene_key = !font_changed && self.key.as_ref() == Some(&key);
         let previous = self.painted_gradient.as_ref();
         if same_scene_key && previous == gradient {
             return;
         }
         // Zoom can change the curve tessellation without changing the artwork.
         // Retain the last composite so navigation can reuse it across that boundary.
-        let only_detail_changed = previous.is_none() && gradient.is_none()
+        let only_detail_changed = !font_changed && previous.is_none() && gradient.is_none()
             && self.key.as_ref().is_some_and(|(context, generation, version, old_flags, _)| {
                 *context == session.context && *generation == session.generation
                     && *version == session.document.version && old_flags == flags
@@ -859,7 +921,8 @@ impl AppCanvas {
         // before handling input, saving, or serving the next MCP request.
         let original_mesh = mesh_preview.as_ref().and_then(|preview| preview.install(session));
         let vector_draft = move_input.then(|| self.direct_vector_transform(session)).flatten();
-        if self.paint_composition_preview(ui, rect, session, input, !frame_tool) {
+        let numeric_preview = self.paint_numeric_geometry_preview(ui, rect, session);
+        if numeric_preview || self.paint_composition_preview(ui, rect, session, input, !frame_tool) {
             self.transform_draft = None;
             self.node_preview = None;
         } else if input && let Some(id) = self.input.live_text_resize(session).or(vector_draft)
@@ -923,15 +986,59 @@ impl AppCanvas {
                     ui.ctx().request_repaint();
                 }
             }
-            self.paint_selection(&ui.painter_at(rect), rect, &session.view, session, true);
-            crate::canvas::frame_text_input::paint_text_selection(ui, session, response, &session.view);
-            crate::canvas::frame_text_input::paint_caret(ui, session, response, &session.view);
+            if !numeric_preview {
+                self.paint_selection(&ui.painter_at(rect), rect, &session.view, session, true);
+                crate::canvas::frame_text_input::paint_text_selection(ui, session, response, &session.view);
+                crate::canvas::frame_text_input::paint_caret(ui, session, response, &session.view);
+            }
         } else {
             if self.input.busy() {
                 self.input.cancel();
             }
-            self.paint_selection(&ui.painter_at(rect), rect, &session.view, session, false);
+            if !numeric_preview {
+                self.paint_selection(&ui.painter_at(rect), rect, &session.view, session, false);
+            }
         }
+    }
+
+    fn paint_numeric_geometry_preview(&mut self, ui: &Ui, rect: Rect, session: &Session) -> bool {
+        let id = egui::Id::unique(GEOMETRY_PREVIEW_ID);
+        if !ui.input(|input| input.pointer.primary_down() && !input.key_pressed(egui::Key::Escape)) {
+            ui.data_mut(|data| data.remove::<GeometryPreview>(id));
+            self.geometry_draft = None;
+            return false;
+        }
+        let preview = ui.data(|data| data.get_temp::<GeometryPreview>(id));
+        let Some(preview) = preview.filter(|preview| {
+            preview.revision == GeometryPreview::revision(session)
+                && preview.selection == session.selection.ids
+                && ui.ctx().cumulative_pass_nr().saturating_sub(preview.pass) <= 1
+        }) else {
+            self.geometry_draft = None;
+            return false;
+        };
+
+        if self.geometry_draft.as_ref().is_none_or(|draft| !draft.preview.same_edit(&preview)) {
+            let mut document = session.document.clone();
+            document.instance = Default::default();
+            let mut draft = Session::new(document);
+            draft.selection = session.selection.clone();
+            draft.symbol_sync = session.symbol_sync;
+            draft.active_tool.clone_from(&session.active_tool);
+            draft.view = session.view.clone();
+            if draft.run(&preview.command).is_err() {
+                self.geometry_draft = None;
+                return false;
+            }
+            self.geometry_draft = Some(Box::new(GeometryDraft { preview, session: draft, canvas: Self::new() }));
+        }
+
+        let Some(draft) = self.geometry_draft.as_mut() else { return false };
+        draft.session.view = session.view.clone();
+        draft.canvas.show_invisibles = self.show_invisibles;
+        draft.canvas.paint_layers(ui, rect, &draft.session, true);
+        draft.canvas.paint_selection(&ui.painter_at(rect), rect, &draft.session.view, &draft.session, false);
+        true
     }
 
     fn paint_composition_preview(
@@ -1056,7 +1163,11 @@ impl AppCanvas {
         let preview = self.layer_opacity_preview.clone();
         let stroke_preview = self.stroke_width_preview.clone();
         let gradient = self.input.gradient_preview(session).cloned();
-        if self.painted_layer_opacity != preview || self.painted_stroke_width != stroke_preview {
+        let mut toolbar_paint = self.toolbar_paint_preview.clone();
+        if self.painted_layer_opacity != preview || self.painted_stroke_width != stroke_preview
+            || self.painted_toolbar_paint != toolbar_paint
+        {
+            self.painted_toolbar_paint = toolbar_paint.clone();
             self.invalidate();
             self.painted_layer_opacity = preview.clone();
             self.painted_stroke_width = stroke_preview.clone();
@@ -1086,8 +1197,14 @@ impl AppCanvas {
             preview.swap_with_object(object).then_some(preview)
         });
         // The drag paints through the regular scene; only its final command is recorded in history.
+        for paint in &mut toolbar_paint {
+            paint.swap(&mut session.document);
+        }
         let active_gradient = restore_gradient.as_ref().and(gradient.as_ref());
         self.paint_layers_with_gradient(ui, rect, session, overlay, active_gradient);
+        for paint in toolbar_paint.iter_mut().rev() {
+            paint.swap(&mut session.document);
+        }
         if let Some(mut preview) = restore_gradient
             && let Some(object) = session.document.find_object_mut(preview.id.0)
         {
@@ -1172,7 +1289,8 @@ impl AppCanvas {
             && view.canvas_flags.view_mode == dtool_core::ViewMode::Normal
             && staged.is_empty() && preview.is_none() && tone_preview.is_none() && brush_draft.is_none()
             && self.painted_gradient.is_none() && self.painted_layer_opacity.is_none()
-            && self.painted_stroke_width.is_none();
+            && self.painted_stroke_width.is_none()
+            && self.painted_toolbar_paint.is_empty();
         if align_fill && self.rotated_fill_scene.as_ref().is_none_or(|(angle, _)| *angle != view.rotation_deg) {
             let document = &session.document;
             let rotate = || rotated_fill_scene(document, &self.scene, view.rotation_deg);
@@ -1308,6 +1426,7 @@ impl AppCanvas {
                     && staged.is_empty() && preview.is_none() && tone_preview.is_none() && brush_revision.is_none()
                     && !self.input.busy() && self.input.preview.is_none() && self.painted_gradient.is_none()
                     && self.painted_layer_opacity.is_none() && self.painted_stroke_width.is_none()
+                    && self.painted_toolbar_paint.is_empty()
                     && cached.rotation_deg == rotation_deg && cached.pan_scale.is_none() && cached.staged.is_empty()
                     && cached.blend_preview.is_none() && cached.tone_preview.is_none()
                     && cached.brush_revision.is_none() && cached.transform_preview.is_none()
@@ -1848,7 +1967,12 @@ impl AppCanvas {
                 let colour = representative_colour(paint).unwrap_or(Colour::new(0, 0, 0, 255));
                 let px = if *width <= 0.0 { 1.0 } else { (width * zoom).max(0.5) };
                 let pts: Vec<Pos2> = points.iter().map(|p| screen(rect, view, *p)).collect();
-                let stroke = Stroke::new(px, colour32(colour, *opacity));
+                let colour = if matches!(view.canvas_flags.view_mode, dtool_core::ViewMode::Outline | dtool_core::ViewMode::Wireframe) {
+                    crate::canvas_input::SELECTION_BLUE.gamma_multiply(0.70)
+                } else {
+                    colour32(colour, *opacity)
+                };
+                let stroke = Stroke::new(px, colour);
                 if *closed {
                     painter.add(egui::Shape::closed_line(pts, stroke));
                 } else {

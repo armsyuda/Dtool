@@ -76,18 +76,31 @@ fn consume_field_enter(ui: &egui::Ui, response: &egui::Response) {
     }
 }
 
-fn length_edit(ui: &mut egui::Ui, key: &str, value: f64) -> Option<f64> {
-    studio_row(ui, text(key), |ui, label| {
-        let spec = NumericSpec::new("").suffix("mm").width(70.0).decimals(3);
+fn length_edit(ui: &mut egui::Ui, key: &str, value: f64, default: f64) -> NumericEvent {
+    ui.horizontal(|ui| {
+        let caption = ui.add_sized(
+            [dtool_design::size("panel.label_width").min(ui.available_width() / 3.0), ui.spacing().interact_size.y],
+            egui::Label::new(text(key)).wrap().sense(egui::Sense::click()),
+        );
+        let spec = NumericSpec::new("").suffix("mm").width(70.0).decimals(3).enabled(ui.is_enabled());
         let id = ui.make_persistent_id(key);
         let (response, event) = numeric_field(ui, id, NumericValue::Value(value), &spec);
-        let response = response.labelled_by(label);
+        let response = response.labelled_by(caption.id);
         consume_field_enter(ui, &response);
-        match event {
-            NumericEvent::Commit(value) => Some(value),
-            _ => None,
+        if ui.is_enabled() && caption.double_clicked() {
+            return if default == value { NumericEvent::None } else { NumericEvent::Commit(default) };
         }
-    })
+        match event {
+            NumericEvent::None => ui.data(|data| data.get_temp::<dtool_design::NumericState>(id))
+                .filter(|state| state.scrubbing && state.previewed)
+                .map_or(NumericEvent::None, |state| NumericEvent::Preview(state.scrub)),
+            NumericEvent::Cancel => {
+                crate::app_canvas::clear_geometry_preview(ui);
+                NumericEvent::Cancel
+            }
+            event => event,
+        }
+    }).inner
 }
 
 pub fn right_aligned_mm(mm: f32) -> TabStop {
@@ -105,6 +118,8 @@ pub enum TabStopEditorAction {
     None,
     Changed,
     IntervalChanged,
+    PreviewTabs(Vec<TabStop>),
+    PreviewInterval(f32),
     Add,
     Delete,
 }
@@ -229,9 +244,20 @@ impl TabStopEditorState {
             }
         });
         if self.selected.is_some() {
-            if let Some(value) = length_edit(ui, "tabs.position", self.pos_mm) {
-                self.pos_mm = value.max(0.0);
-                action = TabStopEditorAction::Changed;
+            match length_edit(ui, "tabs.position", self.pos_mm, f64::from(DEFAULT_NEW_POS_MM)) {
+                NumericEvent::Commit(value) => {
+                    self.pos_mm = value.max(0.0);
+                    action = TabStopEditorAction::Changed;
+                }
+                NumericEvent::Preview(value) if action == TabStopEditorAction::None => {
+                    if let Some(index) = self.selected.filter(|index| *index < self.stops.len()) {
+                        let mut stops = self.stops.clone();
+                        stops[index].pos = mm_to_pt(value.max(0.0) as f32);
+                        stops.sort_by(|a, b| a.pos.total_cmp(&b.pos));
+                        action = TabStopEditorAction::PreviewTabs(stops);
+                    }
+                }
+                _ => {}
             }
             let align_changed = studio_row(ui, text("tabs.align"), |ui, label| {
                 dropdown(ui, "tabs.align", &mut self.align, &align_options).labelled_by(label).changed()
@@ -251,9 +277,16 @@ impl TabStopEditorState {
                 action = TabStopEditorAction::Changed;
             }
         }
-        if let Some(value) = length_edit(ui, "tabs.default_interval", self.default_interval_mm) {
-            self.default_interval_mm = if value > 0.0 { value } else { interval_mm(DEFAULT_INTERVAL_PT) };
-            action = TabStopEditorAction::IntervalChanged;
+        match length_edit(ui, "tabs.default_interval", self.default_interval_mm, interval_mm(DEFAULT_INTERVAL_PT)) {
+            NumericEvent::Commit(value) => {
+                self.default_interval_mm = if value > 0.0 { value } else { interval_mm(DEFAULT_INTERVAL_PT) };
+                action = TabStopEditorAction::IntervalChanged;
+            }
+            NumericEvent::Preview(value) if action == TabStopEditorAction::None => {
+                let pt = mm_to_pt(value as f32);
+                action = TabStopEditorAction::PreviewInterval(if pt > 0.0 && pt.is_finite() { pt } else { DEFAULT_INTERVAL_PT });
+            }
+            _ => {}
         }
 
         match action {
@@ -301,7 +334,8 @@ impl TabStopEditorState {
                 self.leader_char = ".".to_string();
                 self.from_right = false;
             }
-            TabStopEditorAction::None | TabStopEditorAction::IntervalChanged => {}
+            TabStopEditorAction::None | TabStopEditorAction::IntervalChanged
+            | TabStopEditorAction::PreviewTabs(_) | TabStopEditorAction::PreviewInterval(_) => {}
         }
         action
     }

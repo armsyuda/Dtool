@@ -19,10 +19,13 @@ fn scalar_with_rail(
         let id = ui.make_persistent_id(key);
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let spec = NumericSpec::new("").range(range).width(66.0);
+            let start = dtool_design::numeric_state(ui.ctx(), id).start;
             let (response, event) = dtool_design::numeric_field(ui, id, NumericValue::Value(*value), &spec);
             response.labelled_by(label);
-            if let NumericEvent::Commit(next) = event {
-                *value = next;
+            match event {
+                NumericEvent::Preview(next) | NumericEvent::Commit(next) => *value = next,
+                NumericEvent::Cancel if let Some(start) = start => *value = start,
+                _ => {}
             }
             let width = ui.available_width();
             if key == "fx.light_direction" && width >= 46.0 {

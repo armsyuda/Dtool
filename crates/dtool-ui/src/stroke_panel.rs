@@ -84,7 +84,9 @@ impl StrokePanel {
         dtool_design::panel_frame(ui, |ui| {
             dtool_design::panel_header(ui, text("panel.stroke.title"));
             ui.push_id(self.binding.as_ref().cloned(), |ui| {
-                ui.add_enabled_ui(enabled, |ui| self.draw_controls(ui, &selected, &ids, focus, units_per_point, &mut commands));
+                ui.add_enabled_ui(enabled, |ui| {
+                    self.draw_controls(ui, workspace.session(), &selected, &ids, focus, units_per_point, &mut commands)
+                });
             });
             if let Some(key) = &self.error_key {
                 ui.label(text(key));
@@ -113,11 +115,12 @@ impl StrokePanel {
         })
     }
 
-    fn draw_controls(&mut self, ui: &mut egui::Ui, selected: &[&Object], ids: &[u64], focus: Option<Focus>, units_per_point: f32, commands: &mut Vec<Command>) {
+    fn draw_controls(&mut self, ui: &mut egui::Ui, session: Option<&Session>, selected: &[&Object], ids: &[u64], focus: Option<Focus>, units_per_point: f32, commands: &mut Vec<Command>) {
         let strokes: Vec<_> = selected.iter().map(|object| {
             focus.and_then(|focus| focus.slot.stroke(object)).unwrap_or(&object.stroke)
         }).collect();
         let mut patch = json!({});
+        let mut preview = json!({});
         let stroke_command = |mut patch: Value, id: Option<u64>| {
             if let Some(focus) = focus {
                 return focus.slot.stroke_command(focus.node, patch);
@@ -184,9 +187,12 @@ impl StrokePanel {
                 let spec = NumericSpec::new("").range(1.0..=f64::from(f32::MAX)).width(52.0).decimals(2).enabled(ui.is_enabled());
                 let field = ui.make_persistent_id("miter_limit");
                 let (response, event) = dtool_design::numeric_field(ui, field, numeric_value(limit), &spec);
-                response.labelled_by(label).on_hover_text(text("stroke.join.miter_hint"));
+                response.labelled_by(label.id).on_hover_text(text("stroke.join.miter_hint"));
+                let event = reset_on_caption(ui, &label, event, 10.0);
                 if let NumericEvent::Commit(limit) = event {
                     patch["join"] = json!(Join::Miter { limit: limit as f32 });
+                } else if let Some(limit) = scrub_value(ui, field) {
+                    preview["join"] = json!(Join::Miter { limit: limit as f32 });
                 }
             });
         }
@@ -226,9 +232,12 @@ impl StrokePanel {
                 let spec = NumericSpec::new("").range(-limit..=limit).width(64.0).decimals(2).enabled(ui.is_enabled() && has_dashes);
                 let field = ui.make_persistent_id("dash_offset");
                 let (response, event) = dtool_design::numeric_field(ui, field, numeric_value(offset), &spec);
-                response.labelled_by(label);
+                response.labelled_by(label.id);
+                let event = if has_dashes { reset_on_caption(ui, &label, event, 0.0) } else { event };
                 if let NumericEvent::Commit(offset) = event {
                     patch["dash_offset"] = json!(offset);
+                } else if let Some(offset) = scrub_value(ui, field) {
+                    preview["dash_offset"] = json!(offset);
                 }
             });
         });
@@ -270,7 +279,17 @@ impl StrokePanel {
                 if let Some(parsed) = parsed { patch["pressure"] = json!(parsed); }
             }
         });
-        if let Some(((start, start_scale), (end, end_scale))) = arrows {
+        let mut preview_commands = Vec::new();
+        if let Some(((start, start_scale, start_preview), (end, end_scale, end_preview))) = arrows {
+            for (object, stroke) in selected.iter().zip(&strokes) {
+                let mut changes = json!({});
+                update_arrow(&mut changes, "start_arrow", &stroke.start_arrow, None, start_preview);
+                update_arrow(&mut changes, "end_arrow", &stroke.end_arrow, None, end_preview);
+                if changes != json!({}) {
+                    let command = stroke_command(changes, Some(object.id.0));
+                    preview_commands.push(command);
+                }
+            }
             if start.is_some() || start_scale.is_some() || end.is_some() || end_scale.is_some() {
                 for (object, stroke) in selected.iter().zip(&strokes) {
                     let mut arrows = json!({});
@@ -283,8 +302,19 @@ impl StrokePanel {
                 }
             }
         }
-        if patch.as_object().is_some_and(|fields| !fields.is_empty()) {
+        if patch != json!({}) {
             commands.push(stroke_command(patch, None));
+        }
+        if preview != json!({}) {
+            preview_commands.push(stroke_command(preview, None));
+        }
+        if let Some(session) = session {
+            match preview_commands.len() {
+                0 => {}
+                1 => crate::app_canvas::stage_geometry_preview(ui, session, preview_commands.remove(0)),
+                _ => crate::app_canvas::stage_geometry_preview(ui, session,
+                    Command::with_params("edit.batch", json!({"commands": preview_commands}))),
+            }
         }
     }
 
@@ -342,13 +372,23 @@ impl StrokePanel {
                 .width(field_width.min(stroke_available_width(ui))).suffix("pt").decimals(3).enabled(enabled);
             let shown = self.width_preview.or(committed).or(display);
             let (field, event) = dtool_design::numeric_field(ui, id, numeric_value(shown), &spec);
-            field.labelled_by(caption).on_hover_text(label);
-            if let NumericEvent::Commit(value) = event { committed = Some(value as f32); }
+            field.labelled_by(caption.id).on_hover_text(label);
+            match reset_on_caption(ui, &caption, event, 0.0) {
+                NumericEvent::Commit(value) => {
+                    self.width_preview = None;
+                    committed = Some(value as f32);
+                }
+                NumericEvent::Cancel => self.width_preview = None,
+                _ if self.width_rail_press != Some(true) => {
+                    self.width_preview = scrub_value(ui, id).map(|value| value as f32);
+                }
+                _ => {}
+            }
             committed.map(|value| value * units_per_point)
         })
     }
 
-    fn arrow_end(&self, ui: &mut egui::Ui, strokes: &[&StrokeStyle], start: bool) -> (Option<String>, Option<f32>) {
+    fn arrow_end(&self, ui: &mut egui::Ui, strokes: &[&StrokeStyle], start: bool) -> (Option<String>, Option<f32>, Option<f32>) {
         let key = if start { "stroke.arrow.start" } else { "stroke.arrow.end" };
         let scale_for = |stroke: &StrokeStyle| {
             let arrow = if start { &stroke.start_arrow } else { &stroke.end_arrow };
@@ -381,7 +421,7 @@ impl StrokePanel {
                             ui.close();
                         }
                     }
-                }).response.labelled_by(caption);
+                }).response.labelled_by(caption.id);
             if let Some(name) = current {
                 let at = egui::pos2(combo.rect.left() + 17.0, combo.rect.center().y);
                 paint_arrow_preview(ui.painter(), at, ui.style().interact(&combo).fg_stroke.color, &name, start);
@@ -390,13 +430,16 @@ impl StrokePanel {
             let spec = NumericSpec::new("").range(1.0..=f64::from(f32::MAX) * 100.0)
                 .width(58.0).suffix("%").decimals(1).enabled(scale_enabled);
             let value = scale.map_or(NumericValue::Mixed, NumericValue::Value);
-            let (field, event) = dtool_design::numeric_field(ui, ui.make_persistent_id((key, "scale")), value, &spec);
-            field.labelled_by(caption).on_hover_text(text("stroke.arrow.scale"));
+            let id = ui.make_persistent_id((key, "scale"));
+            let (field, event) = dtool_design::numeric_field(ui, id, value, &spec);
+            field.labelled_by(caption.id).on_hover_text(text("stroke.arrow.scale"));
+            let event = if scale_enabled { reset_on_caption(ui, &caption, event, 100.0) } else { event };
             let size = match event {
                 NumericEvent::Commit(percent) => Some((percent / 100.0) as f32),
                 _ => None,
             };
-            (picked, size)
+            let preview = scrub_value(ui, id).map(|percent| (percent / 100.0) as f32);
+            (picked, size, preview)
         })
     }
 
@@ -446,25 +489,39 @@ fn stroke_group_width(ui: &egui::Ui, button_width: f32, count: usize) -> f32 {
     button_width * count as f32 + ui.spacing().item_spacing.x * count.saturating_sub(1) as f32
 }
 
+fn scrub_value(ui: &egui::Ui, id: egui::Id) -> Option<f64> {
+    ui.data(|data| data.get_temp::<dtool_design::NumericState>(id))
+        .filter(|state| state.scrubbing && state.previewed)
+        .map(|state| state.scrub)
+}
+
+fn reset_on_caption(ui: &egui::Ui, caption: &egui::Response, event: NumericEvent, value: f64) -> NumericEvent {
+    if ui.is_enabled() && caption.double_clicked() {
+        NumericEvent::Commit(value)
+    } else {
+        event
+    }
+}
+
 fn stroke_row<R>(
     ui: &mut egui::Ui,
     label: &str,
     control_width: f32,
-    controls: impl FnOnce(&mut egui::Ui, egui::Id) -> R,
+    controls: impl FnOnce(&mut egui::Ui, egui::Response) -> R,
 ) -> R {
     let width = stroke_available_width(ui);
     let caption_width = if width < 184.0 { 48.0 } else { dtool_design::size("panel.label_width") };
     if width < caption_width + ui.spacing().item_spacing.x + control_width {
-        let caption = ui.label(label);
-        ui.horizontal(|ui| controls(ui, caption.id)).inner
+        let caption = ui.add(egui::Label::new(label).sense(egui::Sense::click()));
+        ui.horizontal(|ui| controls(ui, caption)).inner
     } else {
         ui.horizontal(|ui| {
             let caption = ui.allocate_ui_with_layout(
                 egui::vec2(caption_width, ui.spacing().interact_size.y),
                 egui::Layout::left_to_right(egui::Align::Center),
-                |ui| ui.add(egui::Label::new(label).truncate()),
+                |ui| ui.add(egui::Label::new(label).truncate().sense(egui::Sense::click())),
             ).inner;
-            controls(ui, caption.id)
+            controls(ui, caption)
         }).inner
     }
 }

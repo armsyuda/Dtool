@@ -145,6 +145,7 @@ pub struct ColourPanel {
     tint: Option<Tint>,
     channel_hue: f32,
     channel_edit: Option<ChannelEdit>,
+    drag: Option<ColourDrag>,
     picker: picker::Picker,
     icons: crate::icon_cache::IconCache,
 }
@@ -156,13 +157,23 @@ struct ChannelEdit {
     values: Vec<f32>,
 }
 
+#[derive(Clone, Debug)]
+struct ColourDrag {
+    colour: Colour,
+    channel_edit: Option<ChannelEdit>,
+    hue: f32,
+    tint: Option<Tint>,
+    pass: u64,
+    cancelled: bool,
+}
+
 impl Default for ColourPanel {
     fn default() -> Self {
         let colour = Colour::new(0, 0, 0, 255);
         let hex = hex_of(&colour);
         Self { target: ColourTarget::Fill, model: PanelModel::Hsl, colour, hex_input: hex.clone(), hex,
             error: None, proof: ProofState::default(), contrast: None, seen: None, seen_slot: None, seen_colour: None,
-            display: DisplayMode::Sliders, tint: None, channel_hue: 0.0, channel_edit: None,
+            display: DisplayMode::Sliders, tint: None, channel_hue: 0.0, channel_edit: None, drag: None,
             picker: picker::Picker::default(), icons: crate::icon_cache::IconCache::default() }
     }
 }
@@ -298,6 +309,7 @@ impl ColourPanel {
         if self.seen.as_ref() == Some(&key) && colour == self.seen_colour {
             return false;
         }
+        self.drag = None;
         if self.seen.as_ref().is_some_and(|old| old.0 != key.0 || old.2 != key.2 || old.3 != key.3) {
             self.tint = None;
             self.channel_edit = None;
@@ -793,10 +805,29 @@ impl ColourPanel {
 
     pub fn show(&mut self, ui: &mut egui::Ui, workspace: &mut Workspace) {
         self.sync(workspace);
+        let pass = ui.ctx().cumulative_pass_nr();
+        let (held, escape) = ui.input(|input| (input.pointer.primary_down(), input.key_pressed(egui::Key::Escape)));
+        if self.drag.as_ref().is_some_and(|drag| pass.saturating_sub(drag.pass) > 1)
+            && let Some(drag) = self.drag.take()
+        {
+            self.restore_drag(&drag);
+        }
         let recent = if workspace.session().is_some() { self.recent(workspace) } else { Vec::new() };
         let editable = workspace.session().is_none_or(|session| session.selection.ids.iter().all(|id| {
             session.document.get_object(*id).is_some_and(|object| !object.locked)
         }));
+        let preview_selection = workspace.session().is_some_and(|session| {
+            !session.selection.ids.is_empty()
+                && (self.target != ColourTarget::Fill || Self::brush_colour(session).is_none())
+        });
+        let baseline = (preview_selection && held && self.drag.is_none()).then(|| ColourDrag {
+            colour: self.colour,
+            channel_edit: self.channel_edit.clone(),
+            hue: self.channel_hue,
+            tint: self.tint.clone(),
+            pass,
+            cancelled: false,
+        });
         let mut paint_action = (None, false, false);
         let mut changed = false;
         let mut proof = None;
@@ -807,7 +838,7 @@ impl ColourPanel {
             let dock_height = dtool_design::in_studio(ui).then(|| ui.clip_rect().height());
             let width = ui.available_width().min(ui.clip_rect().width());
             let compact = dock_height.is_some_and(|height| height < 160.0);
-            let inline_opacity = dock_height.is_some_and(|height| height < 225.0) && width >= 260.0;
+            let inline_opacity = dock_height.is_some_and(|height| height < 225.0) && width >= 230.0;
             if dock_height.is_some_and(|height| height < 225.0) {
                 ui.spacing_mut().item_spacing.y = 2.0;
             }
@@ -872,7 +903,25 @@ impl ColourPanel {
         if let Some(command) = proof {
             self.run(workspace, command);
         }
-        if changed {
+        if changed && self.drag.is_none() {
+            self.drag = baseline;
+        }
+        if let Some(mut drag) = self.drag.take() {
+            drag.pass = pass;
+            drag.cancelled |= escape || !editable || !preview_selection;
+            if drag.cancelled {
+                self.restore_drag(&drag);
+            } else if held {
+                if let Some(session) = workspace.session()
+                    && let Some(command) = self.apply_command(workspace)
+                {
+                    crate::app_canvas::stage_geometry_preview(ui, session, command);
+                }
+            } else {
+                self.apply_paint(workspace, Paint::Solid { colour: self.colour });
+            }
+            if held { self.drag = Some(drag); }
+        } else if changed {
             self.apply_paint(workspace, Paint::Solid { colour: self.colour });
         }
         let (next_target, swap, clear) = paint_action;
@@ -884,6 +933,14 @@ impl ColourPanel {
         self.contrast = self.contrast_command(workspace)
             .and_then(|command| workspace.run(Scope::active(), command).1.ok())
             .and_then(|reply| reply["ratio"].as_f64());
+    }
+
+    fn restore_drag(&mut self, drag: &ColourDrag) {
+        self.set_colour(drag.colour);
+        self.channel_edit = drag.channel_edit.clone();
+        self.channel_hue = drag.hue;
+        self.tint = drag.tint.clone();
+        self.picker.cancel();
     }
 
     fn edit_colour(&mut self, ui: &mut egui::Ui, recent: &[Colour], picker_height: f32, compact: bool, show_opacity: bool) -> bool {
@@ -928,7 +985,7 @@ impl ColourPanel {
         }
         let Some(tint) = &mut self.tint else { return false };
         let colours = [egui::Color32::WHITE, egui::Color32::from_rgb(tint.base.r, tint.base.g, tint.base.b)];
-        let changed = channel_slider(ui, "T", "colour.tint", &mut tint.amount, 0.0..=100.0, &colours);
+        let changed = channel_slider(ui, "T", "colour.tint", &mut tint.amount, 0.0..=100.0, &colours, Some(100.0));
         if changed {
             let component = |value: u8| egui::lerp(255.0..=f32::from(value), tint.amount / 100.0).round() as u8;
             let result = Colour::new(component(tint.base.r), component(tint.base.g), component(tint.base.b), current.a);
@@ -941,18 +998,22 @@ impl ColourPanel {
     fn edit_opacity(&mut self, ui: &mut egui::Ui, inline: bool) -> bool {
         let mut alpha = f32::from(self.colour.a) / 255.0 * 100.0;
         let opacity_label = format!("{} %", text("context.brush.opacity"));
-        let changed = if inline {
-            let label = ui.label("%").on_hover_text(&opacity_label);
-            dtool_design::slider(ui, &mut alpha, 0.0..=100.0, "")
-                .labelled_by(label.id).on_hover_text(&opacity_label).changed()
+        let (changed, reset) = if inline {
+            let label = ui.add(egui::Label::new("%").sense(egui::Sense::click())).on_hover_text(&opacity_label);
+            let response = dtool_design::slider(ui, &mut alpha, 0.0..=100.0, "")
+                .labelled_by(label.id).on_hover_text(&opacity_label);
+            (response.changed(), label.double_clicked())
         } else {
-            ui.label(&opacity_label);
-            ui.horizontal(|ui| dtool_design::slider(ui, &mut alpha, 0.0..=100.0, "")).inner.changed()
+            let label = ui.add(egui::Label::new(&opacity_label).sense(egui::Sense::click()));
+            let response = ui.horizontal(|ui| dtool_design::slider(ui, &mut alpha, 0.0..=100.0, "")).inner;
+            (response.labelled_by(label.id).changed(), label.double_clicked())
         };
-        if changed {
+        if reset {
+            self.set_alpha(255);
+        } else if changed {
             self.set_alpha((alpha / 100.0 * 255.0).round() as u8);
         }
-        changed
+        changed || reset
     }
 
     fn edit_hex(&mut self, ui: &mut egui::Ui) -> bool {
@@ -985,6 +1046,25 @@ impl ColourPanel {
         });
     }
 
+    pub(crate) fn context_editor() -> Self {
+        Self { model: PanelModel::Rgb, ..Self::default() }
+    }
+
+    pub(crate) fn edit_context_colour(&mut self, ui: &mut egui::Ui, colour: &mut Colour) -> bool {
+        if self.colour != *colour {
+            self.set_colour(*colour);
+        }
+        ui.horizontal(|ui| {
+            self.choose_model(ui);
+            self.edit_hex(ui);
+        });
+        self.edit_channels(ui);
+        self.edit_opacity(ui, false);
+        if self.colour == *colour { return false; }
+        *colour = self.colour;
+        true
+    }
+
     fn edit_channels(&mut self, ui: &mut egui::Ui) -> bool {
         match self.model_values() {
             Ok(mut values) => {
@@ -1002,7 +1082,7 @@ impl ColourPanel {
                         egui::Color32::from_rgb(colour.r, colour.g, colour.b)
                     }).collect();
                     edited |= ui.push_id((self.model.label(), channel), |ui| {
-                        channel_slider(ui, name, "colour.channel", &mut values[channel], lo..=hi, &colours)
+                        channel_slider(ui, name, "colour.channel", &mut values[channel], lo..=hi, &colours, None)
                     }).inner;
                 }
                 let applied = edited && self.set_model_values(&values).is_ok();
@@ -1056,9 +1136,11 @@ fn channel_slider(
     value: &mut f32,
     range: std::ops::RangeInclusive<f32>,
     colours: &[egui::Color32],
+    reset: Option<f32>,
 ) -> bool {
     ui.horizontal(|ui| {
-        let label = ui.add_sized([16.0, ui.spacing().interact_size.y], egui::Label::new(name));
+        let sense = if reset.is_some() { egui::Sense::click() } else { egui::Sense::hover() };
+        let label = ui.add_sized([16.0, ui.spacing().interact_size.y], egui::Label::new(name).sense(sense));
         let available = ui.available_width().min(ui.clip_rect().right() - ui.cursor().min.x).max(0.0);
         let numeric_width = available.min(if available < 100.0 { 44.0 } else { 48.0 });
         let slider_width = available - numeric_width - ui.spacing().item_spacing.x;
@@ -1089,7 +1171,10 @@ fn channel_slider(
             ui, ui.make_persistent_id(id), NumericValue::Value(f64::from(*value)), &spec,
         );
         field.labelled_by(label.id);
-        if let NumericEvent::Preview(number) | NumericEvent::Commit(number) = event {
+        if let Some(reset) = reset.filter(|_| label.double_clicked()) {
+            *value = reset;
+            changed = true;
+        } else if let NumericEvent::Preview(number) | NumericEvent::Commit(number) = event {
             *value = number as f32;
             changed = true;
         }

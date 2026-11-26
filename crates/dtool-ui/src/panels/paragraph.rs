@@ -178,7 +178,7 @@ pub fn mixed_fields(session: &mut Session) -> Vec<&'static str> {
     })).collect()
 }
 
-fn apply_detail(session: &mut Session, section: &str, field: &str, value: Value) -> Result<Value, CommandError> {
+fn detail_command(session: &Session, section: &str, field: &str, value: Value) -> Result<Option<Command>, CommandError> {
     let mut commands = Vec::new();
     for (story, ranges) in target_paragraphs(session) {
         for [start, end] in ranges {
@@ -214,13 +214,10 @@ fn apply_detail(session: &mut Session, section: &str, field: &str, value: Value)
             }
         }
     }
-    match super::character::batched(commands) {
-        Some(command) => session.run(&command),
-        None => Ok(Value::Null),
-    }
+    Ok(super::character::batched(commands))
 }
 
-fn apply_list_edit(session: &mut Session, edit: ListEdit) -> Result<Value, CommandError> {
+fn list_command(session: &Session, edit: ListEdit) -> Option<Command> {
     let mut commands = Vec::new();
     for (story, ranges) in target_paragraphs(session) {
         for [start, end] in ranges {
@@ -262,10 +259,7 @@ fn apply_list_edit(session: &mut Session, edit: ListEdit) -> Result<Value, Comma
             if matches!(edit, ListEdit::Restart(_)) { break; }
         }
     }
-    match super::character::batched(commands) {
-        Some(command) => session.run(&command),
-        None => Ok(Value::Null),
-    }
+    super::character::batched(commands)
 }
 
 fn first_number_start(session: &Session) -> u32 {
@@ -303,13 +297,13 @@ fn paragraph_field<R>(
     ui: &mut egui::Ui,
     label: &str,
     control_width: f32,
-    control: impl FnOnce(&mut egui::Ui, egui::Id) -> R,
+    control: impl FnOnce(&mut egui::Ui, egui::Response) -> R,
 ) -> R {
     let width = panel_width(ui);
     let caption_width = (width - control_width - ui.spacing().item_spacing.x).min(110.0);
     if caption_width < 48.0 {
-        let caption = ui.label(label);
-        control(ui, caption.id)
+        let caption = ui.add(egui::Label::new(label).sense(egui::Sense::click()));
+        control(ui, caption)
     } else {
         ui.horizontal(|ui| {
             let caption = ui.allocate_ui_with_layout(
@@ -317,37 +311,49 @@ fn paragraph_field<R>(
                 egui::Layout::left_to_right(egui::Align::Center),
                 |ui| {
                     ui.set_min_width(caption_width);
-                    ui.add(egui::Label::new(label).truncate())
+                    ui.add(egui::Label::new(label).truncate().sense(egui::Sense::click()))
                 },
             ).inner;
-            control(ui, caption.id)
+            control(ui, caption)
         }).inner
     }
 }
 
-fn number(ui: &mut egui::Ui, key: &str, field: &'static str, value: f32, mixed: &[&'static str], drag: &mut Option<(&'static str, f32)>, units: Option<Units>) -> Option<f32> {
+fn number(ui: &mut egui::Ui, key: &str, field: &'static str, (value, default): (f32, f32), mixed: &[&'static str], drag: &mut Option<(&'static str, f32)>, units: Option<Units>) -> Option<f32> {
     let label = label_for(key, field, mixed);
     let width = 62.0;
     paragraph_field(ui, text(key), width, |ui, caption| {
         let mut spec = NumericSpec::new("").width(width.min(panel_width(ui))).enabled(ui.is_enabled());
+        if field == "leading" {
+            spec = spec.step(0.05).range(0.01..=f64::INFINITY);
+        }
         if let Some(units) = units {
             spec = spec.suffix(dtool_core::commands::ruler_units::suffix(units));
         }
         let id = ui.make_persistent_id(field);
-        let display = if mixed.contains(&field) { NumericValue::Mixed } else { NumericValue::Value(value.into()) };
+        let mixed = mixed.contains(&field);
+        let display = if mixed { NumericValue::Mixed } else { NumericValue::Value(value.into()) };
         let (response, event) = numeric_field(ui, id, display, &spec);
-        let response = response.labelled_by(caption).on_hover_text(label);
+        response.labelled_by(caption.id).on_hover_text(label);
+        if ui.is_enabled() && caption.double_clicked() {
+            return (mixed || default != value).then_some(default);
+        }
         match event {
-            NumericEvent::Preview(edited) => drag_commit(drag, field, edited as f32, response.changed(), true, false),
-            NumericEvent::Commit(edited) => {
-                *drag = None;
-                response.changed().then_some(edited as f32)
+            NumericEvent::Commit(edited) => (mixed || edited as f32 != value).then_some(edited as f32),
+            NumericEvent::Preview(edited) => {
+                *drag = Some((field, edited as f32));
+                Some(edited as f32)
+            }
+            NumericEvent::None => {
+                let state = ui.data(|data| data.get_temp::<dtool_design::NumericState>(id))?;
+                if !state.scrubbing || !state.previewed { return None; }
+                *drag = Some((field, state.scrub as f32));
+                Some(state.scrub as f32)
             }
             NumericEvent::Cancel => {
-                *drag = None;
+                crate::app_canvas::clear_geometry_preview(ui);
                 None
             }
-            NumericEvent::None => None,
         }
     })
 }
@@ -360,7 +366,7 @@ fn choice<T: PartialEq + Clone>(ui: &mut egui::Ui, id: &str, options: &[(T, &str
             ui.spacing_mut().combo_width = panel_width(ui).min(width);
             let state = dtool_design::ControlState::default().mixed(mixed);
             dtool_design::dropdown_value(ui, id, &mut current, &labels, &state)
-                .labelled_by(caption).changed().then_some(current)
+                .labelled_by(caption.id).changed().then_some(current)
         }).inner
     })
 }
@@ -393,14 +399,30 @@ impl ParagraphPanel {
         let Some(session) = workspace.session_mut() else { return; };
         let start_at = first_number_start(session);
         let styles = session.document.text_styles.names(dtool_core::text_styles::StyleKind::Character);
-        let end_chars_id = ui.make_persistent_id(("initial_words.end_chars", document, active_ranges(session)));
-        if let Some(edit) = self.edits(ui, session.document.units, session.document.dpi, start_at, &styles, end_chars_id) {
-            let result = match edit {
-                ParagraphEdit::Style(patch) => apply_patch(session, patch),
-                ParagraphEdit::List(edit) => apply_list_edit(session, edit),
-                ParagraphEdit::Detail { section, field, value } => apply_detail(session, section, field, value),
+        let ranges = active_ranges(session);
+        let edit = ui.push_id((document, session.generation, &ranges), |ui| {
+            let end_chars_id = ui.make_persistent_id("initial_words.end_chars");
+            self.edits(ui, session.document.units, session.document.dpi, start_at, &styles, end_chars_id)
+        }).inner;
+        if let Some(edit) = edit {
+            let command = match edit {
+                ParagraphEdit::Style(patch) => Ok(patch_command(&ranges, patch)),
+                ParagraphEdit::List(edit) => Ok(list_command(session, edit)),
+                ParagraphEdit::Detail { section, field, value } => detail_command(session, section, field, value),
             };
-            self.error = result.err().map(|error| text(&error.message_key).to_string());
+            let result = command.and_then(|command| {
+                if let Some(command) = command {
+                    if self.drag.is_some() {
+                        crate::app_canvas::stage_geometry_preview(ui, session, command);
+                    } else {
+                        session.run(&command)?;
+                    }
+                }
+                Ok(())
+            });
+            if self.drag.is_none() {
+                self.error = result.err().map(|error| text(&error.message_key).to_string());
+            }
         }
         if let Some(message) = &self.error {
             ui.label(message.as_str());
@@ -409,6 +431,8 @@ impl ParagraphPanel {
 
     fn edits(&mut self, ui: &mut egui::Ui, units: Units, dpi: f32, start_at: u32, styles: &[String], end_chars_id: egui::Id) -> Option<ParagraphEdit> {
         let style = self.style.clone();
+        let defaults = ParaStyle::default();
+        self.drag = None;
         let mut patch = None;
         let mut set = |key: &str, value: Value| {
             patch = Some(json!({ key: value }));
@@ -426,13 +450,14 @@ impl ParagraphPanel {
                 detail_edit = Some(ParagraphEdit::Detail { section: "justification", field: "enabled", value: json!(enabled) });
             }
             ui.add_enabled_ui(enabled, |ui| {
+                let reset = defaults.justification;
                 for (id, field, value) in [
-                    ("justification.word_min", "word_min", options.word_min),
-                    ("justification.word_ideal", "word_ideal", options.word_ideal),
-                    ("justification.word_max", "word_max", options.word_max),
-                    ("justification.letter_min", "letter_min", options.letter_min),
-                    ("justification.letter_ideal", "letter_ideal", options.letter_ideal),
-                    ("justification.letter_max", "letter_max", options.letter_max),
+                    ("justification.word_min", "word_min", (options.word_min, reset.word_min)),
+                    ("justification.word_ideal", "word_ideal", (options.word_ideal, reset.word_ideal)),
+                    ("justification.word_max", "word_max", (options.word_max, reset.word_max)),
+                    ("justification.letter_min", "letter_min", (options.letter_min, reset.letter_min)),
+                    ("justification.letter_ideal", "letter_ideal", (options.letter_ideal, reset.letter_ideal)),
+                    ("justification.letter_max", "letter_max", (options.letter_max, reset.letter_max)),
                 ] {
                     let label = format!("para.{id}");
                     if let Some(value) = number(ui, &label, id, value, &self.mixed, &mut self.drag, None) {
@@ -441,12 +466,12 @@ impl ParagraphPanel {
                 }
             });
         });
-        for (key, field, value) in [
-            ("para.indent.left", "indent_left", style.indent_left),
-            ("para.indent.right", "indent_right", style.indent_right),
-            ("para.indent.first", "indent_first", style.indent_first),
+        for (key, field, value, default) in [
+            ("para.indent.left", "indent_left", style.indent_left, defaults.indent_left),
+            ("para.indent.right", "indent_right", style.indent_right, defaults.indent_right),
+            ("para.indent.first", "indent_first", style.indent_first, defaults.indent_first),
         ] {
-            if let Some(value) = number(ui, key, field, value * indent_scale, &self.mixed, &mut self.drag, Some(units)) {
+            if let Some(value) = number(ui, key, field, (value * indent_scale, default * indent_scale), &self.mixed, &mut self.drag, Some(units)) {
                 set(field, json!(value / indent_scale));
             }
         }
@@ -459,14 +484,14 @@ impl ParagraphPanel {
                 set("baseline_grid", json!(mixed || !style.baseline_grid));
             }
         });
-        if let Some(value) = number(ui, "para.leading", "leading", style.leading, &self.mixed, &mut self.drag, None) {
+        if let Some(value) = number(ui, "para.leading", "leading", (style.leading, defaults.leading), &self.mixed, &mut self.drag, None) {
             if value > 0.0 {
                 set("leading", json!(value));
             }
         }
         for (key, field, value) in [
-            ("para.space.before", "space_before", style.space_before),
-            ("para.space.after", "space_after", style.space_after),
+            ("para.space.before", "space_before", (style.space_before, defaults.space_before)),
+            ("para.space.after", "space_after", (style.space_after, defaults.space_after)),
         ] {
             if let Some(value) = number(ui, key, field, value, &self.mixed, &mut self.drag, Some(Units::Pt)) {
                 set(field, json!(value.max(0.0)));
@@ -494,7 +519,7 @@ impl ParagraphPanel {
                 }
             }
             if let Some(value) = number(ui, "para.keep.with.next", "keep_with_next",
-                style.keep_with_next as f32, &self.mixed, &mut self.drag, None)
+                (style.keep_with_next as f32, defaults.keep_with_next as f32), &self.mixed, &mut self.drag, None)
             {
                 set("keep_with_next", json!(value.round().clamp(0.0, 9.0) as u32));
             }
@@ -506,13 +531,14 @@ impl ParagraphPanel {
                 detail_edit = Some(ParagraphEdit::Detail { section: "hyphenation", field: "on", value: json!(enabled) });
             }
             ui.add_enabled_ui(enabled, |ui| {
-                for (key, id, field, value, min) in [
-                    ("para.hyphen.min.word", "hyphenation.min_word", "min_word", hyphen.min_word, 2.0),
-                    ("para.hyphen.min.prefix", "hyphenation.min_prefix", "min_prefix", hyphen.min_prefix, 1.0),
-                    ("para.hyphen.min.suffix", "hyphenation.min_suffix", "min_suffix", hyphen.min_suffix, 1.0),
-                    ("para.hyphen.max.consecutive", "hyphenation.max_consecutive", "max_consecutive", hyphen.max_consecutive, 0.0),
+                let reset = &defaults.hyphenation;
+                for (key, id, field, value, default, min) in [
+                    ("para.hyphen.min.word", "hyphenation.min_word", "min_word", hyphen.min_word, reset.min_word, 2.0),
+                    ("para.hyphen.min.prefix", "hyphenation.min_prefix", "min_prefix", hyphen.min_prefix, reset.min_prefix, 1.0),
+                    ("para.hyphen.min.suffix", "hyphenation.min_suffix", "min_suffix", hyphen.min_suffix, reset.min_suffix, 1.0),
+                    ("para.hyphen.max.consecutive", "hyphenation.max_consecutive", "max_consecutive", hyphen.max_consecutive, reset.max_consecutive, 0.0),
                 ] {
-                    if let Some(value) = number(ui, key, id, value as f32, &self.mixed, &mut self.drag, None) {
+                    if let Some(value) = number(ui, key, id, (value as f32, default as f32), &self.mixed, &mut self.drag, None) {
                         detail_edit = Some(ParagraphEdit::Detail {
                             section: "hyphenation", field, value: json!(value.round().max(min) as u32),
                         });
@@ -524,8 +550,9 @@ impl ParagraphPanel {
                 } else {
                     ("para.hyphen.zone_percent", hyphen.zone * 100.0, None)
                 };
-                if let Some(value) = number(ui, key, "hyphenation.zone", value, &self.mixed, &mut self.drag, unit) {
-                    let zone = if absolute { value.max(1.0) } else { value.clamp(0.0, 99.0) / 100.0 };
+                let default = if absolute { reset.zone } else { reset.zone * 100.0 };
+                if let Some(value) = number(ui, key, "hyphenation.zone", (value, default), &self.mixed, &mut self.drag, unit) {
+                    let zone = if absolute { value.max(0.0) } else { value.clamp(0.0, 99.0) / 100.0 };
                     detail_edit = Some(ParagraphEdit::Detail { section: "hyphenation", field: "zone", value: json!(zone) });
                 }
             });
@@ -537,17 +564,20 @@ impl ParagraphPanel {
                 detail_edit = Some(ParagraphEdit::Detail { section: "drop_cap", field: "on", value: json!(enabled) });
             }
             ui.add_enabled_ui(enabled, |ui| {
-                for (key, id, field, value) in [
-                    ("para.drop.lines", "drop_cap.lines", "lines", cap.lines),
-                    ("para.drop.chars", "drop_cap.chars", "chars", cap.chars),
+                let reset = &defaults.drop_cap;
+                for (key, id, field, value, default) in [
+                    ("para.drop.lines", "drop_cap.lines", "lines", cap.lines, reset.lines),
+                    ("para.drop.chars", "drop_cap.chars", "chars", cap.chars, reset.chars),
                 ] {
-                    if let Some(value) = number(ui, key, id, value as f32, &self.mixed, &mut self.drag, None) {
+                    if let Some(value) = number(ui, key, id, (value as f32, default as f32), &self.mixed, &mut self.drag, None) {
                         detail_edit = Some(ParagraphEdit::Detail {
                             section: "drop_cap", field, value: json!(value.round().max(1.0) as u32),
                         });
                     }
                 }
-                if let Some(value) = number(ui, "para.drop.distance", "drop_cap.distance", cap.distance * indent_scale, &self.mixed, &mut self.drag, Some(units)) {
+                if let Some(value) = number(ui, "para.drop.distance", "drop_cap.distance",
+                    (cap.distance * indent_scale, reset.distance * indent_scale), &self.mixed, &mut self.drag, Some(units))
+                {
                     detail_edit = Some(ParagraphEdit::Detail {
                         section: "drop_cap", field: "distance", value: json!(value.max(0.0) / indent_scale),
                     });
@@ -566,6 +596,14 @@ impl ParagraphPanel {
         use tab_stop_editor::TabStopEditorAction;
         match self.tab_editor.show(ui) {
             TabStopEditorAction::None => {}
+            TabStopEditorAction::PreviewTabs(tabs) => {
+                self.drag = Some(("tabs", 0.0));
+                patch = Some(json!({ "tabs": tabs }));
+            }
+            TabStopEditorAction::PreviewInterval(interval) => {
+                self.drag = Some(("default_tab_interval", interval));
+                patch = Some(json!({ "default_tab_interval": interval }));
+            }
             TabStopEditorAction::IntervalChanged => patch = Some(json!({
                 "default_tab_interval": self.tab_editor.default_interval_pt(),
             })),
@@ -640,11 +678,12 @@ impl ParagraphPanel {
                 }
                 if let Some(fill) = &mut decoration.fill { changed |= colour(ui, fill); }
             });
-            for (label, key, field) in [
-                ("para.decorations.width", "paragraph_decoration.width", &mut decoration.width),
-                ("para.decorations.padding", "paragraph_decoration.padding", &mut decoration.padding),
+            let defaults = ParagraphDecoration::default();
+            for (label, key, field, default) in [
+                ("para.decorations.width", "paragraph_decoration.width", &mut decoration.width, defaults.width),
+                ("para.decorations.padding", "paragraph_decoration.padding", &mut decoration.padding, defaults.padding),
             ] {
-                if let Some(value) = number(ui, label, key, *field * scale, &[], &mut self.drag, Some(units)) {
+                if let Some(value) = number(ui, label, key, (*field * scale, default * scale), &[], &mut self.drag, Some(units)) {
                     *field = value.max(0.0) / scale;
                     changed = true;
                 }
@@ -665,7 +704,8 @@ impl ParagraphPanel {
             }
             ui.add_enabled_ui(enabled, |ui| {
                 if let Some(value) = number(ui, "para.initial.max_words", "initial_words.max_words",
-                    options.max_words as f32, &self.mixed, &mut self.drag, None)
+                    (options.max_words as f32, dtool_tools::dtool_text::para_style::InitialWords::default().max_words as f32),
+                    &self.mixed, &mut self.drag, None)
                 {
                     set("max_words", json!(value.round().clamp(1.0, 999.0) as u32));
                 }
@@ -747,10 +787,11 @@ impl ParagraphPanel {
             });
         }
         if matches!(mode, Some(ListMode::Bullet | ListMode::Number)) {
-            if let Some(level) = number(ui, "para.list.level", "list.level", list.level as f32, &self.mixed, &mut self.drag, None) {
+            let defaults = ListProps::default();
+            if let Some(level) = number(ui, "para.list.level", "list.level", (list.level as f32, defaults.level as f32), &self.mixed, &mut self.drag, None) {
                 edit = Some(ListEdit::Level(level.round().clamp(1.0, 9.0) as u32));
             }
-            if let Some(tab) = number(ui, "para.list.tab", "list.tab", list.tab_step() * scale, &self.mixed, &mut self.drag, Some(units)) {
+            if let Some(tab) = number(ui, "para.list.tab", "list.tab", (list.tab_step() * scale, defaults.tab_step() * scale), &self.mixed, &mut self.drag, Some(units)) {
                 edit = Some(ListEdit::Tab(tab.max(0.0) / scale));
             }
         }
@@ -759,7 +800,7 @@ impl ParagraphPanel {
                 if let Some(format) = choice(ui, "para.list.format", &NUMBER_FORMATS, format.clone(), self.mixed.contains(&"list.kind")) {
                     edit = Some(ListEdit::Format(format));
                 }
-                if let Some(start) = number(ui, "para.list.start", "list.start_at", start_at as f32, &[], &mut self.drag, None) {
+                if let Some(start) = number(ui, "para.list.start", "list.start_at", (start_at as f32, 1.0), &[], &mut self.drag, None) {
                     edit = Some(ListEdit::Restart(start.round().clamp(1.0, 99999.0) as u32));
                 }
                 ui.horizontal_wrapped(|ui| {

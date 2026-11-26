@@ -277,6 +277,9 @@ pub struct AppShell {
     presented_dock_sizes: std::collections::BTreeMap<&'static str, (Option<f32>, f32)>,
     pub wells: crate::fill_stroke::FillStrokeWells,
     wells_stamp: Option<(ContextId, u64, u64, Vec<u64>)>,
+    context_paint_anchor: Option<egui::Pos2>,
+    context_paint_tab: usize,
+    context_paint_colour: crate::panels::colour::ColourPanel,
     pub text_bar: crate::context::text_bar::TextBarState,
     pub picture_frame_bar: crate::picture_frame_bar::PictureFrameBar,
     text_bar_stamp: Option<TextBarStamp>,
@@ -442,6 +445,9 @@ impl AppShell {
             presented_dock_sizes: Default::default(),
             wells: Default::default(),
             wells_stamp: None,
+            context_paint_anchor: None,
+            context_paint_tab: 1,
+            context_paint_colour: crate::panels::colour::ColourPanel::context_editor(),
             text_bar: Default::default(),
             picture_frame_bar: Default::default(),
             text_bar_stamp: None,
@@ -730,7 +736,10 @@ impl AppShell {
 
     pub fn show_context_region(&mut self, ui: &mut egui::Ui) {
         self.show_align_popup(ui.ctx());
-        if !self.context_toolbar_visible() { return; }
+        if !self.context_toolbar_visible() {
+            self.clear_text_number_preview();
+            return;
+        }
         let current = self.context_bar_stamp();
         let has_model = self.context_bar_model().is_some();
         use crate::canvas_input::{tool_kind, ToolKind};
@@ -741,12 +750,17 @@ impl AppShell {
         let show_frame = self.refresh_picture_frame_bar();
         let show_node = self.workspace.session().is_some_and(|session| session.active_tool == "tool.node");
         let show_move_paint = self.workspace.session().is_some_and(|session| {
-            tool_kind(&session.active_tool) == ToolKind::Move && !session.selection.ids.is_empty()
+            matches!(tool_kind(&session.active_tool), ToolKind::Move | ToolKind::ArtText | ToolKind::FrameText | ToolKind::Shape(_))
+                && !session.selection.ids.is_empty()
         });
-        if show_node || show_move_paint { self.refresh_wells(); }
+        if show_node || show_move_paint || self.wells.active_popup.is_some() { self.refresh_wells(); }
         let mut context_paint = None;
-        if !show_text && self.font_preview.is_some() {
-            let _ = self.font_preview_hover(None);
+        let mut context_stroke = None;
+        if !show_text {
+            self.clear_text_number_preview();
+            if self.font_preview.is_some() {
+                let _ = self.font_preview_hover(None);
+            }
         }
         let mut picked = None;
         let style_picker_loaded = self.app_canvas.input.style_picker_loaded();
@@ -792,6 +806,11 @@ impl AppShell {
                         session.document.get_object(*id).is_some_and(|object| !object.locked)
                     });
                     context_paint = crate::context_bar::show_paint_wells(ui, session, &self.wells, can_paint);
+                    if session.selection.ids.iter().any(|id| session.document.get_object(*id)
+                        .is_some_and(|object| matches!(object.kind, dtool_core::ObjectKind::Shape | dtool_core::ObjectKind::Curve(_) | dtool_core::ObjectKind::Compound(_))))
+                    {
+                        context_stroke = crate::context_bar::show_stroke_controls(ui, session);
+                    }
                     ui.separator();
                 }
                 if let Some(session) = self.workspace.session().filter(|session| session.active_tool == "tool.blend") {
@@ -889,8 +908,11 @@ impl AppShell {
                 });
             }));
         self.toolbar_customisation_menu(ui, context_bar.response.rect, "context");
-        if let Some(role) = context_paint {
+        if let Some((role, anchor)) = context_paint {
             self.apply_tool_colour_action(crate::panels::colour::ToolColourAction::Edit(role));
+            self.context_paint_anchor = Some(anchor);
+            self.context_paint_tab = 1;
+            self.context_paint_colour = crate::panels::colour::ColourPanel::context_editor();
         }
         if unload_style {
             self.app_canvas.input.clear_style_picker();
@@ -921,7 +943,7 @@ impl AppShell {
         if let Some(command) = qr_action.or(corner_action).or(blend_action).or(measure_action).or(warp_action).or(brush_action) {
             if let Err(error) = self.run_and_reconcile(command) { self.status_bar.set_hint_key(&error.message_key); }
         }
-        if let Some(command) = gradient_action.or(picked) {
+        if let Some(command) = context_stroke.or(gradient_action).or(picked) {
             let tracks_zoom = command.name == crate::context_bar::OPTION_SET && command.params["id"] == "zoom.level";
             let previous_zoom = tracks_zoom.then(|| self.workspace.session().map(|session| session.view.zoom)).flatten();
             match self.apply_context_pick(command) {
@@ -938,6 +960,7 @@ impl AppShell {
         let Some(id) = self.workspace.active() else {
             self.text_bar = Default::default();
             self.text_bar_stamp = None;
+            self.clear_text_number_preview();
             if self.font_preview.take().is_some() {
                 dtool_tools::dtool_text::font_preview::cancel_font_preview();
             }
@@ -958,8 +981,13 @@ impl AppShell {
             let state = crate::context::text_bar::TextBarState::load(session).unwrap_or_default();
             let changed_target = self.text_bar.targets != state.targets
                 || self.text_bar_stamp.as_ref().is_some_and(|old| old.0 != id);
-            if changed_target && self.font_preview.take().is_some() {
-                dtool_tools::dtool_text::font_preview::cancel_font_preview();
+            if changed_target {
+                if dtool_tools::dtool_text::font_preview::cancel_style_preview() {
+                    self.app_canvas.invalidate();
+                }
+                if self.font_preview.take().is_some() {
+                    dtool_tools::dtool_text::font_preview::cancel_font_preview();
+                }
             }
             self.text_bar = state;
             self.text_bar_stamp = Some(stamp);
@@ -1003,6 +1031,12 @@ impl AppShell {
         result.map(|_| true)
     }
 
+    fn clear_text_number_preview(&mut self) {
+        if dtool_tools::dtool_text::font_preview::cancel_style_preview() {
+            self.app_canvas.invalidate();
+        }
+    }
+
     fn show_text_controls(
         &mut self,
         ui: &mut egui::Ui,
@@ -1022,10 +1056,26 @@ impl AppShell {
                 self.status_bar.set_hint_key(&error.message_key);
             }
         }
-        if let Some(edit) = edit {
-            if let Err(error) = self.text_bar_edit(&edit) {
-                self.status_bar.set_hint_key(&error.message_key);
+        use crate::context::text_bar::TextBarEdit;
+        use dtool_tools::dtool_text::font_preview::set_style_preview;
+        match edit {
+            Some(TextBarEdit::PreviewNumber(edit)) => {
+                if let (Some(session), Some(command)) = (self.workspace.session(), self.text_bar.command(&edit)) {
+                    match set_style_preview(&session.document, &command) {
+                        Ok(()) => self.app_canvas.invalidate(),
+                        Err(error) => self.status_bar.set_hint_key(&error.message_key),
+                    }
+                }
             }
+            Some(TextBarEdit::CancelNumber) => self.clear_text_number_preview(),
+            Some(edit) => {
+                self.clear_text_number_preview();
+                if let Err(error) = self.text_bar_edit(&edit) {
+                    self.status_bar.set_hint_key(&error.message_key);
+                }
+            }
+            None if !ui.input(|input| input.pointer.primary_down()) => self.clear_text_number_preview(),
+            None => {}
         }
         command
     }
@@ -1118,33 +1168,54 @@ impl AppShell {
     }
 
     fn show_tool_paint_editor(&mut self, ctx: &egui::Context) {
-        if self.wells.active_popup.is_none() {
+        let Some(role) = self.wells.active_popup else {
+            self.context_paint_anchor = None;
             return;
-        }
+        };
+        let old = self.wells.role_state(role).clone();
         let mut open = true;
         let mut confirmed = false;
         let mut cancelled = false;
-        egui::Window::new(text("colour.tool.edit_paint"))
-            .id(egui::Id::new("dtool.shell.tool_paint"))
+        let anchor = self.context_paint_anchor;
+        let mut window = egui::Window::new(text("colour.tool.edit_paint"))
+            .id(egui::Id::new("dtool.shell.tool_paint"));
+        if let Some(anchor) = anchor {
+            window = window.current_pos(anchor + egui::vec2(0.0, 3.0))
+                .title_bar(false).resizable(false).collapsible(false).default_height(0.0);
+        }
+        window
             .open(&mut open)
             .default_pos(ctx.content_rect().left_top() + egui::vec2(44.0, 160.0))
             .default_width(284.0)
-            .vscroll(true)
+            .vscroll(anchor.is_none())
             .show(ctx, |ui| {
-                self.wells.show_popup(ui);
+                if anchor.is_some() {
+                    ui.set_width(375.0_f32.min((ctx.content_rect().width() - 24.0).max(120.0)));
+                    let swatches = self.workspace.session().map_or(&[][..], |session| session.document.swatches.as_slice());
+                    self.wells.show_context_popup(ui, &mut self.context_paint_tab, &mut self.context_paint_colour, swatches);
+                } else {
+                    self.wells.show_popup(ui);
+                }
                 ui.horizontal(|ui| {
                     confirmed = dtool_design::button(ui, text("dialog.ok")).clicked();
                     cancelled = dtool_design::button(ui, text("dialog.cancel")).clicked();
                 });
             });
+        if self.wells.role_state(role) != &old {
+            ctx.request_repaint();
+        }
+        let escape = anchor.is_some() && !egui::Popup::is_any_open(ctx)
+            && ctx.input(|input| input.key_pressed(egui::Key::Escape));
         if confirmed {
+            self.context_paint_anchor = None;
             let command = self.workspace.session().and_then(|session| {
                 self.wells.commit_state(&session.document, &session.selection.ids)
             });
             if let Some(command) = command {
                 let _ = self.wells_command(command);
             }
-        } else if !open || cancelled {
+        } else if !open || cancelled || escape {
+            self.context_paint_anchor = None;
             self.wells.cancel_state();
         }
     }
@@ -1555,6 +1626,7 @@ impl AppShell {
                 crate::panels::open_panel(&mut self.layout, &crate::dock::PanelId::Colour);
             }
             ToolColourAction::Edit(target) => {
+                self.context_paint_anchor = None;
                 let Some(object) = self.workspace.session().and_then(|session| {
                     session.selection.ids.first().and_then(|id| session.document.get_object(*id))
                 }) else {
@@ -3170,7 +3242,6 @@ impl AppShell {
             self.publish_os_clipboard(ui.ctx(), &os_clip);
         }
         self.finish_ime_on_switch();
-        tabs::tab_row(self, ui);
         self.show_context_region(ui);
         self.show_tools_column(ui);
         self.show_tool_paint_editor(ui.ctx());
@@ -3180,6 +3251,7 @@ impl AppShell {
         self.sync_status_inputs(ui.ctx());
         self.sync_status_chrome();
         self.status_bar.show(ui);
+        tabs::tab_row(self, ui);
         self.navigation_canvas(ui);
         if let Some(text) = paste_after_canvas {
             self.paste_after_text_tool_click(ui.ctx(), text);
@@ -4140,7 +4212,7 @@ impl AppShell {
             if response.hovered() { ui.ctx().set_cursor_icon(if self.pan_drag.is_some() { egui::CursorIcon::Grabbing } else { egui::CursorIcon::Grab }); }
         }
         let blocked = self.modal_blocking || crate::dialog_chrome::modal_open(ui.ctx())
-            || self.move_duplicate.is_some();
+            || self.move_duplicate.is_some() || self.layer_effects.owns_pointer(ui.ctx());
         let mut zoom_marquee = None;
         if !guide_drag && !blocked && mode == crate::canvas_input::NavMode::Zoom {
             let button = egui::PointerButton::Primary;
@@ -4293,7 +4365,11 @@ impl AppShell {
             .then(|| self.blend_options.preview(&context.session)).flatten();
         self.app_canvas.tone_preview = self.tone_blend.as_ref().and_then(|dialog| dialog.preview(id, &context.session));
         self.app_canvas.layer_opacity_preview = self.panel_registry.layers.opacity_preview(ui.ctx(), &context.session);
-        self.app_canvas.stroke_width_preview = self.panel_registry.stroke.width_preview(ui.ctx(), &context.session);
+        self.app_canvas.stroke_width_preview = crate::context_bar::stroke_preview(ui.ctx(), &context.session)
+            .or_else(|| self.panel_registry.stroke.width_preview(ui.ctx(), &context.session));
+        self.app_canvas.toolbar_paint_preview = self.context_paint_anchor.and(self.wells.active_popup)
+            .map(|role| self.wells.paint_updates(role, &context.session.document, &context.session.selection.ids))
+            .unwrap_or_default();
         let symbol_drag = crate::panels::symbols::dragging(ui.ctx());
         let canvas_input = input && !placing && !blocked && !guide_drag && !symbol_drag;
         let compound = self.compound_canvas.update(ui, &response, &context.session, id, canvas_input);

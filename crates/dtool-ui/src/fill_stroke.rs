@@ -107,6 +107,36 @@ pub fn fill_kind_label(key: &str) -> String {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum PaintUpdate {
+    Fill(dtool_core::ObjectId, Paint),
+    Stroke(dtool_core::ObjectId, StrokeStyle),
+}
+
+impl PaintUpdate {
+    pub(crate) fn swap(&mut self, document: &mut dtool_core::Document) {
+        match self {
+            Self::Fill(id, paint) => {
+                if let Some(object) = document.find_object_mut(id.0) {
+                    std::mem::swap(&mut object.fill, paint);
+                }
+            }
+            Self::Stroke(id, stroke) => {
+                if let Some(object) = document.find_object_mut(id.0) {
+                    std::mem::swap(&mut object.stroke, stroke);
+                }
+            }
+        }
+    }
+
+    fn params(self) -> serde_json::Value {
+        match self {
+            Self::Fill(id, paint) => serde_json::json!({"id": id.0, "fill": paint}),
+            Self::Stroke(id, stroke) => serde_json::json!({"id": id.0, "stroke": stroke}),
+        }
+    }
+}
+
 pub struct FillStrokeWells {
     pub fill_state: WellState,
     pub stroke_state: WellState,
@@ -212,6 +242,83 @@ impl FillStrokeWells {
             }
             _ => None,
         }
+    }
+
+    pub(crate) fn show_context_popup(
+        &mut self,
+        ui: &mut egui::Ui,
+        tab: &mut usize,
+        colour: &mut crate::panels::colour::ColourPanel,
+        swatches: &[dtool_core::colour::swatch::Swatch],
+    ) {
+        let Some(role) = self.active_popup else { return };
+        let mut state = self.role_state(role).clone();
+        ui.horizontal(|ui| {
+            for (index, label) in ["panel.swatches", "panel.colour", "fill.kind.gradient", "fill.kind.hatch"].into_iter().enumerate() {
+                let button = egui::Button::new(text(label)).selected(*tab == index);
+                let button = if *tab == index { button.fill(ui.visuals().extreme_bg_color) } else { button };
+                if ui.add(button).clicked() {
+                    *tab = index;
+                }
+            }
+            if ui.button("⊘").on_hover_text(text("paint.none")).clicked() {
+                state = WellState::None;
+            }
+        });
+        ui.separator();
+        match *tab {
+            0 => {
+                ui.horizontal_wrapped(|ui| {
+                    for (name, paint) in [
+                        ("#000000", solid_paint(0, 0, 0, 255)),
+                        ("#808080", solid_paint(128, 128, 128, 255)),
+                        ("#FFFFFF", solid_paint(255, 255, 255, 255)),
+                    ].into_iter().chain(swatches.iter().map(|swatch| (swatch.name.as_str(),
+                        swatch.paint.clone().unwrap_or(Paint::Solid { colour: swatch.colour })))) {
+                        let picked = ui.push_id(name, |ui| paint_well(ui, &paint, "context-swatch")).inner.on_hover_text(name);
+                        if picked.clicked() {
+                            state = WellState::Single(paint);
+                        }
+                    }
+                });
+            }
+            1 => {
+                let mut rgba = match &state {
+                    WellState::Single(Paint::Solid { colour }) => *colour,
+                    WellState::Single(Paint::Gradient { stops, .. }) => stops.first().map_or(colour.colour, |stop| stop.colour),
+                    _ => colour.colour,
+                };
+                if colour.edit_context_colour(ui, &mut rgba) {
+                    state = WellState::Single(Paint::Solid { colour: rgba });
+                }
+            }
+            2 => {
+                let gradient = matches!(state, WellState::Single(Paint::Gradient { .. }));
+                if !gradient && ui.button(text("fill.kind.gradient")).clicked() {
+                    state = WellState::Single(default_fill_for_kind("fill.kind.gradient").unwrap());
+                }
+                if matches!(state, WellState::Single(Paint::Gradient { .. })) {
+                    edit_well_colours(ui, &mut state, &self.display, self.display_icc.as_ref());
+                }
+            }
+            _ => {
+                let hatch = matches!(state, WellState::Single(Paint::Hatch(_)));
+                if !hatch && ui.button(text("fill.kind.hatch")).clicked() {
+                    state = WellState::Single(default_fill_for_kind("fill.kind.hatch").unwrap());
+                }
+                if let WellState::Single(Paint::Hatch(hatch)) = &mut state {
+                    let mut draft = crate::hatch_editor::HatchEditorState {
+                        hatch: Some(hatch.clone()), original: Some(hatch.clone()),
+                    };
+                    if crate::hatch_editor::show(ui, &mut draft)
+                        && let Some(next) = draft.hatch
+                    {
+                        *hatch = next;
+                    }
+                }
+            }
+        }
+        self.set_role_state(role, state);
     }
 
     pub fn show_popup(&mut self, ui: &mut egui::Ui) {
@@ -462,15 +569,15 @@ impl FillStrokeWells {
         self.active_popup = None;
     }
 
-    pub fn commit_command(&self, role: PaintRole, document: &dtool_core::document::Document, ids: &[dtool_core::object::ObjectId]) -> Option<dtool_protocol::Command> {
+    pub(crate) fn paint_updates(&self, role: PaintRole, document: &dtool_core::Document, ids: &[dtool_core::ObjectId]) -> Vec<PaintUpdate> {
         let paint = match self.role_state(role) {
             WellState::Single(paint) => paint.clone(),
             WellState::None => Paint::None,
-            WellState::Mixed => return None,
+            WellState::Mixed => return Vec::new(),
         };
         let mut updates = Vec::new();
         for id in ids {
-            let object = document.get_object(*id)?;
+            let Some(object) = document.get_object(*id) else { return Vec::new(); };
             if object.locked { continue; }
             let original = if role == PaintRole::Edge { &object.stroke.paint } else { &object.fill };
             let mut paint = paint.clone();
@@ -483,20 +590,25 @@ impl FillStrokeWells {
                 *geom = dtool_core::paint::GradientGeom::from_legacy_angle(angle, [0.0, 0.0, width.max(0.001), height.max(0.001)]);
             }
             let update = match role {
-                PaintRole::SourceObject if object.fill != paint => serde_json::json!({ "id": id.0, "fill": paint }),
+                PaintRole::SourceObject if object.fill != paint => PaintUpdate::Fill(*id, paint),
                 PaintRole::Edge if object.stroke.paint != paint => {
                     let mut stroke = object.stroke.clone();
                     if matches!(stroke.paint, Paint::None) && !matches!(paint, Paint::None) && stroke.width == 0.0 {
                         stroke.width = dtool_core::units::units_per_point(document.units, document.dpi);
                     }
                     stroke.paint = paint.clone();
-                    serde_json::json!({ "id": id.0, "stroke": stroke })
+                    PaintUpdate::Stroke(*id, stroke)
                 }
                 PaintRole::SourceObject | PaintRole::Edge => continue,
-                _ => return None,
+                _ => return Vec::new(),
             };
             updates.push(update);
         }
+        updates
+    }
+
+    pub fn commit_command(&self, role: PaintRole, document: &dtool_core::Document, ids: &[dtool_core::ObjectId]) -> Option<dtool_protocol::Command> {
+        let mut updates: Vec<_> = self.paint_updates(role, document, ids).into_iter().map(PaintUpdate::params).collect();
         match updates.len() {
             0 => None,
             1 => Some(dtool_protocol::Command::with_params("object.update", updates.remove(0))),

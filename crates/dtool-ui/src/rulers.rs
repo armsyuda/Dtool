@@ -849,54 +849,61 @@ impl Rulers {
         if !ticks_visible(view) {
             return;
         }
-        let zoom = if view.zoom > 0.0 { view.zoom } else { 1.0 };
         let steps = [0.0001f32, 0.0002, 0.0005, 0.001, 0.002, 0.005, 0.01, 0.02, 0.05,
-            0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0, 5000.0];
-        let min_gap = dtool_design::space("xl") * 4.0;
+            0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0, 5000.0, 10000.0];
         let mut ruler = ruler_state(session);
         if let Some(origin) = self.origin_preview {
             ruler.origin = origin;
         }
         let scale = ruler.display_scale(session.document.units, session.document.dpi);
-        let step_units = steps.iter().copied().find(|s| s / scale * zoom >= min_gap).unwrap_or(10000.0);
-        let step = step_units / scale;
-        let decimals = (-step_units.log10().floor()).max(0.0) as usize;
-        let label = |at: f32, axis: usize| {
-            let value = (at - ruler.origin[axis]) * scale;
-            let rounded = if value.abs() < step_units * 0.01 { 0.0 } else { value };
-            format!("{rounded:.decimals$}")
-        };
-        let tick_colour = dtool_design::color("text");
+        let pixels_per_unit = view.zoom / scale;
+        if !pixels_per_unit.is_finite() || pixels_per_unit <= 0.0 { return; }
+        let major = steps.into_iter().find(|step| step * pixels_per_unit >= 90.0)
+            .unwrap_or_else(|| (90.0 / pixels_per_unit).max(10000.0));
+        let step = steps.into_iter().find(|step| {
+            let count = major / step;
+            count >= 1.0 && count <= 20.0001 && (count - count.round()).abs() < 0.0001
+                && step * pixels_per_unit >= 4.0
+        }).unwrap_or(major);
+        let subdivisions = (major / step).round() as i64;
+        let decimals = (-major.log10().floor()).max(0.0) as usize;
+        let colour = dtool_design::color("text");
         let font = egui::TextStyle::Small.resolve(ui.style());
         let tick_w = dtool_design::stroke_width("thin").max(1.0);
-        let painter = ui.painter();
-
-        let start_x = ruler.origin[0] + ((screen_to_doc(view, canvas, top.left_top())[0] - ruler.origin[0]) / step).floor() * step;
-        let mut v = start_x;
-        for _ in 0..1024 {
-            let x = doc_to_screen(view, canvas, [v, 0.0]).x;
-            if x > top.max.x {
-                break;
+        for (axis, strip) in [top, left].into_iter().enumerate() {
+            let painter = ui.painter().with_clip_rect(strip);
+            let start = screen_to_doc(view, canvas, strip.min)[axis];
+            let end = screen_to_doc(view, canvas, strip.max)[axis];
+            let first = ((start - ruler.origin[axis]) * scale / step).ceil() as i64;
+            let last = ((end - ruler.origin[axis]) * scale / step).floor() as i64;
+            for index in (first..=last).take(2048) {
+                let full = index.rem_euclid(subdivisions) == 0;
+                let halfway = subdivisions % 2 == 0
+                    && index.rem_euclid(subdivisions) == (subdivisions / 2);
+                let length = if full { 0.50 } else if halfway { 0.34 } else { 0.20 };
+                let value = index as f32 * step;
+                let mut point = ruler.origin;
+                point[axis] += value / scale;
+                let at = doc_to_screen(view, canvas, point);
+                let stroke = egui::Stroke::new(tick_w, if full { colour } else { colour.gamma_multiply(0.67) });
+                let label_at = if axis == 0 {
+                    painter.vline(at.x, (strip.bottom() - strip.height() * length)..=strip.bottom(), stroke);
+                    Pos2::new(at.x + 2.0, strip.top())
+                } else {
+                    painter.hline((strip.right() - strip.width() * length)..=strip.right(), at.y, stroke);
+                    Pos2::new(strip.left() + 1.0, at.y - 2.0)
+                };
+                if full {
+                    let label = format!("{value:.decimals$}");
+                    if axis == 0 {
+                        painter.text(label_at, egui::Align2::LEFT_TOP, label, font.clone(), colour);
+                    } else {
+                        let galley = painter.layout_no_wrap(label, font.clone(), colour);
+                        painter.add(egui::epaint::TextShape::new(label_at, galley, colour)
+                            .with_angle(-std::f32::consts::FRAC_PI_2));
+                    }
+                }
             }
-            if x >= top.min.x {
-                painter.rect_filled(Rect::from_min_max(Pos2::new(x, top.center().y), Pos2::new(x + tick_w, top.max.y)), 0.0, tick_colour);
-                painter.text(Pos2::new(x + tick_w * 2.0, top.min.y), egui::Align2::LEFT_TOP, label(v, 0), font.clone(), tick_colour);
-            }
-            v += step;
-        }
-
-        let start_y = ruler.origin[1] + ((screen_to_doc(view, canvas, left.left_top())[1] - ruler.origin[1]) / step).floor() * step;
-        let mut v = start_y;
-        for _ in 0..1024 {
-            let y = doc_to_screen(view, canvas, [0.0, v]).y;
-            if y > left.max.y {
-                break;
-            }
-            if y >= left.min.y {
-                painter.rect_filled(Rect::from_min_max(Pos2::new(left.center().x, y), Pos2::new(left.max.x, y + tick_w)), 0.0, tick_colour);
-                painter.text(Pos2::new(left.min.x, y + tick_w * 2.0), egui::Align2::LEFT_TOP, label(v, 1), font.clone(), tick_colour);
-            }
-            v += step;
         }
     }
 }

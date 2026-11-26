@@ -49,6 +49,11 @@ pub struct LayerEffectsDialog {
     draft: Vec<LayerEffect>,
     generation: Option<u64>,
     initialized: bool,
+    position: Option<egui::Pos2>,
+    title_rect: Option<egui::Rect>,
+    window_rect: Option<egui::Rect>,
+    grab: Option<(egui::Pos2, egui::Pos2)>,
+    dragged_this_frame: bool,
 }
 
 pub fn preview_command(id: u64, kind: &str) -> Command {
@@ -226,8 +231,47 @@ impl LayerEffectsDialog {
         changed
     }
 
+    pub(crate) fn owns_pointer(&self, ctx: &egui::Context) -> bool {
+        self.open && (self.grab.is_some() || self.dragged_this_frame
+            || ctx.input(|input| input.pointer.interact_pos())
+                .zip(self.window_rect).is_some_and(|(pointer, window)| window.contains(pointer)))
+    }
+
+    fn move_window(&mut self, ctx: &egui::Context, width: f32, height: f32) -> egui::Pos2 {
+        let bounds = ctx.content_rect();
+        let mut position = self.position.unwrap_or(bounds.left_top() + egui::vec2(32.0, 170.0));
+        self.dragged_this_frame = false;
+        ctx.input(|input| {
+            for event in &input.events {
+                match *event {
+                    egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, .. }
+                        if self.title_rect.is_some_and(|title| title.contains(pos)) =>
+                    {
+                        self.grab = Some((pos, position));
+                    }
+                    egui::Event::PointerMoved(pos) | egui::Event::PointerButton {
+                        pos, button: egui::PointerButton::Primary, pressed: false, ..
+                    } if self.grab.is_some() => {
+                        let (start, origin) = self.grab.unwrap();
+                        position = origin + (pos - start);
+                        self.dragged_this_frame = true;
+                        if matches!(event, egui::Event::PointerButton { .. }) { self.grab = None; }
+                    }
+                    egui::Event::PointerGone => self.grab = None,
+                    _ => {}
+                }
+            }
+        });
+        let position = position.clamp(bounds.min, egui::pos2(
+            (bounds.right() - width - 16.0).max(bounds.left()),
+            (bounds.bottom() - height - 62.0).max(bounds.top()),
+        ));
+        self.position = Some(position);
+        position
+    }
+
     pub fn show(&mut self, ctx: &egui::Context, session: &mut Session) {
-        use crate::dialog_chrome::{ClosePolicy, DialogResult};
+        use crate::dialog_chrome::DialogResult;
         use egui::{vec2, Align, Layout, ScrollArea};
 
         if !self.open || !self.load(session) { return; }
@@ -244,8 +288,34 @@ impl LayerEffectsDialog {
         let editing_number = ctx.memory(|memory| memory.focused())
             .is_some_and(|id| egui::TextEdit::load_state(ctx, id).is_some());
         let mut changed = false;
-        let (result, footer) = crate::dialog_chrome::show_modal(ctx, "dtool.dialog.layer_effects", text("menu.layer.layer_effects"), ClosePolicy::Free, !editing_number, |ui| {
+        let position = self.move_window(ctx, width, height);
+        let mut open = true;
+        let title = text("menu.layer.layer_effects");
+        let footer = egui::Window::new(title)
+            .id(egui::Id::new("dtool.dialog.layer_effects"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(position)
+            .title_bar(false)
+            .movable(false)
+            .resizable(false)
+            .show(ctx, |ui| {
             ui.set_width(width);
+            ui.horizontal(|ui| {
+                let title_width = (ui.available_width() - 34.0).max(0.0);
+                let (title_rect, title_bar) = ui.allocate_exact_size(vec2(title_width, 25.0), egui::Sense::drag());
+                ui.painter().text(title_rect.left_center(), egui::Align2::LEFT_CENTER, title,
+                    egui::TextStyle::Button.resolve(ui.style()), ui.visuals().text_color());
+                title_bar.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, title));
+                self.title_rect = Some(title_rect);
+                if self.grab.is_some() {
+                    ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
+                } else if title_bar.hovered() {
+                    ctx.set_cursor_icon(egui::CursorIcon::Grab);
+                }
+                if ui.button("×").on_hover_text(text("dialog.cancel")).clicked() {
+                    open = false;
+                }
+            });
             ui.separator();
             ui.horizontal_top(|ui| {
                 ui.set_max_height(height);
@@ -289,11 +359,14 @@ impl LayerEffectsDialog {
                 }
             }).inner
         });
+        self.window_rect = footer.as_ref().map(|shown| shown.response.rect);
         self.selected = Some(selected);
         if changed { self.preview(session); }
-        match (footer, result) {
-            (DialogResult::Cancel, _) | (_, DialogResult::Cancel) => self.cancel(session),
-            (DialogResult::Confirm, _) | (_, DialogResult::Confirm) => { self.ok(session); }
+        let escape = !editing_number && !egui::Popup::is_any_open(ctx)
+            && ctx.input(|input| input.key_pressed(egui::Key::Escape));
+        match (open && !escape, footer.and_then(|shown| shown.inner)) {
+            (false, _) | (_, Some(DialogResult::Cancel)) => self.cancel(session),
+            (_, Some(DialogResult::Confirm)) => { self.ok(session); }
             _ => {}
         }
     }

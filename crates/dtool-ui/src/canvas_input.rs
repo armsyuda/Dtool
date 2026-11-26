@@ -1195,8 +1195,11 @@ impl CanvasInput {
         if let Some((id, story, caret)) = self.art_text_target(scene, session, point) {
             return self.enter_text(session, id, story, caret);
         }
-        if let Some(path) = art_text_path_at(scene, session, point) {
+        if session.text_edit.is_some() {
             self.finish_art_text_input(session);
+            return true;
+        }
+        if let Some(path) = art_text_path_at(scene, session, point) {
             let command = Command::with_params("text.path_text.add", json!({ "path": path.0, "pos": point }));
             return match session.run(&command) {
                 Ok(reply) => reply["story"].as_u64().is_some_and(|story| self.enter_text(session, path, dtool_core::StoryId(story), 0)),
@@ -1898,6 +1901,10 @@ impl CanvasInput {
                     if up.is_some() {
                         if self.art_selection.take().is_some() {
                             self.drag = None;
+                        } else if moved && session.text_edit.is_some() {
+                            self.drag = None;
+                            self.finish_art_text_input(session);
+                            changed = true;
                         } else if moved {
                             changed = self.finish_drag(session, current, mods);
                         } else {

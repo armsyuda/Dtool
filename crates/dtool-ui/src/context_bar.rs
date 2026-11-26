@@ -1,6 +1,6 @@
 pub mod align;
 mod node;
-pub(crate) use node::{show as show_node_controls, show_paint_wells};
+pub(crate) use node::{show as show_node_controls, show_paint_wells, show_stroke_controls, stroke_preview};
 
 use dtool_core::workspace::ContextId;
 use dtool_core::Session;

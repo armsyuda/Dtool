@@ -36,6 +36,7 @@ pub struct NumericSpec<'a> {
     pub label: &'a str,
     pub range: RangeInclusive<f64>,
     pub step: f64,
+    pub reset_value: Option<f64>,
     pub decimals: usize,
     pub suffix: Option<&'a str>,
     pub mixed_hint: &'a str,
@@ -53,6 +54,7 @@ impl<'a> NumericSpec<'a> {
             label,
             range: f64::NEG_INFINITY..=f64::INFINITY,
             step: 1.0,
+            reset_value: None,
             decimals: 2,
             suffix: None,
             mixed_hint: super::MIXED_TEXT,
@@ -72,6 +74,11 @@ impl<'a> NumericSpec<'a> {
 
     pub fn step(mut self, step: f64) -> Self {
         self.step = step;
+        self
+    }
+
+    pub fn reset_to(mut self, value: f64) -> Self {
+        self.reset_value = Some(value);
         self
     }
 
@@ -453,6 +460,15 @@ pub fn numeric_field(ui: &mut Ui, id: Id, value: NumericValue, spec: &NumericSpe
             start_scrub(&mut state, scrub_origin);
         }
         drive_scrub(&mut state, label, spec, factor, escape, &mut event);
+        if spec.enabled && label.double_clicked()
+            && let Some(value) = spec.reset_value.filter(|value| value.is_finite())
+        {
+            if let Some(field) = &field {
+                field.surrender_focus();
+            }
+            state = NumericState::default();
+            event = NumericEvent::Commit(spec.clamp(value));
+        }
     }
 
     if spec.enabled && field.is_none() && !escape {
