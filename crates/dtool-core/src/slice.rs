@@ -13,6 +13,7 @@ pub struct OutputId(pub u64);
 pub enum SliceSource {
     Manual,
     Linked(ObjectId),
+    Layer(ObjectId),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -63,7 +64,10 @@ pub enum SliceTarget {
     SelectedOutput(SliceId, OutputId),
     SelectedSlices,
     AllEnabled,
+    LayerQueue,
 }
+
+pub const INCLUDE_CONTAINER: &str = "slice_include_empty";
 
 pub const SLICE_TOKENS: &[&str] = &[
     "document_name",
@@ -233,6 +237,16 @@ impl Slice {
     pub fn resolved_bounds(&self, doc: &Document) -> Result<[f32; 4], CommandError> {
         match self.source {
             SliceSource::Linked(id) if self.auto_bounds => source_bounds(doc, id),
+            SliceSource::Layer(id) => {
+                let object = doc.get_object(id).ok_or_else(CommandError::not_found)?;
+                if crate::artboard::is_artboard(object) {
+                    let [x, y, w, h] = crate::artboard::artboard_bounds(doc, id)?;
+                    return Ok([x, y, x + w, y + h]);
+                }
+                let [x, y, w, h] = crate::command::selection_bounds(doc, &[id]).ok_or_else(CommandError::not_found)?;
+                let px = crate::doc_setup::unit_factor(doc.units, doc.dpi, crate::document::Units::Px, doc.dpi).recip();
+                Ok([x, y, x + if w > 0.0 { w } else { px }, y + if h > 0.0 { h } else { px }])
+            }
             _ => Ok(self.bounds),
         }
     }
@@ -247,7 +261,10 @@ pub fn refresh_auto_bounds(doc: &mut Document) {
 
 impl SliceOutput {
     pub fn dimensions(&self, slice: &Slice, doc: &Document) -> Result<[u32; 2], CommandError> {
-        let bounds = slice.resolved_bounds(doc)?;
+        self.dimensions_for_bounds(slice.resolved_bounds(doc)?, doc)
+    }
+
+    pub fn dimensions_for_bounds(&self, bounds: [f32; 4], doc: &Document) -> Result<[u32; 2], CommandError> {
         let px = f64::from(crate::doc_setup::unit_factor(doc.units, doc.dpi, crate::document::Units::Px, doc.dpi));
         let width = (f64::from(bounds[2]) - f64::from(bounds[0])) * px;
         let height = (f64::from(bounds[3]) - f64::from(bounds[1])) * px;
@@ -303,7 +320,9 @@ pub fn updated_slices(doc: &Document, patch: &serde_json::Value) -> Result<Vec<S
         if output.format.is_empty() || !output.format.bytes().all(|byte| byte.is_ascii_alphanumeric()) || output.suffix.chars().any(|c| c.is_control() || matches!(c, '/' | '\\')) || output.path.as_ref().is_some_and(|path| path.chars().any(char::is_control)) || output.options.as_ref().is_some_and(|options| !options.is_object() && !options.is_null()) {
             return Err(CommandError::invalid_params());
         }
-        output.dimensions(slice, doc)?;
+        if !matches!(slice.source, SliceSource::Layer(id) if doc.get_object(id).is_none()) {
+            output.dimensions(slice, doc)?;
+        }
     }
     if let Some(value) = fields.get("order") {
         let order = value.as_u64().and_then(|value| usize::try_from(value).ok()).filter(|order| *order < slices.len()).ok_or_else(CommandError::invalid_params)?;

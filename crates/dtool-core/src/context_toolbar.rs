@@ -122,6 +122,7 @@ pub const TOOL_IDS: &[&str] = &[
     "tool.selection_brush",
     "tool.magic_wand",
     "tool.retouch",
+    crate::commands::red_eye::TOOL,
     "tool.perspective",
     "tool.deform",
     "tool.measure",
@@ -160,6 +161,7 @@ const ALIASES: &[(&str, &str)] = &[
     ("pixel", "tool.paint.pixel"),
     ("smudge_brush", "tool.paint.smudge"),
     ("clone_brush", "tool.paint.clone"),
+    ("tool.clone", "tool.paint.clone"),
     ("lasso", "tool.marquee.freehand"),
     ("flood_select", "tool.magic_wand"),
     ("frame_text", "tool.text.frame"),
@@ -536,6 +538,28 @@ const PIXEL_ERASE_OPTIONS: &[ToolOptionSpec] = &[
 
 const SINGLE_PIXEL_BRUSH_OPTIONS: &[ToolOptionSpec] = &[BRUSH_OPTIONS[1], BRUSH_OPTIONS[2]];
 
+pub const CALLIGRAPHY_TOOL: &str = "tool.paint.calligraphy";
+pub const CALLIGRAPHY_ANGLE: &str = "brush.calligraphy.angle";
+pub const CALLIGRAPHY_ROUNDNESS: &str = "brush.calligraphy.roundness";
+pub(crate) const CALLIGRAPHY_DEFAULT_ANGLE: f32 = -35.0;
+pub(crate) const CALLIGRAPHY_DEFAULT_ROUNDNESS: f32 = 28.0;
+const CALLIGRAPHY_OPTIONS: &[ToolOptionSpec] = &[
+    BRUSH_OPTIONS[0], BRUSH_OPTIONS[1],
+    number(CALLIGRAPHY_ANGLE, CALLIGRAPHY_ANGLE, -180.0, 180.0, 1.0, CALLIGRAPHY_DEFAULT_ANGLE as f64),
+    number(CALLIGRAPHY_ROUNDNESS, CALLIGRAPHY_ROUNDNESS, 1.0, 100.0, 1.0, CALLIGRAPHY_DEFAULT_ROUNDNESS as f64),
+    BRUSH_OPTIONS[2], BRUSH_OPTIONS[3], PIXEL_PAINT_OPTIONS[4], PIXEL_PAINT_OPTIONS[5],
+];
+
+pub const CLONE_TOOL: &str = "tool.paint.clone";
+pub const CLONE_PICK_SOURCE: &str = "brush.clone.pick_source";
+pub const CLONE_ALIGNED: &str = "brush.clone.aligned";
+const CLONE_BRUSH_OPTIONS: &[ToolOptionSpec] = &[
+    toggle(CLONE_PICK_SOURCE, CLONE_PICK_SOURCE, false),
+    BRUSH_OPTIONS[0], BRUSH_OPTIONS[1], BRUSH_OPTIONS[2], BRUSH_OPTIONS[3],
+    PIXEL_PAINT_OPTIONS[4], PIXEL_PAINT_OPTIONS[5],
+    toggle(CLONE_ALIGNED, CLONE_ALIGNED, true),
+];
+
 const BACKGROUND_ERASE_OPTIONS: &[ToolOptionSpec] = &[
     BRUSH_OPTIONS[0], BRUSH_OPTIONS[1], BRUSH_OPTIONS[2], BRUSH_OPTIONS[3],
     number("fill.tolerance", "context.fill.tolerance", 0.0, 100.0, 1.0, 10.0),
@@ -707,6 +731,8 @@ pub fn options_for(tool: &str) -> &'static [ToolOptionSpec] {
         "tool.eraser.erase" | "tool.eraser" => PIXEL_ERASE_OPTIONS,
         "tool.paint.brush" | "tool.paint_brush" => PIXEL_PAINT_OPTIONS,
         "tool.paint.pixel" => SINGLE_PIXEL_BRUSH_OPTIONS,
+        CALLIGRAPHY_TOOL => CALLIGRAPHY_OPTIONS,
+        CLONE_TOOL => CLONE_BRUSH_OPTIONS,
         MIXER_TOOL => MIXER_OPTIONS,
         "tool.paint.adjustment" | "tool.dodge" | "tool.burn" => TONAL_BRUSH_OPTIONS,
         TONE_TOOL => NONDESTRUCTIVE_TONE_OPTIONS,

@@ -1217,32 +1217,10 @@ fn apply_story_restore(cmd: &Command, doc: &mut Document) -> Result<(), CommandE
 
 fn run_to_path(cmd: &Command, session: &mut Session) -> CommandResult {
     let id = ObjectId(param_u64(&cmd.params, "id")?);
-    let object = session
-        .document
-        .get_object(id)
-        .cloned()
-        .ok_or_else(CommandError::not_found)?;
-    let story_id = match &object.kind {
-        ObjectKind::ArtText { story } | ObjectKind::FrameText { story, .. } => Some(*story),
-        ObjectKind::PathText(data) => Some(data.story),
-        _ => return Err(CommandError::validation("INVALID_PARAMS")),
-    };
-    let story_index = story_id.and_then(|sid| session.document.stories.iter().position(|s| s.id == sid));
-    let story = story_index.map(|index| session.document.stories[index].clone());
+    let before = crate::commands::arrange::snapshot(session);
     apply_to_path(cmd, &mut session.document)?;
-    let mut undo = Command::new("text.to_path.undo");
-    undo.params["object"] = serde_json::to_value(&object).unwrap_or(Value::Null);
-    if let (Some(story), Some(index)) = (story, story_index) {
-        if !session.document.stories.iter().any(|s| s.id == story.id) {
-            undo.params["story"] = serde_json::to_value(&story).unwrap_or(Value::Null);
-            undo.params["story_index"] = json!(index);
-        }
-    }
-    push_change(session, "text.to_path", cmd.clone(), undo);
-    Ok(json!({
-        "doc_version": session.generation,
-        "id": id.0
-    }))
+    crate::frame::prune_chains(&mut session.document);
+    crate::commands::arrange::commit_snapshot(session, "text.to_path", before, json!({ "id": id.0 }))
 }
 
 fn apply_to_path(cmd: &Command, doc: &mut Document) -> Result<(), CommandError> {
@@ -1256,32 +1234,68 @@ pub(crate) fn apply_text_outline(
     id: ObjectId,
     (pos, size, curve): crate::text_lines::TextOutline,
 ) -> Result<(), CommandError> {
-    let (story_id, object_name, object_text) = {
+    let (story_id, object_text, origin, page_id, fallback) = {
         let object = doc.get_object(id).ok_or_else(CommandError::not_found)?;
         let story_id = match &object.kind {
             ObjectKind::ArtText { story } | ObjectKind::FrameText { story, .. } => *story,
             ObjectKind::PathText(data) => data.story,
             _ => return Err(CommandError::validation("INVALID_PARAMS")),
         };
-        (story_id, object.name.clone(), doc.stories.iter().find(|s| s.id == story_id).map(|s| s.text.clone()))
+        let story = doc.stories.iter().find(|s| s.id == story_id);
+        let fallback = story.map(crate::text_lines::story_paint)
+            .unwrap_or_else(|| object.fill.clone());
+        (story_id, story.map(|s| s.text.clone()), object.pos, object.page_id, fallback)
     };
+    let mut runs: Vec<_> = crate::text_lines::precise_text_ink(doc, id, crate::outline::OUTLINE_TOLERANCE * 0.25)
+        .map(|ink| ink.into_iter().filter_map(|run| {
+            let outline = crate::text_lines::outline_polygons(id, &run.contours).ok()?;
+            Some((outline, run.paint))
+        }).collect()).unwrap_or_default();
+    if runs.is_empty() {
+        runs.push(((pos, size, curve), fallback));
+    }
+    let relocate = |paint: &mut crate::paint::Paint, at: [f32; 2]| {
+        let offset = (f64::from(origin[0] - at[0]), f64::from(origin[1] - at[1]));
+        crate::paint::transform_paint_matrix(paint, kurbo::Affine::translate(offset).as_coeffs());
+    };
+    let grouped = runs.len() > 1;
     if let Some(object) = doc.find_object_mut(id.0) {
         if object.name.is_empty() {
             if let Some(text) = object_text {
                 object.name = text;
-            } else if !object_name.is_empty() {
-                object.name = object_name;
             }
         }
-        if !matches!(object.kind, ObjectKind::PathText(_)) {
-            object.rotation_deg = 0.0;
-        }
-        object.kind = ObjectKind::Curve(curve);
+        // The outlines have already been placed in document coordinates.
+        object.rotation_deg = 0.0;
+        object.shear_deg = 0.0;
+        object.stroke = crate::paint::StrokeStyle::default();
         object.shape = None;
-        object.pos = pos;
-        object.size = size;
+        if grouped {
+            object.kind = ObjectKind::Group;
+            object.fill = crate::paint::Paint::None;
+            object.pos = pos;
+            object.size = size;
+        } else if let Some(((pos, size, curve), mut fill)) = runs.pop() {
+            relocate(&mut fill, pos);
+            object.kind = ObjectKind::Curve(curve);
+            object.pos = pos;
+            object.size = size;
+            object.fill = fill;
+        }
     } else {
         return Err(CommandError::not_found());
+    }
+    for ((pos, size, curve), mut fill) in runs {
+        relocate(&mut fill, pos);
+        doc.create_object(Object {
+            kind: ObjectKind::Curve(curve),
+            parent_id: Some(id),
+            page_id,
+            pos,
+            size,
+            fill,
+            ..Object::default()
+        });
     }
     crate::frame::drop_story_if_unowned(doc, story_id);
     Ok(())
@@ -1299,6 +1313,10 @@ fn apply_to_path_undo(cmd: &Command, doc: &mut Document) -> Result<(), CommandEr
     let object: Object = serde_json::from_value(cmd.params.get("object").cloned().unwrap_or(Value::Null))
         .map_err(|_| CommandError::invalid_params())?;
     let id = object.id;
+    if doc.get_object(id).is_some_and(|current| matches!(current.kind, ObjectKind::Group)) {
+        // Older saved command histories restore the text object directly.
+        doc.objects.retain(|child| child.parent_id != Some(id));
+    }
     if let Some(existing) = doc.find_object_mut(id.0) {
         *existing = object;
         return Ok(());

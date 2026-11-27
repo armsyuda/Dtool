@@ -26,7 +26,6 @@ const ANCHORS: [(Anchor9, &str, &str); 9] = [
 #[derive(Debug, Clone, PartialEq)]
 pub enum FrameBarEdit {
     Fit(ImageFit),
-    ManualFit,
     Anchor(Anchor9),
     Offset([f32; 2]),
     Scale(f32),
@@ -34,6 +33,7 @@ pub enum FrameBarEdit {
     Reset,
     ReplaceImage(String),
     PickImage,
+    PickMultiple,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -47,19 +47,27 @@ pub struct PictureFrameBar {
     pub frame: Option<PictureFrame>,
     pub replace_path: String,
     locked: bool,
+    multiple_frames: bool,
     offset_unit: &'static str,
 }
 
 impl PictureFrameBar {
     pub fn load(session: &Session) -> Self {
-        let frame = match session.selection.ids.as_slice() {
+        let mut frame = match session.selection.ids.as_slice() {
             [id] if session.document.get_object(*id).is_some() => picture_frame::get_frame(&session.document, *id),
             _ => None,
         };
+        if let Some(frame) = &mut frame {
+            frame.image = session.document.placed_resource(frame.object).or(frame.image);
+        }
         let locked = frame.as_ref().and_then(|frame| session.document.get_object(frame.object))
             .is_some_and(|object| object.locked);
+        let multiple_frames = session.selection.ids.len() > 1
+            && session.selection.ids.iter().any(|&id| session.document.get_object(id).is_some_and(|object| {
+                !object.locked && object.kind == dtool_core::ObjectKind::PictureFrame
+            }));
         let offset_unit = dtool_core::commands::ruler_units::suffix(session.document.units);
-        Self { frame, replace_path: String::new(), locked, offset_unit }
+        Self { frame, replace_path: String::new(), locked, multiple_frames, offset_unit }
     }
 
     pub fn reload(&mut self, session: &Session) {
@@ -72,6 +80,8 @@ impl PictureFrameBar {
         self.frame.as_ref().map(|frame| frame.object)
     }
 
+    pub(crate) fn visible(&self) -> bool { self.frame.is_some() || self.multiple_frames }
+
     pub fn command(&self, edit: FrameBarEdit) -> Option<Command> {
         let frame = self.frame.as_ref()?;
         let object = frame.object.0;
@@ -80,7 +90,6 @@ impl PictureFrameBar {
                 let name = FITS.iter().find(|(known, _, _)| *known == fit)?.1;
                 Command::with_params(picture_frame::FRAME_IMAGE_FIT, json!({ "object": object, "fit": name }))
             }
-            FrameBarEdit::ManualFit => Command::with_params(picture_frame::FRAME_IMAGE_FIT, json!({ "object": object, "fit": "manual" })),
             FrameBarEdit::Anchor(anchor) => {
                 let name = ANCHORS.iter().find(|(known, _, _)| *known == anchor)?.1;
                 Command::with_params(picture_frame::FRAME_IMAGE_ANCHOR, json!({ "object": object, "anchor": name }))
@@ -91,7 +100,7 @@ impl PictureFrameBar {
             FrameBarEdit::Rotation(rotation) => Command::with_params(picture_frame::FRAME_IMAGE_CONTENT, json!({ "object": object, "rotation": rotation })),
             FrameBarEdit::Reset => Command::with_params(picture_frame::FRAME_IMAGE_CONTENT, json!({ "object": object, "reset": true })),
             FrameBarEdit::ReplaceImage(path) if !path.trim().is_empty() => Command::with_params("resource.replace", json!({ "object": object, "path": path, "link": false })),
-            FrameBarEdit::ReplaceImage(_) | FrameBarEdit::PickImage => return None,
+            FrameBarEdit::ReplaceImage(_) | FrameBarEdit::PickImage | FrameBarEdit::PickMultiple => return None,
         };
         Some(command)
     }
@@ -109,23 +118,31 @@ impl PictureFrameBar {
     }
 
     pub fn ui(&mut self, ui: &mut egui::Ui) -> Option<FrameBarEdit> {
+        if self.multiple_frames {
+            return dtool_design::button(ui, text("frame.place_multiple")).clicked().then_some(FrameBarEdit::PickMultiple);
+        }
         let frame = self.frame.as_ref()?;
         ui.push_id(("picture_frame", frame.object.0), |ui| {
             ui.add_enabled_ui(!self.locked, |ui| {
                 let width = ui.available_width();
-                if width < 300.0 {
+                if width < 200.0 {
                     return options_popup(ui, frame, true, self.offset_unit);
                 }
                 ui.horizontal(|ui| {
-                    let edit = fit_control(ui, frame);
+                    let edit = fit_control(ui, frame, width < 730.0, false);
+                    if width < 620.0 {
+                        let actions = if width >= 340.0 { image_actions(ui, true) } else { None };
+                        let options = options_popup(ui, frame, true, self.offset_unit);
+                        return options.or(actions).or(edit);
+                    }
                     let anchor = anchor_control(ui, frame, self.offset_unit);
-                    if width < 600.0 {
+                    if width < 730.0 {
                         let options = options_popup(ui, frame, false, self.offset_unit);
-                        return options.or(anchor).or(edit);
+                        return options.or(image_actions(ui, false)).or(anchor).or(edit);
                     }
                     ui.separator();
                     let transform = transform_controls(ui, frame, false);
-                    let actions = image_actions(ui);
+                    let actions = image_actions(ui, false);
                     actions.or(transform).or(anchor).or(edit)
                 }).inner
             }).inner
@@ -133,18 +150,37 @@ impl PictureFrameBar {
     }
 }
 
-fn fit_control(ui: &mut egui::Ui, frame: &PictureFrame) -> Option<FrameBarEdit> {
-    let caption = ui.label(text("frame.fit"));
-    let mut selected = if frame.manual_layout.is_some() {
-        FITS.len()
-    } else {
-        FITS.iter().position(|(fit, _, _)| *fit == frame.fit)?
-    };
-    let options: Vec<_> = FITS.iter().map(|(_, _, key)| text(key))
-        .chain(std::iter::once(text("frame.fit.manual"))).collect();
-    let response = dtool_design::dropdown(ui, "frame.fit", &mut selected, &options)
-        .labelled_by(caption.id).on_hover_text(options[selected]);
-    response.changed().then(|| FITS.get(selected).map_or(FrameBarEdit::ManualFit, |(fit, _, _)| FrameBarEdit::Fit(*fit)))
+fn fit_control(ui: &mut egui::Ui, frame: &PictureFrame, compact: bool, focus_first: bool) -> Option<FrameBarEdit> {
+    let mut edit = None;
+    dtool_design::with_icon_selection(ui, |ui| ui.horizontal(|ui| {
+        for (index, (fit, _, label)) in FITS.into_iter().enumerate() {
+            let label = text(label);
+            let selected = frame.manual_layout.is_none() && frame.fit == fit;
+            let button = egui::Button::new(if compact { "" } else { label }).selected(selected);
+            let response = if compact {
+                ui.add_sized(egui::Vec2::splat(dtool_design::size("control.icon.height")), button)
+            } else {
+                ui.add(button)
+            };
+            if compact {
+                let centre = response.rect.center();
+                let ink = ui.style().interact(&response).fg_stroke.color;
+                let outer = egui::Rect::from_center_size(centre, egui::vec2(15.0, 12.0));
+                let dimensions = match fit {
+                    ImageFit::Native => egui::vec2(6.0, 5.0),
+                    ImageFit::MinFit => egui::vec2(11.0, 6.0),
+                    ImageFit::MaxFit => egui::vec2(15.0, 8.0),
+                    ImageFit::Stretch => egui::vec2(13.0, 10.0),
+                };
+                ui.painter().rect_stroke(outer, 1.0, egui::Stroke::new(1.0, ink), egui::StrokeKind::Inside);
+                ui.painter().rect_filled(egui::Rect::from_center_size(centre, dimensions), 0.0, ink.gamma_multiply(0.45));
+            }
+            if focus_first && index == 0 { response.request_focus(); }
+            response.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, response.enabled(), selected, label));
+            if response.on_hover_text(label).clicked() && !selected { edit = Some(FrameBarEdit::Fit(fit)); }
+        }
+    }));
+    edit
 }
 
 fn anchor_control(ui: &mut egui::Ui, frame: &PictureFrame, unit: &str) -> Option<FrameBarEdit> {
@@ -259,18 +295,39 @@ fn offset_controls(ui: &mut egui::Ui, frame: &PictureFrame, unit: &str) -> Optio
     edited.then(|| FrameBarEdit::Offset(offset.map(|value| value as f32)))
 }
 
-fn image_actions(ui: &mut egui::Ui) -> Option<FrameBarEdit> {
-    let reset = dtool_design::button(ui, text("frame.reset_content")).clicked();
+fn image_actions(ui: &mut egui::Ui, compact: bool) -> Option<FrameBarEdit> {
+    let label = text("frame.reset_content");
+    let reset = dtool_design::icon_button(ui, "").on_hover_text(label);
+    reset.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, reset.enabled(), label));
+    let centre = reset.rect.center();
+    let ink = ui.style().interact(&reset).fg_stroke.color;
+    let points = (0..=16).map(|step| {
+        let angle = 0.5 + step as f32 * 0.32;
+        centre + 5.5 * egui::vec2(angle.cos(), angle.sin())
+    }).collect::<Vec<_>>();
+    let tip = points[points.len() - 1];
+    ui.painter().add(egui::Shape::line(points, egui::Stroke::new(1.4, ink)));
+    ui.painter().line_segment([tip + egui::vec2(-4.0, 0.0), tip,], egui::Stroke::new(1.4, ink));
+    ui.painter().line_segment([tip + egui::vec2(0.0, -4.0), tip,], egui::Stroke::new(1.4, ink));
     let replace = dtool_design::button(ui, text("frame.replace_image")).clicked();
-    if replace { Some(FrameBarEdit::PickImage) } else { reset.then_some(FrameBarEdit::Reset) }
+    let multiple = !compact && dtool_design::button(ui, text("frame.place_multiple")).clicked();
+    if replace { Some(FrameBarEdit::PickImage) }
+    else if multiple { Some(FrameBarEdit::PickMultiple) }
+    else { reset.clicked().then_some(FrameBarEdit::Reset) }
 }
 
 fn options_popup(ui: &mut egui::Ui, frame: &PictureFrame, include_fit_and_anchor: bool, unit: &str) -> Option<FrameBarEdit> {
     let trigger = dtool_design::button(ui, text("frame.options"));
     frame_popup(&trigger, |ui, focus_first| {
-        let footer_height = dtool_design::size("control.icon.height") + 2.0 * ui.spacing().item_spacing.y;
+        let content = ui.ctx().content_rect();
         let popup_margin = 2.0 * dtool_design::space("md");
-        let options_height = (ui.ctx().content_rect().height() - footer_height - popup_margin).max(1.0);
+        let stack_actions = content.width() < 260.0;
+        if stack_actions {
+            ui.set_max_width((content.width() - popup_margin).max(1.0));
+        }
+        let footer_rows = if stack_actions { 3.0 } else { 1.0 };
+        let footer_height = footer_rows * (dtool_design::size("control.icon.height") + ui.spacing().item_spacing.y);
+        let options_height = (content.height() - footer_height - popup_margin).max(1.0);
         let edit = egui::ScrollArea::vertical()
             .id_salt("frame.options.scroll")
             .max_height(options_height)
@@ -278,22 +335,7 @@ fn options_popup(ui: &mut egui::Ui, frame: &PictureFrame, include_fit_and_anchor
                 let mut edit = None;
                 if include_fit_and_anchor {
                     ui.label(text("frame.fit"));
-                    dtool_design::with_icon_selection(ui, |ui| {
-                        for (index, (fit, _, label)) in FITS.into_iter().enumerate() {
-                            let selected = frame.manual_layout.is_none() && fit == frame.fit;
-                            let response = ui.selectable_label(selected, text(label));
-                            if focus_first && index == 0 {
-                                response.request_focus();
-                            }
-                            if response.clicked() && !selected {
-                                edit = Some(FrameBarEdit::Fit(fit));
-                            }
-                        }
-                        let manual = frame.manual_layout.is_some();
-                        if ui.selectable_label(manual, text("frame.fit.manual")).clicked() && !manual {
-                            edit = Some(FrameBarEdit::ManualFit);
-                        }
-                    });
+                    edit = fit_control(ui, frame, true, focus_first);
                     ui.separator();
                     ui.label(text("frame.anchor"));
                     edit = anchor_grid(ui, frame, false).or(edit);
@@ -303,10 +345,114 @@ fn options_popup(ui: &mut egui::Ui, frame: &PictureFrame, include_fit_and_anchor
                 ui.horizontal_wrapped(|ui| transform_controls(ui, frame, focus_first && !include_fit_and_anchor))
                     .inner.or(edit)
             }).inner;
-        let actions = ui.horizontal_wrapped(image_actions).inner;
-        if actions == Some(FrameBarEdit::PickImage) {
+        let actions = if stack_actions {
+            ui.vertical(|ui| image_actions(ui, false)).inner
+        } else {
+            ui.horizontal_wrapped(|ui| image_actions(ui, false)).inner
+        };
+        if matches!(actions, Some(FrameBarEdit::PickImage | FrameBarEdit::PickMultiple)) {
             ui.close();
         }
         actions.or(edit)
     })
+}
+
+#[derive(Default)]
+pub(crate) struct FrameContentGesture {
+    selected: Option<(dtool_core::ContextId, ObjectId)>,
+    drag: Option<([f32; 2], [f32; 2])>,
+}
+
+#[derive(Default)]
+pub(crate) struct ContentDragFrame {
+    pub capture: bool,
+    pub preview: Option<PictureFrame>,
+    pub command: Option<Command>,
+}
+
+impl FrameContentGesture {
+    pub fn update(
+        &mut self, ui: &mut egui::Ui, response: &egui::Response,
+        session: &Session, owner: dtool_core::ContextId, enabled: bool,
+    ) -> ContentDragFrame {
+        let mut result = ContentDragFrame::default();
+        let Some(object) = enabled.then_some(session.selection.ids.as_slice()).and_then(|ids| {
+            let [id] = ids else { return None; };
+            let object = session.document.get_object(*id)?;
+            (!object.locked).then_some(object)
+        }) else { *self = Self::default(); return result; };
+        let Some(frame) = picture_frame::get_frame(&session.document, object.id).filter(|frame| {
+            picture_frame::frame_image_size(&session.document, object, frame).is_some()
+        })
+        else { *self = Self::default(); return result; };
+        let key = (owner, object.id);
+        if self.selected != Some(key) { *self = Self::default(); }
+        if ui.input(|input| input.key_pressed(egui::Key::Escape)) {
+            *self = Self::default();
+            return result;
+        }
+        let to_doc = |p: egui::Pos2| {
+            let local = p - response.rect.min;
+            dtool_core::view_to_doc(&session.view, [local.x, local.y])
+        };
+        let to_local = |p| dtool_core::geometry::doc_to_object_local(object, to_doc(p));
+        let centre = dtool_core::geometry::apply_matrix(&dtool_core::geometry::object_matrix(object),
+            [object.pos[0] + object.size[0] * 0.5, object.pos[1] + object.size[1] * 0.5]);
+        let centre = dtool_core::doc_to_view(&session.view, centre);
+        let centre = response.rect.min + egui::vec2(centre[0], centre[1]);
+        let handle = egui::Rect::from_center_size(centre, egui::Vec2::splat(18.0));
+        let inside = |pos| picture_frame::contains_point(&session.document, object, to_doc(pos));
+        let (down, up) = crate::input::primary_button_positions(ui);
+        if response.double_clicked() && response.interact_pointer_pos().is_some_and(inside) {
+            self.selected = Some(key);
+            result.capture = true;
+        }
+        if let Some(pos) = down.filter(|p| response.interact_rect.contains(*p)
+            && ui.ctx().layer_id_at(*p) == Some(response.layer_id) && !egui::Popup::is_any_open(ui.ctx()))
+        {
+            if (handle.contains(pos) || (self.selected == Some(key) && inside(pos)))
+                && let Some(start) = to_local(pos)
+            {
+                self.selected = Some(key);
+                self.drag = Some((start, frame.content.offset));
+            } else if self.drag.is_none() {
+                self.selected = None;
+            }
+        }
+        if let Some((start, original)) = self.drag {
+            result.capture = true;
+            let point = up.or_else(|| ui.input(|input| input.pointer.interact_pos()));
+            if let Some(end) = point.and_then(to_local) {
+                let offset = [original[0] + end[0] - start[0], original[1] + end[1] - start[1]];
+                if offset != original {
+                    if up.is_some() {
+                        result.command = Some(Command::with_params(picture_frame::FRAME_IMAGE_CONTENT, json!({
+                            "object": object.id, "offset": offset,
+                        })));
+                    } else {
+                        let mut preview = frame.clone();
+                        preview.content.offset = offset;
+                        result.preview = Some(preview);
+                    }
+                }
+            }
+            if up.is_some() || !ui.input(|input| input.pointer.primary_down()) { self.drag = None; }
+        }
+        let can_drag = response.hover_pos().is_some_and(|pos| handle.contains(pos) || (self.selected == Some(key) && inside(pos)));
+        if response.interact_rect.contains(centre)
+            && object.size.iter().all(|side| side.abs() * session.view.zoom > 32.0)
+        {
+            let painter = ui.ctx().layer_painter(egui::LayerId::new(
+                egui::Order::Foreground, response.id.with("picture-frame-content")))
+                .with_clip_rect(response.interact_rect);
+            painter.circle(centre, 8.5, ui.visuals().extreme_bg_color, ui.visuals().selection.stroke);
+            for axis in [egui::Vec2::X, egui::Vec2::Y] {
+                painter.line_segment([centre - 4.0 * axis, centre + 4.0 * axis], ui.visuals().selection.stroke);
+            }
+        }
+        if can_drag {
+            ui.ctx().set_cursor_icon(if self.drag.is_some() { egui::CursorIcon::Grabbing } else { egui::CursorIcon::Grab });
+        }
+        result
+    }
 }

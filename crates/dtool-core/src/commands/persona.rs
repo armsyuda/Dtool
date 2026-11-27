@@ -1,12 +1,47 @@
 use crate::{Command,CommandError,CommandResult,Session};
 use std::sync::{Mutex,OnceLock};
 static ACTION:OnceLock<fn(&Command)->CommandResult>=OnceLock::new();
+static SLICE_STATUS: OnceLock<fn() -> bool> = OnceLock::new();
 static SUB_DEPTH:Mutex<Option<usize>>=Mutex::new(None);
 pub fn register_action(action:fn(&Command)->CommandResult)->bool{ACTION.set(action).is_ok()}
 
 pub fn layout_active() -> bool {
     run_without_document(&Command::new("ui.persona.query"))
         .and_then(Result::ok).is_some_and(|value| base_persona(&value) == Some("layout"))
+}
+
+pub fn register_slice_status(status: fn() -> bool) -> bool {
+    SLICE_STATUS.set(status).is_ok()
+}
+
+pub fn slice_active() -> bool {
+    if let Some(status) = SLICE_STATUS.get() {
+        return status();
+    }
+    run_without_document(&Command::new("ui.persona.query"))
+        .and_then(Result::ok).is_some_and(|value| base_persona(&value) == Some("slice"))
+}
+
+pub(crate) fn slice_read_only() -> CommandError {
+    CommandError {
+        code: "READ_ONLY".into(),
+        message_key: "slice.workspace.read_only".into(),
+    }
+}
+
+pub(crate) fn slice_blocks(command: &Command, catalog: &dtool_protocol::CommandCatalog) -> bool {
+    let name = command.name.as_str();
+    if crate::command::changes_only_object_selection(name)
+        || matches!(name, "slice.create" | "slice.list" | "slice.update" | "slice.select" | "slice.delete"
+            | "ui.persona.set" | "ui.persona.query" | "ui.persona.list"
+            | "doc.save" | "doc.save_as" | "doc.open" | "doc.close" | "doc.new"
+            | "view.zoom" | "view.pan")
+        || ((name.ends_with(".query") || name.ends_with(".list"))
+            && catalog.resolve(name).is_some_and(|spec| !spec.mutating))
+    {
+        return false;
+    }
+    slice_active()
 }
 
 pub(crate) fn run_without_document(command: &Command) -> Option<CommandResult> {

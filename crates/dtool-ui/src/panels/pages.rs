@@ -248,7 +248,8 @@ impl PagesPanel {
         }
         self.pending_text_thumbnails = None;
         self.revision = Some(revision);
-        self.background_thumbnails = after_text_edit || !session.document.pixel_layers.is_empty();
+        self.background_thumbnails = after_text_edit || !session.document.pixel_layers.is_empty()
+                    || session.document.objects().len() >= 100;
         if !same_document || !self.background_thumbnails {
             self.thumbnails.clear();
         }
@@ -326,7 +327,7 @@ impl PagesPanel {
             return None;
         };
         let thumbnail_size = self.thumbnail_size_for(&session.document);
-        let revision = (session.context, session.generation, session.document.version, thumbnail_size.resolution());
+        let revision = (session.context, session.artwork_generation(), session.document.version, thumbnail_size.resolution());
         if self.revision.map(|old| old.0) != Some(session.context) {
             self.rename = None;
             self.selected_pages.clear();
@@ -376,7 +377,7 @@ impl PagesPanel {
     ) -> Option<Command> {
         let doc = &session.document;
         let thumbnail_size = self.thumbnail_size_for(doc);
-        let revision = (session.context, session.generation, doc.version, thumbnail_size.resolution());
+        let revision = (session.context, session.artwork_generation(), doc.version, thumbnail_size.resolution());
         let can_navigate = view_size.iter().all(|side| side.is_finite() && *side > 1.0);
         let current = dtool_core::commands::pages::viewed_page(session);
         self.selected_pages.retain(|id| doc.pages.iter().any(|page| page.id == *id));

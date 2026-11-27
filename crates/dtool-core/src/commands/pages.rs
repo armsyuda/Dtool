@@ -926,7 +926,7 @@ pub(super) fn remove_layout_objects(doc: &mut Document, doomed: &HashSet<ObjectI
     doc.text_wraps.entries.retain(|entry| !doomed.contains(&entry.object));
     doc.layer_meta.retain(|entry| !doomed.contains(&entry.object));
     doc.merge_layouts.retain(|layout| !doomed.contains(&layout.object_id));
-    doc.slices.retain(|slice| !matches!(slice.source, crate::slice::SliceSource::Linked(object) if doomed.contains(&object)));
+    doc.slices.retain(|slice| !matches!(slice.source, crate::slice::SliceSource::Linked(object) | crate::slice::SliceSource::Layer(object) if doomed.contains(&object)));
 }
 
 pub(crate) fn preserve_content(before: &Document, after: &mut Document) {

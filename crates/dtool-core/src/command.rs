@@ -1444,6 +1444,7 @@ pub fn preflight_targets(session: &Session, command: &Command) -> Result<(), Com
 pub(crate) struct BatchRollback {
     document: Document,
     generation: u64,
+    selection_generations: u64,
     undo: crate::undo::UndoStack,
     selection: Selection,
     table_selection: crate::table::selection::TableSelection,
@@ -1470,6 +1471,7 @@ impl BatchRollback {
         Self {
             document: session.document.clone(),
             generation: session.generation,
+            selection_generations: session.selection_generations,
             undo: session.undo.clone(),
             selection: session.selection.clone(),
             table_selection: session.table_selection.clone(),
@@ -1495,6 +1497,7 @@ impl BatchRollback {
     pub(crate) fn restore(self, session: &mut Session) {
         session.document = self.document;
         session.generation = self.generation;
+        session.selection_generations = self.selection_generations;
         session.undo = self.undo;
         session.selection = self.selection;
         session.table_selection = self.table_selection;
@@ -1539,6 +1542,7 @@ pub struct TextEditState {
 pub struct Session {
     pub history: crate::history_store::SessionHistory,
     pub generation: u64,
+    selection_generations: u64,
     pub undo: crate::undo::UndoStack,
     pub document: Document,
     pub catalog: CommandCatalog,
@@ -1649,7 +1653,17 @@ pub fn view_rotation_wrap(degrees: f32) -> f32 {
     if r >= 360.0 { 0.0 } else { r }
 }
 
+pub(crate) fn changes_only_object_selection(name: &str) -> bool {
+    matches!(name, "selection.set" | "selection.marquee" | "selection.hit"
+        | "selection.enter" | "selection.exit" | "selection.cycle" | crate::commands::selection_key::KEY_SET)
+}
+
 impl Session {
+    /// Artwork caches track document history but can reuse ink across object selections.
+    pub fn artwork_generation(&self) -> u64 {
+        self.generation.wrapping_sub(self.selection_generations)
+    }
+
     fn push_guide_undo(&mut self, name: &str, redo: Command, undo_cmd: Command) {
         self.undo.push(crate::undo::Change {
             name: name.to_string(),
@@ -1855,6 +1869,7 @@ impl Session {
         Session {
             autosave: crate::autosave::Autosave::new(),
             generation: 0,
+            selection_generations: 0,
             undo: crate::undo::UndoStack::new(),
             document,
             catalog: CommandCatalog::new(),
@@ -1958,6 +1973,7 @@ impl Session {
     }
 
     pub fn can_execute(&self, command: &Command) -> bool {
+        if crate::commands::persona::slice_blocks(command, &self.catalog) { return false; }
         if command.name == crate::autosave::CMD_AUTOSAVE_SET { return true; }
         if let Some(allowed) = crate::colour::convert::can_execute_profile_convert(self, command) { return allowed; }
         if let Some(allowed) = crate::longdoc::books::can_execute(command) {
@@ -2296,6 +2312,9 @@ impl Session {
         command: &Command,
         dispatch: impl FnOnce(&mut Self, &Command) -> CommandResult,
     ) -> CommandResult {
+        if crate::commands::persona::slice_blocks(command, &self.catalog) {
+            return Err(crate::commands::persona::slice_read_only());
+        }
         if self.edit.is_some() && crate::edit_session::ends_edit(&command.name) {
             self.end_edit(crate::edit_session::EditEnd::Commit)?;
         }
@@ -2303,7 +2322,8 @@ impl Session {
         if spec.is_some_and(|spec| !spec.implemented) {
             return Err(CommandError::not_implemented());
         }
-        let track_masters = !self.document.master_pages.is_empty()
+        let selection_only = changes_only_object_selection(&command.name);
+        let track_masters = !selection_only && !self.document.master_pages.is_empty()
             && spec.is_some_and(|spec| spec.mutating && spec.undoable)
             && !command.name.starts_with("master.")
             && !matches!(command.name.as_str(),
@@ -2342,7 +2362,12 @@ impl Session {
                     crate::commands::brush::refresh_blends(&mut self.document);
                     crate::clip_mask::reconcile_mask_view(self);
                 }
-                crate::commands::caption::follow(self);
+                let captions_moved = crate::commands::caption::follow(self);
+                if selection_only && !captions_moved && self.document.version == version_before
+                    && self.document.geometry_rev == geometry_before
+                {
+                    self.selection_generations += self.generation - generation_before;
+                }
                 self.change_log.record(self.generation, &command.name);
             }
             if self.macro_recorder.is_recording() {

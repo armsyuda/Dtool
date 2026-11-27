@@ -119,7 +119,7 @@ impl NavigatorPanel {
         use std::sync::mpsc::TryRecvError;
 
         let flags = &session.view.canvas_flags;
-        let revision = (session.context, session.generation, session.document.version, flags.clone());
+        let revision = (session.context, session.artwork_generation(), session.document.version, flags.clone());
         if self.thumbnail.as_ref().is_some_and(|(old, ..)| old.0 != revision.0 || old.3 != revision.3) {
             self.thumbnail = None;
             self.view_box_dragging = false;

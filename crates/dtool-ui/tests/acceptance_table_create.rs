@@ -95,3 +95,59 @@ fn test_drag_create_matches_command_create() {
         assert_eq!(t1[key], t2[key]);
     }
 }
+
+
+#[test]
+fn table_select_all_formats_every_cell_and_previews_as_one_undo() {
+    use dtool_core::table::{resolve_cell, selection};
+    use dtool_core::{Command, edit_session::EditEnd};
+    let mut shell = dtool_ui::shell::AppShell::new();
+    shell.workspace.new_document("Table formatting");
+    let session = shell.workspace.session_mut().unwrap();
+    let id = ObjectId(session.run_named("table.create", json!({
+        "rows": 3, "cols": 3, "bounds": [150.0, 90.0], "pos": [0.0, 0.0],
+    })).unwrap()["id"].as_u64().unwrap());
+    session.active_tool = "tool.table".into();
+    shell.select_all();
+
+    let session = shell.workspace.session_mut().unwrap();
+    let selected = selection::current(session);
+    assert_eq!(selected.table, Some(id));
+    assert_eq!(selected.cells.len(), 9);
+    let paragraph = dtool_ui::panels::paragraph::apply_patch(session, json!({"align": "Center", "indent_left": 3.0}));
+    assert!(paragraph.is_ok(), "{paragraph:?}");
+    for story in &session.document.stories {
+        let style = dtool_core::text_cmd::query_para_style(&story.paras, 0, 0);
+        assert_eq!(style["align"], "Center");
+        assert_eq!(style["indent_left"], 3.0);
+    }
+    let depth = session.undo.applied_steps();
+    let fill = dtool_core::paint::Paint::Solid { colour: dtool_core::paint::Colour::new(20, 88, 180, 255) };
+    for (left, width) in [(2.0, 0.5), (4.0, 2.0)] {
+        let command = Command::with_params(Command::TABLE_CELL_FORMAT_SET, json!({
+            "id": id, "cells": selected.cells,
+            "fill": fill,
+            "inset_patch": {"left": left, "top": 3.0, "right": 2.0, "bottom": 1.0, "linked": false},
+            "vertical_align": "Center",
+            "borders": {"selection_mask": 63, "edge_patch": {"width_pt": width}}
+        }));
+        session.preview("table.panel.format", &command).unwrap();
+        let ObjectKind::Table(table) = &session.document.get_object(id).unwrap().kind else {
+            panic!("expected a table");
+        };
+        for cell in &table.cells {
+            let format = resolve_cell(&session.document, table, cell);
+            assert_eq!([format.insets.left, format.insets.top, format.insets.right, format.insets.bottom], [left, 3.0, 2.0, 1.0]);
+            assert_eq!(format.vertical_align, dtool_core::table::model::VerticalAlign::Center);
+            assert_eq!(format.fill.as_ref(), Some(&fill));
+            assert!(format.edges.iter().flatten().any(|edge| edge.width_pt == width));
+        }
+    }
+    assert_eq!(session.undo.applied_steps(), depth);
+    session.end_edit(EditEnd::Commit).unwrap();
+    assert_eq!(session.undo.applied_steps(), depth + 1);
+    session.run(&Command::new(dtool_core::table::merge::MERGE)).unwrap();
+    assert_eq!(selection::current(session).cells.len(), 1);
+    session.run(&Command::new(dtool_core::table::merge::UNMERGE)).unwrap();
+    assert_eq!(selection::current(session).cells.len(), 9);
+}

@@ -273,7 +273,7 @@ impl ZoomDrag {
 
 pub struct AppShell {
     last_drawn: Option<(ContextId, u64)>,
-    last_snapshot: Value,
+    last_snapshot: std::cell::OnceCell<Value>,
     theme_applied: Option<String>,
     pub snapping_dialog: crate::snapping_dialog::SnappingDialog,
     pub console_panel: crate::console::ConsolePanel,
@@ -302,11 +302,15 @@ pub struct AppShell {
     context_paint_colour: crate::panels::colour::ColourPanel,
     pub text_bar: crate::context::text_bar::TextBarState,
     pub picture_frame_bar: crate::picture_frame_bar::PictureFrameBar,
+    picture_frame_gesture: crate::picture_frame_bar::FrameContentGesture,
     text_bar_stamp: Option<TextBarStamp>,
     font_families: Option<Vec<String>>,
     pub font_preview: Option<String>,
     pub prefs_dialog: crate::prefs_dialog::PrefsDialog,
     pub canvas_size: [f32; 2],
+    canvas_drop_bounds: Option<(dtool_core::ContextId, egui::Rect)>,
+    pub file_drop_position: Option<egui::Pos2>,
+    pub native_picture_frame_pickers: bool,
     pub about: crate::about::AboutDialog,
     pub about_chrome: crate::dialog_chrome::DialogChrome,
     pub window_title_sent: Option<String>,
@@ -443,7 +447,7 @@ impl AppShell {
 
         let mut shell = Self {
             last_drawn: None,
-            last_snapshot: Value::Null,
+            last_snapshot: std::cell::OnceCell::new(),
             theme_applied: None,
             snapping_dialog: Default::default(),
             console_panel: Default::default(),
@@ -472,11 +476,15 @@ impl AppShell {
             context_paint_colour: crate::panels::colour::ColourPanel::context_editor(),
             text_bar: Default::default(),
             picture_frame_bar: Default::default(),
+            picture_frame_gesture: Default::default(),
             text_bar_stamp: None,
             font_families: None,
             font_preview: None,
             prefs_dialog: Default::default(),
             canvas_size: [800.0, 600.0],
+            canvas_drop_bounds: None,
+            file_drop_position: None,
+            native_picture_frame_pickers: false,
             about: Default::default(),
             about_chrome: Default::default(),
             window_title_sent: None,
@@ -609,7 +617,7 @@ impl AppShell {
     }
 
     fn render(&mut self, snapshot: Value) {
-        self.last_snapshot = snapshot;
+        self.last_snapshot = std::cell::OnceCell::from(snapshot);
         self.app_canvas.invalidate();
         self.refresh_count += 1;
     }
@@ -971,7 +979,7 @@ impl AppShell {
             let previous_zoom = tracks_zoom.then(|| self.workspace.session().map(|session| session.view.zoom)).flatten();
             match self.apply_context_pick(command) {
                 Ok(_) if previous_zoom.is_some_and(|zoom| self.workspace.session().is_some_and(|session| session.view.zoom != zoom)) => {
-                    self.app_canvas.preview_zoom(ui);
+                    ui.ctx().request_repaint();
                 }
                 Err(error) => self.status_bar.set_hint_key(&error.message_key),
                 _ => {}
@@ -1138,15 +1146,46 @@ impl AppShell {
             Some(session) => self.picture_frame_bar.reload(session),
             None => self.picture_frame_bar = Default::default(),
         }
-        self.picture_frame_bar.target().is_some()
+        self.picture_frame_bar.visible()
     }
 
     pub fn picture_frame_bar_edit(&mut self, edit: crate::picture_frame_bar::FrameBarEdit) -> dtool_core::CommandResult {
+        use crate::picture_frame_bar::FrameBarEdit;
         if !self.refresh_picture_frame_bar() {
             return Err(dtool_core::CommandError::invalid_params());
         }
-        if edit == crate::picture_frame_bar::FrameBarEdit::PickImage {
+        if edit == FrameBarEdit::PickMultiple {
+            #[cfg(windows)]
+            {
+                let paths = crate::dialogs::pick_multiple_file_paths(
+                    text("frame.place_multiple"), text("dialog.file.filter.image"),
+                    &crate::place_tool::PLACE_IMAGE_EXTENSIONS,
+                ).map_err(|_| dtool_core::CommandError::new("IO.OTHER"))?;
+                if paths.is_empty() { return Ok(Value::Null); }
+                let paths = paths.into_iter().map(|path| path.to_string_lossy().into_owned()).collect();
+                self.place_tool.start_frame_queue(&mut self.workspace, paths)?;
+                return Ok(serde_json::json!({ "placing": true }));
+            }
+            #[cfg(not(windows))]
+            return Err(dtool_core::CommandError::not_implemented());
+        }
+        if edit == FrameBarEdit::PickImage {
             let object = self.picture_frame_bar.target().ok_or_else(dtool_core::CommandError::invalid_params)?;
+            #[cfg(windows)]
+            if self.native_picture_frame_pickers {
+                let path = crate::dialogs::pick_file_path_with_extensions(
+                    text("frame.replace_image"), text("dialog.file.filter.image"),
+                    &crate::place_tool::PLACE_IMAGE_EXTENSIONS, None,
+                ).map_err(|_| dtool_core::CommandError::new("IO.OTHER"))?;
+                let Some(path) = path else { return Ok(Value::Null); };
+                let path = path.to_str().ok_or_else(dtool_core::CommandError::invalid_params)?;
+                if self.picture_frame_bar.frame.as_ref().is_some_and(|frame| frame.image.is_none()) {
+                    return self.run_and_reconcile(Command::with_params("image.place", serde_json::json!({
+                        "path": path, "pos": [0, 0], "picture_frame": object, "fill_frame": true,
+                    })));
+                }
+                return self.picture_frame_bar_edit(FrameBarEdit::ReplaceImage(path.to_owned()));
+            }
             self.open_file_dialog(crate::dialogs::FileDialogMode::ReplaceImage(object.0));
             return Ok(serde_json::json!({ "dialog": "frame.replace_image" }));
         }
@@ -1305,7 +1344,8 @@ impl AppShell {
                 .unwrap_or(id).to_string();
         }
         let active_workspace_id = active_workspace_id.unwrap_or(&self.menu_persona);
-        if !self.top_toolbar_visible() { return; }
+        let slice = self.menu_persona == "slice";
+        if !slice && !self.top_toolbar_visible() { return; }
         let home_open = self.workspace.active().is_none() && self.new_document_dialog.is_some()
             && self.file_dialog.is_none() && self.exit_review.is_none();
         let mut action = None;
@@ -1319,7 +1359,9 @@ impl AppShell {
                 ui.spacing_mut().interact_size.y = dtool_design::size("bar.toolbar.control.height");
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     self.update_indicator.show(ui, &mut self.icon_cache, home_open);
-                    action = crate::persona_bar::workspace_icons(ui, self.workspace.session(), &mut self.icon_cache);
+                    if !slice {
+                        action = crate::persona_bar::workspace_icons(ui, self.workspace.session(), &mut self.icon_cache);
+                    }
                     if self.menu_persona == "pixel"
                         && let Some(session) = self.workspace.session()
                         && let Some(command) = crate::persona_bar::quick_mask_icons(ui, session, &mut self.icon_cache)
@@ -1331,6 +1373,7 @@ impl AppShell {
                         if persona_action.is_some() {
                             action = persona_action;
                         }
+                        if slice { return; }
                         ui.separator();
                         if let Some(session) = self.workspace.session() {
                             if let Some(command) = crate::persona_bar::view_mode_switch(ui, session, &mut self.icon_cache) {
@@ -1353,7 +1396,7 @@ impl AppShell {
                     });
                 });
             });
-        if let Some(draft) = self.studio_windows.toolbar_draft(active_workspace_id) {
+        if !slice && let Some(draft) = self.studio_windows.toolbar_draft(active_workspace_id) {
             let outside = ui.input(|input| input.pointer.primary_released()
                 && input.pointer.interact_pos().is_some_and(|pos| !header.response.rect.contains(pos)));
             if toolbar_edit.is_none() && outside
@@ -1367,7 +1410,7 @@ impl AppShell {
                 edit.apply(draft);
             }
         }
-        self.toolbar_customisation_menu(ui, header.response.rect, "header");
+        if !slice { self.toolbar_customisation_menu(ui, header.response.rect, "header"); }
         if let Some(command) = action {
             if command.name == "ui.persona.set" && command.params["id"].as_str() == Some("home") {
                 self.open_new_document_dialog();
@@ -2489,7 +2532,9 @@ impl AppShell {
     }
 
     pub fn last_snapshot(&self) -> &Value {
-        &self.last_snapshot
+        self.last_snapshot.get_or_init(|| {
+            self.workspace.session().and_then(|session| session.query(None).ok()).unwrap_or(Value::Null)
+        })
     }
 
     pub fn refresh_count(&self) -> u64 {
@@ -2499,7 +2544,7 @@ impl AppShell {
     pub fn reconcile_active(&mut self) {
         let Some(id) = self.workspace.active() else {
             self.last_drawn = None;
-            self.last_snapshot = Value::Null;
+            self.last_snapshot.take();
             return;
         };
         let Some(generation) = self.workspace.session().map(|session| session.generation) else { return };
@@ -2509,9 +2554,11 @@ impl AppShell {
         if self.last_drawn.is_none_or(|(previous, _)| previous != id) {
             self.status_bar.clear_file_open_error();
         }
-        let snapshot = self.workspace.session().and_then(|session| session.query(None).ok()).unwrap_or(Value::Null);
+        // Canvas, thumbnails and controls follow their own revision keys.
+        // Serializing the document here copies every imported image on a selection.
+        self.last_snapshot.take();
         self.last_drawn = Some((id, generation));
-        self.render(snapshot);
+        self.refresh_count += 1;
     }
 
     pub fn open_paste_special(&mut self) -> bool {
@@ -2676,6 +2723,15 @@ impl AppShell {
             }
             return;
         }
+        if session.active_tool == "tool.table"
+            && let [id] = session.selection.ids.as_slice()
+            && session.document.get_object(*id).is_some_and(|object| matches!(object.kind, dtool_core::ObjectKind::Table(_)))
+        {
+            if let Err(error) = session.run_named("table.selection.set", serde_json::json!({"id": id, "mode": "all"})) {
+                self.status_bar.set_hint_key(&error.message_key);
+            }
+            return;
+        }
         let nodes = &mut self.app_canvas.input.nodes;
         if crate::canvas_input::tool_kind(&session.active_tool) == crate::canvas_input::ToolKind::Node
             && (nodes.grab.is_some() || nodes.select_all(session))
@@ -2766,6 +2822,118 @@ impl AppShell {
         self.sync_dock();
     }
 
+    fn show_file_and_exit_dialogs(&mut self, ui: &mut egui::Ui) {
+        if let Some(state) = &mut self.file_dialog {
+            use crate::dialog_chrome::DialogResult;
+            let result = crate::dialogs::file_dialog_result(ui, state, &mut self.workspace);
+            if result != DialogResult::Open {
+                if state.close_after_save && result == DialogResult::Cancel {
+                    self.close_queue.clear();
+                }
+                if matches!(state.mode, crate::dialogs::FileDialogMode::Open | crate::dialogs::FileDialogMode::TemplateOpen)
+                    && result == DialogResult::Confirm
+                {
+                    self.new_document_dialog = None;
+                    self.status_bar.clear_file_open_error();
+                }
+                let loaded_selection = state.mode == crate::dialogs::FileDialogMode::SelectionLoad
+                    && result == DialogResult::Confirm;
+                self.file_dialog = None;
+                if loaded_selection { self.reconcile_active(); }
+            }
+        }
+        if let Some(review) = &mut self.exit_review {
+            use crate::dialog_chrome::DialogResult;
+            let result = review.show(ui, &mut self.workspace);
+            if result != DialogResult::Open {
+                self.exit_review = None;
+                let approved = result == DialogResult::Confirm;
+                if self.update_indicator.finish_exit(approved) && approved {
+                    self.exit_approved = true;
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            }
+        }
+    }
+
+    fn show_slice_workspace(&mut self, ui: &mut egui::Ui) {
+        self.canvas_drop_bounds = None;
+        self.file_drop_position = None;
+        let Some(id) = self.workspace.active() else { return };
+        let width = ui.available_width();
+        let source_width = (width * 0.17).clamp(70.0, 222.0);
+        let export_width = (width * 0.52).min(590.0);
+        let disabled = self.input_blocked(ui.ctx());
+        if !disabled && ui.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::S)) {
+            self.save_active_document();
+        }
+        let titles: Vec<_> = self.workspace.contexts().iter().map(|context| (context.id, context.title.clone())).collect();
+        egui::Panel::top("dtool.slice.documents")
+            .show_separator_line(false)
+            .frame(egui::Frame::new().fill(dtool_design::theme::surface(ui.ctx(), "bars")))
+            .show(ui, |ui| {
+                egui::ScrollArea::horizontal().show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        for (doc, title) in titles {
+                            if dtool_design::tab(ui, doc == id, &title).clicked() && doc != id {
+                                let _ = self.activate_context(doc);
+                            }
+                        }
+                    });
+                });
+            });
+        let Some(context) = self.workspace.active().and_then(|id| self.workspace.get_mut(id)) else { return };
+        let panel = || egui::Frame::new().fill(dtool_design::theme::surface(ui.ctx(), "panel.bg")).inner_margin(6.0);
+        let panel_frame = panel();
+        egui::Panel::left("dtool.slice.layers")
+            .exact_size(source_width).resizable(false)
+            .frame(panel_frame)
+            .show(ui, |ui| self.slices_panel.show_source_tree(ui, context));
+        egui::Panel::right("dtool.slice.export")
+            .exact_size(export_width).resizable(false)
+            .frame(panel_frame)
+            .show(ui, |ui| self.slices_panel.show_workspace(ui, context));
+
+        let rect = ui.available_rect_before_wrap();
+        let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
+        self.canvas_id = Some(response.id);
+        let size = [rect.width(), rect.height()];
+        if size.iter().all(|value| *value > 1.0 && value.is_finite()) {
+            let session = &mut context.session;
+            let view = &mut session.view;
+            if let Some(previous) = session.view_canvas_size {
+                for (axis, scroll) in view.scroll.iter_mut().enumerate() {
+                    *scroll += (size[axis] - previous[axis]) * 0.5;
+                }
+            } else if context.initial_view_pending {
+                use dtool_core::view::{ViewTarget, center_region};
+                let document = &session.document;
+                let target = context.reopen_view_target.take().and_then(|target| target.bounds(document))
+                    .or_else(|| ViewTarget::first(document));
+                if let Some(bounds) = target {
+                    center_region(view, bounds, size);
+                }
+                context.initial_view_pending = false;
+            }
+            session.view_canvas_size = Some(size);
+        }
+        self.app_canvas.read_only_frame(ui, &response, &mut context.session, !disabled);
+        if !disabled && response.clicked_by(egui::PointerButton::Primary)
+            && let Some(pointer) = response.interact_pointer_pos()
+        {
+            let session = &mut context.session;
+            let local = pointer - rect.min;
+            let point = dtool_core::view_to_doc(&session.view, [local.x, local.y]);
+            let tolerance = dtool_core::scene_hit::HIT_TOLERANCE_PX / session.view.zoom.max(1e-4);
+            let selected = dtool_core::scene_hit::hit_test_in_view(self.app_canvas.scene(), session, point, tolerance, None)
+                .or_else(|| session.document.objects.iter().rev().find(|object| {
+                    dtool_core::artboard::is_artboard(object) && dtool_core::artboard::contains(object, point)
+                }).map(|object| object.id));
+            crate::slices_panel::select_source(session, selected, ui.input(|input| input.modifiers));
+            ui.ctx().request_repaint();
+        }
+    }
+
     fn show_frame(&mut self, ui: &mut egui::Ui) {
         let widget_had_focus = self.widget_focused(ui.ctx());
         self.adopt_core_prefs();
@@ -2775,9 +2943,11 @@ impl AppShell {
         self.modal_blocking = crate::dialog_chrome::begin_modal_frame(ui.ctx());
         self.modal_blocking |= export_dialog().lock().is_ok_and(|dialog| dialog.is_open());
         self.modal_blocking |= self.exit_review.is_some();
+        self.slices_panel.update_export(ui.ctx());
+        let slice = dtool_core::commands::persona::slice_active() && self.workspace.active().is_some();
         #[cfg(windows)]
         { self.modal_blocking |= self.print_dialog.is_some(); }
-        if !self.input_blocked(ui.ctx()) {
+        if !slice && !self.input_blocked(ui.ctx()) {
             self.handle_canvas_tab(ui.ctx());
         }
         self.recovery_offer.show(ui, &mut self.workspace);
@@ -2802,6 +2972,16 @@ impl AppShell {
             if seen!=self.persona_revision{self.layout.sync_tree_visibility();}
         }
         self.reconcile_active();
+        if slice {
+            self.show_file_and_exit_dialogs(ui);
+            self.sync_window_title(ui.ctx());
+            if self.client_title_bar {
+                crate::menu_tree::show_read_only_caption(ui, &self.window_title());
+            }
+            self.show_persona_header(ui);
+            self.show_slice_workspace(ui);
+            return;
+        }
         self.snapping_dialog.show(ui.ctx(), &mut self.workspace);
         if let Some(error) = crate::table::sort_options::show(ui.ctx(), &mut self.workspace) {
             self.status_bar.set_hint_key(&error);
@@ -3045,6 +3225,10 @@ impl AppShell {
             }
         }
         self.show_persona_header(ui);
+        if dtool_core::commands::persona::slice_active() && self.workspace.active().is_some() {
+            self.show_slice_workspace(ui);
+            return;
+        }
         self.show_studio_windows(ui.ctx());
         let delete_key=!self.input_blocked(ui.ctx())&&self.current_focus(ui.ctx())==Focus::Canvas&&ui.input(|input|input.key_pressed(egui::Key::Delete));
         if delete_key && !self.app_canvas.input.nodes.claims_delete()
@@ -3183,6 +3367,7 @@ impl AppShell {
             }
         }
         let dropped: Vec<std::path::PathBuf> = ui.input(|input| input.raw.dropped_files.iter().map(|file| file.path().to_path_buf()).collect());
+        let drop_position = self.file_drop_position.take().or_else(|| ui.input(|input| input.pointer.hover_pos()));
         let startup_home = self.workspace.active().is_none() && self.new_document_dialog.is_some()
             && self.file_dialog.is_none() && self.exit_review.is_none() && !self.update_indicator.dialog_open();
         let can_drop = !self.input_blocked(ui.ctx());
@@ -3191,8 +3376,14 @@ impl AppShell {
                 .partition(|path| crate::pdf_import_dialog::is_pdf(path));
             let target = self.workspace.active();
             self.pdf_drop_queue.extend(pdfs.into_iter().map(|path| (path, target)));
+            let point = self.canvas_drop_bounds.filter(|(owner, _)| Some(*owner) == target).and_then(|(_, rect)| {
+                let pointer = drop_position.filter(|p| rect.contains(*p))?;
+                let session = self.workspace.session()?;
+                let local = pointer - rect.min;
+                Some(dtool_core::view_to_doc(&session.view, [local.x, local.y]))
+            });
             if can_drop && !other.is_empty()
-                && let Err(error) = self.place_tool.drop_files(&mut self.workspace, &other)
+                && let Err(error) = self.place_tool.drop_files_at(&mut self.workspace, &other, point)
             {
                 self.status_bar.set_hint_key(&error.message_key);
             }
@@ -3203,37 +3394,7 @@ impl AppShell {
             self.open_pdf_options(path, target);
         }
         self.show_pdf_import(ui.ctx());
-        if let Some(state) = &mut self.file_dialog {
-            use crate::dialog_chrome::DialogResult;
-            let result = crate::dialogs::file_dialog_result(ui, state, &mut self.workspace);
-            if result != DialogResult::Open {
-                if state.close_after_save && result == DialogResult::Cancel {
-                    self.close_queue.clear();
-                }
-                if matches!(state.mode, crate::dialogs::FileDialogMode::Open | crate::dialogs::FileDialogMode::TemplateOpen)
-                    && result == DialogResult::Confirm
-                {
-                    self.new_document_dialog = None;
-                    self.status_bar.clear_file_open_error();
-                }
-                let loaded_selection = state.mode == crate::dialogs::FileDialogMode::SelectionLoad
-                    && result == DialogResult::Confirm;
-                self.file_dialog = None;
-                if loaded_selection { self.reconcile_active(); }
-            }
-        }
-        if let Some(review) = &mut self.exit_review {
-            use crate::dialog_chrome::DialogResult;
-            let result = review.show(ui, &mut self.workspace);
-            if result != DialogResult::Open {
-                self.exit_review = None;
-                let approved = result == DialogResult::Confirm;
-                if self.update_indicator.finish_exit(approved) && approved {
-                    self.exit_approved = true;
-                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
-                }
-            }
-        }
+        self.show_file_and_exit_dialogs(ui);
         if self.file_dialog.is_none() && self.pdf_import.is_none()
             && self.exit_review.is_none() && !self.update_indicator.dialog_open()
             && let Some(state) = &mut self.new_document_dialog {
@@ -3308,6 +3469,7 @@ impl AppShell {
         self.sync_status_chrome();
         self.status_bar.show(ui);
         tabs::tab_row(self, ui);
+        self.place_tool.show_frame_queue(ui, &mut self.workspace);
         self.navigation_canvas(ui);
         if let Some(text) = paste_after_canvas {
             self.paste_after_text_tool_click(ui.ctx(), text);
@@ -4285,6 +4447,7 @@ impl AppShell {
 
 impl AppShell {
     pub fn navigation_canvas(&mut self, ui: &mut egui::Ui) {
+        self.canvas_drop_bounds = None;
         let Some(id) = self.workspace.active() else {
             self.zoom_drag = None;
             let rect = ui.available_rect_before_wrap();
@@ -4349,6 +4512,7 @@ impl AppShell {
         let response = ui.allocate_rect(inner, egui::Sense::click_and_drag());
         self.canvas_id = Some(response.id);
         let rect = response.rect;
+        self.canvas_drop_bounds = Some((id, rect));
         let size = [rect.width(), rect.height()];
         if usable_canvas {
             self.canvas_size = size;
@@ -4453,7 +4617,7 @@ impl AppShell {
                 }
             }
             if before != (view.zoom, view.scroll) {
-                self.app_canvas.preview_zoom(ui);
+                ui.ctx().request_repaint();
             }
             if response.hovered() {
                 let cursor = match &self.zoom_drag {
@@ -4557,7 +4721,20 @@ impl AppShell {
             .unwrap_or_default();
         let symbol_drag = crate::panels::symbols::dragging(ui.ctx());
         let canvas_input = input && !placing && !blocked && !guide_drag && !symbol_drag;
-        let compound = self.compound_canvas.update(ui, &response, &context.session, id, canvas_input);
+        let frame_drag = self.picture_frame_gesture.update(ui, &response, &context.session, id,
+            canvas_input && crate::canvas_input::tool_kind(&context.session.active_tool) == crate::canvas_input::ToolKind::Move);
+        if frame_drag.capture { self.app_canvas.input.cancel(); }
+        if let Some(command) = frame_drag.command {
+            if let Err(error) = context.session.run(&command) { self.status_bar.set_hint_key(&error.message_key); }
+            ui.ctx().request_repaint();
+        }
+        let original_frame = frame_drag.preview.and_then(|preview| {
+            let original = dtool_core::commands::picture_frame::get_frame(&context.session.document, preview.object)?;
+            dtool_core::commands::picture_frame::put_frame(&mut context.session.document, preview);
+            self.app_canvas.invalidate();
+            Some(original)
+        });
+        let compound = self.compound_canvas.update(ui, &response, &context.session, id, canvas_input && !frame_drag.capture);
         let original = compound.draft.as_ref().and_then(|draft| {
             let object = context.session.document.find_object_mut(draft.id.0)?;
             self.app_canvas.invalidate();
@@ -4574,7 +4751,7 @@ impl AppShell {
         };
         if !preview_drawn {
             self.app_canvas.frame(ui, &response, &mut context.session,
-                input && !placing && !blocked && !symbol_drag && !compound.active);
+                input && !placing && !blocked && !symbol_drag && !compound.active && !frame_drag.capture);
         }
         if let Some(marquee) = zoom_marquee {
             let painter = ui.painter_at(rect);
@@ -4587,6 +4764,10 @@ impl AppShell {
         }
         if let Some(original) = original {
             if let Some(object) = context.session.document.find_object_mut(original.id.0) { *object = original; }
+            self.app_canvas.invalidate();
+        }
+        if let Some(original) = original_frame {
+            dtool_core::commands::picture_frame::put_frame(&mut context.session.document, original);
             self.app_canvas.invalidate();
         }
         if let Some(command) = compound.command {
@@ -4604,6 +4785,8 @@ impl AppShell {
         let guide_view = context.session.view.clone();
         crate::rulers::paint_column_guides(ui, &context.session, &guide_view, rect,
             &self.prefs.column_guide_fill_colour, &self.prefs.column_guide_stroke_colour);
+        crate::rulers::paint_pixel_grid(ui, &context.session, &guide_view, rect,
+            &self.prefs.pixel_grid_colour, self.prefs.pixel_grid_opacity);
         self.rulers.paint_visible_guides(ui, &context.session, &guide_view, rect);
         crate::rulers::paint_margins(ui, &context.session, &guide_view, rect, &self.prefs.margins_colour);
         crate::rulers::paint_baseline_grid(ui, &context.session, &guide_view, rect, &self.prefs.baseline_grid_colour);
@@ -4941,7 +5124,7 @@ impl AppShell {
         self.finish_dock_tab_drag(ui.ctx(), &drop_groups, canvas, native_drop);
         let floating_drag = crate::panels::show_floating_with_slices(ui.ctx(), &mut self.layout, &mut self.panel_registry, crate::panels::SessionPanels { slices: &mut self.slices_panel, history: &mut self.history_panel, snapshots: &mut self.snapshots_panel }, &mut self.workspace);
         if std::mem::take(&mut self.panel_registry.navigator.navigation_changed) {
-            self.app_canvas.preview_zoom(ui);
+            ui.ctx().request_repaint();
         }
         if let Some((panel, pointer, released)) = floating_drag {
             if !released {

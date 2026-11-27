@@ -56,6 +56,10 @@ impl eframe::App for App {
             .map(|dpi| dpi / ctx.pixels_per_point())
             .unwrap_or(96.0);
         self.shell.workspace.set_display_dpi(Some(dpi));
+        #[cfg(windows)]
+        if ctx.input(|input| !input.raw.dropped_files.is_empty()) {
+            self.shell.file_drop_position = native_drop_position(frame, ctx.pixels_per_point());
+        }
         self.drain_host(&ctx);
         self.shell.show(ui);
         #[cfg(windows)]
@@ -69,6 +73,22 @@ impl eframe::App for App {
         let _ = self.shell.settings.save(&path);
         self.mcp.stop(&mut self.shell.workspace, dtool_mcp::http::STOP_WAIT);
     }
+}
+
+#[cfg(windows)]
+fn native_drop_position(frame: &eframe::Frame, pixels_per_point: f32) -> Option<eframe::egui::Pos2> {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use windows_sys::Win32::Foundation::POINT;
+    use windows_sys::Win32::Graphics::Gdi::ScreenToClient;
+    use windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos;
+
+    let RawWindowHandle::Win32(window) = frame.window_handle().ok()?.as_raw() else { return None; };
+    let mut point = POINT::default();
+    // OLE file drags can suppress egui's pointer motion events.
+    if unsafe { GetCursorPos(&mut point) == 0 || ScreenToClient(window.hwnd.get() as _, &mut point) == 0 } {
+        return None;
+    }
+    Some(eframe::egui::pos2(point.x as f32, point.y as f32) / pixels_per_point)
 }
 
 #[cfg(windows)]
@@ -151,6 +171,7 @@ fn main() -> eframe::Result<()> {
     let prefs = load_prefs(&settings);
     let mut shell = AppShell::new();
     shell.client_title_bar = cfg!(windows);
+    shell.native_picture_frame_pickers = cfg!(windows);
     shell.settings = settings;
     shell.workspace.ai_connection().set_from_gui(prefs.mcp_enabled);
     #[cfg(windows)]

@@ -222,6 +222,26 @@ fn cmyk_tiff_in_srgb(decoder: &mut tiff::decoder::Decoder<Cursor<&[u8]>>, source
     }
 }
 
+/// Preview embedded resources that do not already have a decoded placement.
+pub fn embedded_thumbnail(bytes: &[u8], side: u32) -> Option<image::RgbaImage> {
+    let mut reader = ImageReader::new(Cursor::new(bytes)).with_guessed_format().ok()?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(8192);
+    limits.max_image_height = Some(8192);
+    limits.max_alloc = Some(24 * 1024 * 1024);
+    reader.limits(limits);
+    let mut decoder = reader.into_decoder().ok()?;
+    let (width, height) = decoder.dimensions();
+    if u64::from(width) * u64::from(height) > 6_000_000 { return None; }
+    let source = decoder.icc_profile().ok().flatten()
+        .filter(|bytes| bytes.len() as u64 <= MAX_ICC_BYTES)
+        .and_then(|bytes| Profile::new_icc(&bytes).ok());
+    let image = DynamicImage::from_decoder(decoder).ok()?.thumbnail(side, side);
+    let size = (image.width(), image.height());
+    let rgba = rgba_in_srgb(image, source.as_ref(), &Profile::new_srgb());
+    image::RgbaImage::from_raw(size.0, size.1, rgba)
+}
+
 pub fn decode_image(path: &Path) -> Result<DecodedImage, CommandError> {
     let extension = path.extension().and_then(|s| s.to_str()).unwrap_or("").to_ascii_lowercase();
     let importer = IMPORTERS.get().and_then(|registry| registry.read().ok().and_then(|registry| registry.get(&extension).copied()));

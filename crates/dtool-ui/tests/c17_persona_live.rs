@@ -228,3 +228,45 @@ fn c17_studio_preset_not_listed_and_unknown_on_session_path() {
         assert_eq!(live(&mut workspace, name, json!({ "name": "p" })).unwrap_err(), "UNKNOWN_COMMAND", "{name}");
     }
 }
+
+
+#[test]
+fn slice_persona_locks_artwork_but_allows_selection_and_queue_changes() {
+    let _guard = SERIAL.lock().unwrap_or_else(|error| error.into_inner());
+    persona_dir();
+    let mut workspace = Workspace::default();
+    workspace.new_document("slice_read_only");
+    live(&mut workspace, "ui.persona.set", json!({"id": "vector"})).unwrap();
+    let object = {
+        let session = workspace.session_mut().unwrap();
+        session.run_named("text.art.add", json!({"pos": [7.0, 8.0], "text": "Export"})).unwrap();
+        session.run_named("text.edit.end", json!({})).unwrap();
+        session.document.objects.last().unwrap().id
+    };
+    let artwork = serde_json::to_value(&workspace.session().unwrap().document.objects).unwrap();
+    live(&mut workspace, "ui.persona.set", json!({"id": "slice"})).unwrap();
+    let movement = Command::with_params("object.update", json!({"id": object, "pos": [30, 40]}));
+    let session = workspace.session_mut().unwrap();
+    assert!(!session.can_execute(&movement));
+    assert_eq!(session.run(&movement).unwrap_err().code, "READ_ONLY");
+    for (name, params) in [
+        ("object.delete", json!({"id": object})),
+        ("node.update", json!({"id": object, "size": [50, 50]})),
+        ("edit.undo", json!({})),
+        ("edit.redo", json!({})),
+    ] {
+        assert_eq!(live(&mut workspace, name, params).unwrap_err(), "READ_ONLY");
+    }
+    live(&mut workspace, "selection.set", json!({"ids": [object]})).unwrap();
+    assert_eq!(workspace.session().unwrap().selection.ids, [object]);
+    let created = live(&mut workspace, "slice.create", json!({"source": object, "layer": true})).unwrap();
+    let duplicate = live(&mut workspace, "slice.create", json!({"source": object, "layer": true})).unwrap();
+    assert_eq!(created["id"], duplicate["id"]);
+    assert_eq!(workspace.session().unwrap().document.slices.len(), 1);
+    live(&mut workspace, "slice.delete", json!({"id": created["id"]})).unwrap();
+    let session = workspace.session().unwrap();
+    assert!(session.document.slices.is_empty());
+    assert_eq!(serde_json::to_value(&session.document.objects).unwrap(), artwork);
+    live(&mut workspace, "ui.persona.set", json!({"id": "vector"})).unwrap();
+    assert!(workspace.session().unwrap().can_execute(&movement));
+}

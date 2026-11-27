@@ -771,7 +771,7 @@ impl Rulers {
         if view.canvas_flags.preview_mode {
             return;
         }
-        paint_grid(ui, &session.document.grid, view, canvas);
+        paint_grid_lines(ui, view, canvas, &standard_grid_lines(&session.document.grid, view.zoom, visible_doc_corners(view, canvas)));
         if session.guides.show {
             self.paint_guides(ui, session, view, canvas);
             paint_folds(ui, &session.document, view, canvas);
@@ -1028,7 +1028,7 @@ fn grid_family(out: &mut Vec<GridLine>, origin: [f32; 2], dir: [f32; 2], step: [
     }
 }
 
-pub fn grid_lines(grid: &dtool_core::grid::Grid, zoom: f32, corners: [[f32; 2]; 4]) -> Vec<GridLine> {
+fn standard_grid_lines(grid: &dtool_core::grid::Grid, zoom: f32, corners: [[f32; 2]; 4]) -> Vec<GridLine> {
     use dtool_core::grid::GridKind;
     let mut out = Vec::new();
     if grid.show {
@@ -1061,11 +1061,39 @@ pub fn grid_lines(grid: &dtool_core::grid::Grid, zoom: f32, corners: [[f32; 2]; 
             }
         }
     }
-    if grid.show_pixel && zoom >= PIXEL_GRID_MIN_ZOOM {
-        grid_family(&mut out, [0.0, 0.0], [0.0, 1.0], [1.0, 0.0], &corners, zoom, false, 0);
-        grid_family(&mut out, [0.0, 0.0], [1.0, 0.0], [0.0, 1.0], &corners, zoom, false, 0);
-    }
     out
+}
+
+fn pixel_grid_lines(out: &mut Vec<GridLine>, step: f32, zoom: f32, corners: &[[f32; 2]; 4]) {
+    if step.is_finite() && step > 0.0 && step * zoom >= PIXEL_GRID_MIN_ZOOM {
+        grid_family(out, [0.0, 0.0], [0.0, 1.0], [step, 0.0], corners, zoom, false, 0);
+        grid_family(out, [0.0, 0.0], [1.0, 0.0], [0.0, step], corners, zoom, false, 0);
+    }
+}
+
+pub fn grid_lines(grid: &dtool_core::grid::Grid, zoom: f32, corners: [[f32; 2]; 4]) -> Vec<GridLine> {
+    let mut lines = standard_grid_lines(grid, zoom, corners);
+    if grid.show_pixel {
+        pixel_grid_lines(&mut lines, 1.0, zoom, &corners);
+    }
+    lines
+}
+
+pub(crate) fn paint_pixel_grid(ui: &Ui, session: &Session, view: &ViewState, canvas: Rect, colour: &str, opacity: f32) {
+    if !session.has_document || !session.document.grid.show_pixel || view.canvas_flags.preview_mode {
+        return;
+    }
+    let document = &session.document;
+    let step = dtool_render::scene::pixel_step(document, &view.canvas_flags)
+        .unwrap_or_else(|| dtool_core::rulers::units_per_px(document.units, document.dpi));
+    let mut lines = Vec::new();
+    pixel_grid_lines(&mut lines, step, view.zoom * ui.ctx().pixels_per_point(), &visible_doc_corners(view, canvas));
+    let painter = ui.painter_at(canvas);
+    let colour = egui::Color32::from_hex(colour).unwrap_or(egui::Color32::GRAY)
+        .gamma_multiply(opacity.clamp(0.0, 1.0));
+    for line in lines {
+        dtool_design::canvas_line(&painter, doc_to_screen(view, canvas, line.from), doc_to_screen(view, canvas, line.to), colour);
+    }
 }
 
 pub fn visible_doc_corners(view: &ViewState, canvas: Rect) -> [[f32; 2]; 4] {
@@ -1074,14 +1102,18 @@ pub fn visible_doc_corners(view: &ViewState, canvas: Rect) -> [[f32; 2]; 4] {
 
 pub fn paint_grid(ui: &Ui, grid: &dtool_core::grid::Grid, view: &ViewState, canvas: Rect) -> usize {
     let lines = grid_lines(grid, view.zoom, visible_doc_corners(view, canvas));
+    paint_grid_lines(ui, view, canvas, &lines);
+    lines.len()
+}
+
+fn paint_grid_lines(ui: &Ui, view: &ViewState, canvas: Rect, lines: &[GridLine]) {
     let painter = ui.painter().with_clip_rect(canvas);
     let major = dtool_design::color("separator");
     let minor = dtool_design::color("border");
-    for line in &lines {
+    for line in lines {
         let colour = if line.major { major } else { minor };
         dtool_design::canvas_line(&painter, doc_to_screen(view, canvas, line.from), doc_to_screen(view, canvas, line.to), colour);
     }
-    lines.len()
 }
 
 pub use dtool_core::view::{bleed_margins, DEFAULT_BLEED_MM};

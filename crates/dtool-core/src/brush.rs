@@ -29,6 +29,7 @@ pub enum BrushOp {
     BackgroundErase,
     Mixer,
     ColourReplace,
+    Clone,
     Sponge,
     Tone,
     Dodge,
@@ -1689,6 +1690,33 @@ fn sampled_stroke(dst: &mut RasterViewMut, dabs: &[Dab], settings: &BrushSetting
             if x + 1 < x1 { queue.push([x + 1, y]); }
             if y > y0 { queue.push([x, y - 1]); }
             if y + 1 < y1 { queue.push([x, y + 1]); }
+        }
+    }
+}
+
+pub(crate) fn clone_dabs(
+    dst: &mut RasterViewMut,
+    source: &crate::pixel::PixelLayer,
+    dabs: &[Dab],
+    settings: &BrushSettings,
+    origin: [u32; 2],
+    offset: [i64; 2],
+) {
+    for dab in dabs {
+        let [left, top, right, bottom] = dab_bounds(dab, settings.tip_kind, [dst.width, dst.height]);
+        for y in top..bottom {
+            let sy = (i64::from(origin[1]) + i64::from(y)).saturating_add(offset[1]);
+            if !(0..i64::from(source.height)).contains(&sy) { continue; }
+            for x in left..right {
+                let sx = (i64::from(origin[0]) + i64::from(x)).saturating_add(offset[0]);
+                if !(0..i64::from(source.width)).contains(&sx) { continue; }
+                if let Some((_, coverage)) = dab.ink(settings, x as f32 - dab.x, y as f32 - dab.y) {
+                    let alpha = dab.alpha * coverage;
+                    if alpha > 0.0 {
+                        paint_pixel(dst, x, y, source.get(sx as u32, sy as u32), alpha, false, settings.protect_alpha);
+                    }
+                }
+            }
         }
     }
 }

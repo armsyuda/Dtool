@@ -26,6 +26,7 @@ struct StrokeArgs {
     velocity: Option<Vec<f32>>,
     #[serde(default)]
     invert: bool,
+    clone_source: Option<[f32; 2]>,
 }
 
 impl StrokeArgs {
@@ -33,6 +34,7 @@ impl StrokeArgs {
         let count = self.points.len();
         let unit = |v: &f32| (0.0..=1.0).contains(v);
         count != 0 && count <= MAX_POINTS && self.points.iter().flatten().all(|v| v.is_finite())
+            && self.clone_source.is_none_or(|point| point.iter().all(|v| v.is_finite()))
             && self.pressure.as_ref().is_none_or(|values| values.len() == count && values.iter().all(unit))
             && self.velocity.as_ref().is_none_or(|values| values.len() == count && values.iter().all(unit))
             && self.tilt.as_ref().is_none_or(|values| values.len() == count
@@ -55,11 +57,12 @@ impl StrokeArgs {
 
 pub fn operation(tool: &str) -> Option<BrushOp> {
     match tool {
-        "tool.paint.brush" | "tool.paint_brush" => Some(BrushOp::Paint),
+        "tool.paint.brush" | "tool.paint_brush" | crate::context_toolbar::CALLIGRAPHY_TOOL => Some(BrushOp::Paint),
         "tool.paint.pencil" | "tool.paint.pixel" => Some(BrushOp::Pixel),
         "tool.eraser.erase" | "tool.eraser" => Some(BrushOp::Erase),
         "tool.eraser.background" => Some(BrushOp::BackgroundErase),
         "tool.paint.colour_replace" => Some(BrushOp::ColourReplace),
+        crate::context_toolbar::CLONE_TOOL => Some(BrushOp::Clone),
         MIXER_TOOL => Some(BrushOp::Mixer),
         TONE_TOOL => Some(BrushOp::Tone),
         "tool.paint.adjustment" | "tool.dodge" => Some(BrushOp::Dodge),
@@ -90,7 +93,10 @@ pub(super) fn settings_for(session: &Session, tool: &str, op: BrushOp) -> BrushS
         .and_then(|id| session.document.get_object(*id))
         .and_then(|object| match object.fill { Paint::Solid { colour } => Some(colour), _ => None }))
         .or_else(|| match super::defaults::current().fill { Paint::Solid { colour } => Some(colour), _ => None });
-    let tip = session.tool_options.raster_tip(tool);
+    use crate::context_toolbar::{CALLIGRAPHY_ANGLE, CALLIGRAPHY_DEFAULT_ANGLE, CALLIGRAPHY_DEFAULT_ROUNDNESS,
+        CALLIGRAPHY_ROUNDNESS, CALLIGRAPHY_TOOL};
+    let calligraphy = tool == CALLIGRAPHY_TOOL;
+    let tip = (!calligraphy).then(|| session.tool_options.raster_tip(tool)).flatten();
     BrushSettings {
         tip: tip.map(|tip| tip.id.clone()),
         tip_kind: tip.map_or(crate::brush::TipKind::Round, |tip| tip.kind),
@@ -100,14 +106,16 @@ pub(super) fn settings_for(session: &Session, tool: &str, op: BrushOp) -> BrushS
         sub_brushes: tip.map_or_else(Vec::new, |tip| tip.sub_brushes.clone()),
         stamp_colour: op == BrushOp::Paint,
         spacing: tip.map_or(0.1, |tip| tip.spacing),
-        rotation: tip.map_or(0.0, |tip| tip.rotation),
+        rotation: if calligraphy { number(CALLIGRAPHY_ANGLE, f64::from(CALLIGRAPHY_DEFAULT_ANGLE)) }
+            else { tip.map_or(0.0, |tip| tip.rotation) },
         dynamics: tip.map(|tip| tip.dynamics.clone()).unwrap_or_default(),
         size_px: if op == BrushOp::Pixel { 1.0 } else { number("brush.width", tip.map_or(64.0, |tip| tip.size_px) as f64) },
         opacity: number("brush.opacity", tip.map_or(100.0, |tip| tip.opacity * 100.0) as f64) / 100.0,
         accumulation: tip.filter(|_| matches!(op, BrushOp::Paint | BrushOp::Erase)).and_then(|tip| tip.accumulation),
         flow: number("brush.flow", tip.map_or(100.0, |tip| tip.flow * 100.0) as f64) / 100.0,
         hardness: number("brush.hardness", tip.map_or(80.0, |tip| tip.hardness * 100.0) as f64) / 100.0,
-        roundness: tip.map_or(1.0, |tip| tip.roundness),
+        roundness: if calligraphy { number(CALLIGRAPHY_ROUNDNESS, f64::from(CALLIGRAPHY_DEFAULT_ROUNDNESS)) / 100.0 }
+            else { tip.map_or(1.0, |tip| tip.roundness) },
         pressure_size: session.tool_options.flag(tool, "brush.pressure_size").unwrap_or(false),
         protect_alpha: session.tool_options.flag(tool, "brush.protect_alpha").unwrap_or(false),
         symmetry: number("brush.symmetry", 1.0).round().clamp(1.0, 8.0) as u32,
@@ -126,7 +134,13 @@ pub(super) fn settings_for(session: &Session, tool: &str, op: BrushOp) -> BrushS
 pub(super) fn can_execute(session: &Session, command: &Command) -> Option<bool> {
     match command.name.as_str() {
         STROKE => Some(session.has_document && operation(&session.active_tool)
-            .is_some_and(|op| !session.quick_mask.active || supports_quick_mask(op))),
+            .is_some_and(|op| {
+                if op == BrushOp::Clone {
+                    clone_layer(session).is_some()
+                } else {
+                    !session.quick_mask.active || supports_quick_mask(op)
+                }
+            })),
         TONE_ADD => Some(session.has_document && session.active_tool == TONE_TOOL && !session.quick_mask.active
             && tone_source(session).is_ok()),
         MIXER_LOAD | MIXER_CLEAN => Some(session.has_document && session.active_tool == MIXER_TOOL && !session.quick_mask.active),
@@ -192,6 +206,9 @@ fn apply_stroke(session: &mut Session, command: &Command) -> CommandResult {
 type RasterDraft = Option<(Document, crate::ObjectId)>;
 
 fn raster_stroke(session: &Session, args: &StrokeArgs, op: BrushOp) -> Result<(RasterDraft, Option<MixerLoad>), CommandError> {
+    if op == BrushOp::Clone && args.clone_source.is_none() {
+        return Err(CommandError::invalid_params());
+    }
     let settings = settings(session, op);
     let options = &session.tool_options;
     let tool = &session.active_tool;
@@ -404,6 +421,12 @@ fn selected_raster(session: &Session) -> Option<&Object> {
     })
 }
 
+/// The pixel layer on which a clone source can be placed or painted.
+pub fn clone_layer(session: &Session) -> Option<crate::ObjectId> {
+    (!session.quick_mask.active).then(|| selected_raster(session)).flatten()
+        .filter(|object| editable(&session.document, object)).map(|object| object.id)
+}
+
 /// Three corners of the active symmetry surface in document coordinates:
 /// its origin and the ends of its local X and Y axes.
 pub fn symmetry_frame(session: &Session, viewport: [f32; 2]) -> Option<[[f32; 2]; 3]> {
@@ -457,10 +480,19 @@ fn paint(
         return Err(CommandError::invalid_params());
     }
     let scale = [pixels.width as f32 / size[0], pixels.height as f32 / size[1]];
-    let points = stroke.samples(|point| {
+    let to_raster = |point| {
         let [x, y] = apply_matrix(&inverse, point);
         [(x - object.pos[0]) * scale[0], (y - object.pos[1]) * scale[1]]
-    });
+    };
+    let points = stroke.samples(to_raster);
+    let clone_offset = if op == BrushOp::Clone {
+        let source = to_raster(stroke.clone_source.ok_or_else(CommandError::invalid_params)?);
+        let offset = [source[0].floor() - points[0].x.floor(), source[1].floor() - points[0].y.floor()];
+        if !offset.iter().all(|v| v.is_finite()) { return Err(CommandError::invalid_params()); }
+        Some(offset.map(|v| v.round() as i64))
+    } else {
+        None
+    };
     let size = [pixels.width, pixels.height];
     let filtering = brush::is_filter(op);
     let mut paths = symmetric_paths(points, size, settings);
@@ -472,7 +504,10 @@ fn paint(
     let before = pixels.read_region(rect);
     let mut after = before.clone();
     let mut raster = RasterViewMut::new(w, h, &mut after);
-    if let Some((colour, pigment)) = mixer {
+    if let Some(offset) = clone_offset {
+        let dabs = brush::dabs(&paths[0].points, settings);
+        brush::clone_dabs(&mut raster, pixels, &dabs, settings, [x0, y0], offset);
+    } else if let Some((colour, pigment)) = mixer {
         brush::mixer_stroke(&mut raster, &paths[0].points, settings, params.strength, colour, *pigment, [x0, y0]);
     } else if filtering {
         let dabs = paths.iter().map(|path| brush::dabs(&path.points, &path.settings(settings)));

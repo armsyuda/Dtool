@@ -2,6 +2,7 @@ use dtool_core::commands::image_place::DecodedImage;
 use dtool_core::{Command, CommandError, ContextId, Scope, Session, Workspace};
 use dtool_strings::text;
 use serde_json::json;
+use std::collections::HashMap;
 
 pub const TOOL: &str = "tool.place_image";
 
@@ -18,6 +19,8 @@ pub struct PlaceTool {
     current_path: Option<String>,
     queue: Vec<String>,
     queued_images: Vec<(String, DecodedImage)>,
+    frame_queue: bool,
+    thumbnails: HashMap<String, Option<egui::TextureHandle>>,
 }
 
 /// Normalize any drag direction and preserve the image ratio unless Shift frees it.
@@ -31,7 +34,7 @@ pub fn drag_geometry(start: [f32; 2], end: [f32; 2], aspect: f32, free: bool) ->
     Some(([if dx < 0.0 { start[0] - w } else { start[0] }, if dy < 0.0 { start[1] - h } else { start[1] }], [w, h]))
 }
 
-pub const PLACE_IMAGE_EXTENSIONS: [&str; 6] = ["png", "jpg", "jpeg", "gif", "bmp", "webp"];
+pub const PLACE_IMAGE_EXTENSIONS: [&str; 8] = ["png", "jpg", "jpeg", "gif", "bmp", "webp", "tif", "tiff"];
 
 pub fn split_paths(text: &str) -> Vec<String> {
     text.split(|c| c == ';' || c == '\n')
@@ -78,6 +81,10 @@ fn place_document(workspace: &mut Workspace, command: Command) -> Result<(), Com
 
 impl PlaceTool {
     pub fn drop_files(&mut self, workspace: &mut Workspace, paths: &[std::path::PathBuf]) -> Result<bool, CommandError> {
+        self.drop_files_at(workspace, paths, None)
+    }
+
+    pub(crate) fn drop_files_at(&mut self, workspace: &mut Workspace, paths: &[std::path::PathBuf], point: Option<[f32; 2]>) -> Result<bool, CommandError> {
         let (texts, opens) = drop_commands(paths);
         let images = image_drop_paths(paths);
         if texts.is_empty() && opens.is_empty() && images.is_empty() {
@@ -90,7 +97,7 @@ impl PlaceTool {
             }
         }
         if !images.is_empty() {
-            if let Err(error) = self.drop_images(workspace, images) {
+            if let Err(error) = self.drop_images_at(workspace, images, point) {
                 first_error.get_or_insert(error);
             }
         }
@@ -105,12 +112,42 @@ impl PlaceTool {
         }
     }
 
-    fn drop_images(&mut self, workspace: &mut Workspace, paths: Vec<String>) -> Result<bool, CommandError> {
+    fn drop_images_at(&mut self, workspace: &mut Workspace, paths: Vec<String>, point: Option<[f32; 2]>) -> Result<(), CommandError> {
+        let session = workspace.session().ok_or_else(CommandError::no_document)?;
+        let frame = point.and_then(|point| frame_at(session, point));
+        let multiple = paths.len() > 1;
+        if !multiple && let (Some(frame), Some(point)) = (frame, point) {
+            self.cancel(workspace);
+            workspace.run(Scope::active(), Command::with_params("image.place", json!({
+                "path": paths[0], "pos": point, "picture_frame": frame, "fill_frame": true,
+            }))).1?;
+            return Ok(());
+        }
+        let frames_selected = session.selection.ids.iter().any(|&id| {
+            session.document.get_object(id).is_some_and(|item| {
+                item.kind == dtool_core::ObjectKind::PictureFrame && !item.locked
+            })
+        });
+        self.start_queue(workspace, paths, multiple && (frame.is_some() || frames_selected))
+    }
+
+    pub(crate) fn start_frame_queue(&mut self, workspace: &mut Workspace, paths: Vec<String>) -> Result<(), CommandError> {
+        self.start_queue(workspace, paths, true)
+    }
+
+    fn start_queue(&mut self, workspace: &mut Workspace, paths: Vec<String>, frame_queue: bool) -> Result<(), CommandError> {
         self.cancel(workspace);
+        self.queue_clear();
         let id = workspace.active().ok_or_else(CommandError::no_document)?;
         self.target = Some(id);
         self.previous_tool = workspace.get(id).ok_or_else(CommandError::context_not_found)?.session.active_tool.clone();
-        self.queue_set(workspace, paths).map(|_| true)
+        self.frame_queue = frame_queue;
+        self.link = false;
+        let result = self.queue_set(workspace, paths);
+        if result.is_err() {
+            self.cancel(workspace);
+        }
+        result
     }
 
     pub fn open(&mut self, workspace: &mut Workspace) -> Result<(), CommandError> {
@@ -144,6 +181,78 @@ impl PlaceTool {
 
     pub fn active_for(&self, id: ContextId) -> bool { self.target == Some(id) && self.image.is_some() }
 
+    pub(crate) fn show_frame_queue(&mut self, ui: &mut egui::Ui, workspace: &mut Workspace) {
+        if !self.frame_queue || self.image.is_none() {
+            return;
+        }
+        if self.target != workspace.active() || ui.input(|input| input.key_pressed(egui::Key::Escape))
+            || workspace.session().is_some_and(|session| session.active_tool != TOOL)
+        {
+            self.cancel(workspace);
+            return;
+        }
+        let Some(active) = self.current_path.clone() else { return };
+        if !self.thumbnails.contains_key(&active) {
+            let texture = self.image.as_ref().map(|image| thumbnail(ui.ctx(), &active, image));
+            self.thumbnails.insert(active.clone(), texture);
+        }
+        let count = self.queue.len() + 1;
+        let cancel = egui::Panel::bottom("picture-frame-placement")
+            .frame(egui::Frame::new().fill(dtool_design::theme::surface(ui.ctx(), "bars"))
+                .inner_margin(dtool_design::space("sm")))
+            .show(ui, |ui| {
+                let cancel = ui.horizontal(|ui| {
+                    let cancel = dtool_design::button(ui, text("button.cancel")).clicked();
+                    let remaining = count.to_string();
+                    ui.label(dtool_strings::format("frame.place_remaining", &[("count", &remaining)]));
+                    cancel
+                }).inner;
+                let mut decoded = false;
+                egui::ScrollArea::horizontal().id_salt(("frame-placement", active.as_str()))
+                    .auto_shrink([false, false])
+                    .show_viewport(ui, |ui, viewport| {
+                        ui.horizontal(|ui| {
+                            let margin = dtool_design::space("sm");
+                            let mut x = 0.0;
+                            for (index, path) in std::iter::once(&active).chain(self.queue.iter()).enumerate() {
+                                let next = index == 0;
+                                let width = if next { 76.0 } else { 58.0 };
+                                let (slot, response) = ui.allocate_exact_size(egui::vec2(width, 56.0), egui::Sense::hover());
+                                let in_view = viewport.x_range().intersects(egui::Rangef::new(x, x + width));
+                                x += width + ui.spacing().item_spacing.x;
+                                if !in_view { continue; }
+                                if !decoded && !self.thumbnails.contains_key(path) {
+                                    let image = dtool_io::image_import::decode_image(std::path::Path::new(path)).ok();
+                                    self.thumbnails.insert(path.clone(), image.as_ref().map(|image| thumbnail(ui.ctx(), path, image)));
+                                    decoded = true;
+                                    ui.ctx().request_repaint();
+                                }
+                                let label = std::path::Path::new(path).file_name().and_then(|name| name.to_str()).unwrap_or(path);
+                                response.on_hover_text(label);
+                                let rect = slot.shrink(if next { 1.0 } else { 6.0 });
+                                let radius = dtool_design::radius("sm");
+                                ui.painter().rect_filled(rect, radius, dtool_design::theme::surface(ui.ctx(), "pasteboard"));
+                                if let Some(texture) = self.thumbnails.get(path).and_then(Option::as_ref) {
+                                    let bounds = rect.shrink(margin);
+                                    let size = texture.size_vec2();
+                                    let factor = (bounds.width() / size.x).min(bounds.height() / size.y);
+                                    ui.painter().image(texture.id(), egui::Rect::from_center_size(rect.center(), size * factor),
+                                        egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
+                                } else {
+                                    ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, (index + 1).to_string(),
+                                        egui::FontId::default(), ui.visuals().text_color());
+                                }
+                                if next {
+                                    ui.painter().rect_stroke(rect, radius, egui::Stroke::new(2.0, dtool_design::color("accent")), egui::StrokeKind::Inside);
+                                }
+                            }
+                        });
+                    });
+                cancel
+            }).inner;
+        if cancel { self.cancel(workspace); }
+    }
+
     pub fn cancel(&mut self, workspace: &mut Workspace) {
         if let Some(path) = self.current_path.take() {
             self.queue.insert(0, path);
@@ -155,6 +264,9 @@ impl PlaceTool {
         self.target = None;
         self.press = None;
         self.dialog_open = false;
+        if self.frame_queue {
+            self.queue_clear();
+        }
     }
 
     pub fn queue_set(&mut self, workspace: &mut Workspace, paths: Vec<String>) -> Result<(), CommandError> {
@@ -191,6 +303,8 @@ impl PlaceTool {
         self.queue.clear();
         self.queued_images.clear();
         self.current_path = None;
+        self.frame_queue = false;
+        self.thumbnails.clear();
     }
 
     fn take_queued_image(&mut self, path: &str) -> Option<DecodedImage> {
@@ -245,26 +359,32 @@ impl PlaceTool {
         if self.target != Some(id) { return Err(CommandError::context_not_found()); }
         let image = self.image.as_ref().ok_or_else(CommandError::invalid_params)?;
         let mut params = json!({"source":image.resource,"pixel_size":image.resource.pixel_size,"rgba":image.rgba,"pos":position});
+        let frame = size.is_none().then(|| frame_at(session, position)).flatten();
+        if self.frame_queue && frame.is_none() {
+            return Ok(());
+        }
         if let Some(size) = size {
             params["size"] = json!(size);
-        } else if let Some(frame) = session.document.objects().iter().rev().find(|object| {
-            !object.locked && dtool_core::scene::is_drawn_in_view(&session.document, &session.view, object.id)
-                && dtool_core::commands::picture_frame::contains_point(&session.document, object, position)
-        }) {
-            params["picture_frame"] = json!(frame.id);
+        } else if let Some(frame) = frame {
+            params["picture_frame"] = json!(frame);
+            params["fill_frame"] = json!(true);
         }
         if self.link { params["link"] = json!(true); }
         session.run_named("image.place", params)?;
         self.image = None;
         self.current_path = None;
         self.press = None;
-        if !self.queue.is_empty() {
+        while !self.queue.is_empty() {
             let id = self.target.ok_or_else(CommandError::no_document)?;
-            self.arm_next_on_session(id, session)?;
-        } else {
-            self.restore_tool(session);
-            self.target = None;
+            match self.arm_next_on_session(id, session) {
+                Ok(()) => return Ok(()),
+                Err(error) if !self.frame_queue => return Err(error),
+                Err(error) => self.error_key = Some(error.message_key),
+            }
         }
+        self.restore_tool(session);
+        self.target = None;
+        self.queue_clear();
         Ok(())
     }
 
@@ -319,11 +439,28 @@ impl PlaceTool {
             self.image = None;
             self.target = None;
             self.press = None;
+            if self.frame_queue { self.queue_clear(); }
             return;
         }
         if !input { return; }
-        if response.hovered() { ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair); }
+        if response.hovered() {
+            ui.ctx().set_cursor_icon(if self.frame_queue { egui::CursorIcon::None } else { egui::CursorIcon::Crosshair });
+        }
         let point = |p: egui::Pos2| dtool_core::view_to_doc(&session.view, [p.x - response.rect.min.x, p.y - response.rect.min.y]);
+        if self.frame_queue {
+            if let Some(pointer) = response.hover_pos() {
+                paint_placement_cursor(ui, response, pointer);
+            }
+            if response.clicked()
+                && let Some(position) = response.interact_pointer_pos().map(point)
+            {
+                if let Err(error) = self.place(id, session, position, None) {
+                    self.error_key = Some(error.message_key);
+                }
+                ui.ctx().request_repaint();
+            }
+            return;
+        }
         if response.drag_started() { self.press = ui.input(|i| i.pointer.press_origin()).map(point); }
         let end = response.interact_pointer_pos().map(point);
         let free = ui.input(|i| i.modifiers.shift);
@@ -340,5 +477,45 @@ impl PlaceTool {
             if let Err(error) = self.place(id,session,pos,size) { self.error_key = Some(error.message_key); }
             ui.ctx().request_repaint();
         }
+    }
+}
+
+fn frame_at(session: &Session, point: [f32; 2]) -> Option<dtool_core::ObjectId> {
+    session.document.objects().iter().rev().find(|object| {
+        !object.locked && dtool_core::scene::is_drawn_in_view(&session.document, &session.view, object.id)
+            && dtool_core::commands::picture_frame::contains_point(&session.document, object, point)
+    }).map(|frame| frame.id)
+}
+
+fn thumbnail(ctx: &egui::Context, path: &str, image: &DecodedImage) -> egui::TextureHandle {
+    let [width, height] = image.resource.pixel_size.map(|value| value as usize);
+    let ratio = (96.0 / width.max(height) as f32).min(1.0);
+    let [tw, th] = [width, height].map(|value| (value as f32 * ratio).round().max(1.0) as usize);
+    let mut rgba = Vec::with_capacity(tw * th * 4);
+    for y in 0..th {
+        for x in 0..tw {
+            let index = ((y * height / th) * width + x * width / tw) * 4;
+            rgba.extend_from_slice(&image.rgba[index..index + 4]);
+        }
+    }
+    ctx.load_texture(path, egui::ColorImage::from_rgba_unmultiplied([tw, th], &rgba), egui::TextureOptions::LINEAR)
+}
+
+fn paint_placement_cursor(ui: &egui::Ui, response: &egui::Response, point: egui::Pos2) {
+    let painter = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Foreground, response.id.with("place-image")))
+        .with_clip_rect(response.interact_rect);
+    let rect = egui::Rect::from_min_size(point + egui::vec2(7.0, 5.0), egui::vec2(16.0, 13.0));
+    let ink = egui::Color32::WHITE;
+    let edge = egui::Color32::from_gray(40);
+    painter.rect(rect, 2.0, edge, egui::Stroke::new(1.0, ink), egui::StrokeKind::Inside);
+    painter.circle_filled(rect.min + egui::vec2(10.5, 4.5), 1.5, ink);
+    painter.add(egui::Shape::line([
+        rect.left_bottom() + egui::vec2(2.0, -2.0),
+        rect.min + egui::vec2(6.0, 6.0),
+        rect.right_bottom() + egui::vec2(-2.0, -2.0),
+    ].to_vec(), egui::Stroke::new(1.0, ink)));
+    for axis in [egui::Vec2::X, egui::Vec2::Y] {
+        painter.line_segment([point - axis * 4.0, point + axis * 4.0], egui::Stroke::new(3.0, edge));
+        painter.line_segment([point - axis * 4.0, point + axis * 4.0], egui::Stroke::new(1.0, ink));
     }
 }

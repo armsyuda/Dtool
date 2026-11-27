@@ -1345,9 +1345,19 @@ pub(crate) fn pick_folder_path(title: &str) -> std::io::Result<Option<std::path:
 
 #[cfg(windows)]
 pub(crate) fn pick_file_path_with_extensions(title: &str, description: &str, extensions: &[&str], save_as: Option<&str>) -> std::io::Result<Option<std::path::PathBuf>> {
+    pick_paths(title, description, extensions, save_as, false).map(|paths| paths.into_iter().next())
+}
+
+#[cfg(windows)]
+pub(crate) fn pick_multiple_file_paths(title: &str, description: &str, extensions: &[&str]) -> std::io::Result<Vec<std::path::PathBuf>> {
+    pick_paths(title, description, extensions, None, true)
+}
+
+#[cfg(windows)]
+fn pick_paths(title: &str, description: &str, extensions: &[&str], save_as: Option<&str>, multiple: bool) -> std::io::Result<Vec<std::path::PathBuf>> {
     use std::os::windows::ffi::OsStringExt;
     use windows_sys::Win32::UI::Controls::Dialogs::{
-        CommDlgExtendedError, GetOpenFileNameW, GetSaveFileNameW, OFN_EXPLORER, OFN_FILEMUSTEXIST, OFN_NOCHANGEDIR,
+        CommDlgExtendedError, GetOpenFileNameW, GetSaveFileNameW, OFN_ALLOWMULTISELECT, OFN_EXPLORER, OFN_FILEMUSTEXIST, OFN_NOCHANGEDIR,
         OFN_OVERWRITEPROMPT, OFN_PATHMUSTEXIST, OPENFILENAMEW,
     };
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetActiveWindow;
@@ -1356,7 +1366,7 @@ pub(crate) fn pick_file_path_with_extensions(title: &str, description: &str, ext
     let pattern = extensions.iter().map(|extension| format!("*.{extension}")).collect::<Vec<_>>().join(";");
     let filter: Vec<u16> = format!("{description}\0{pattern}\0\0").encode_utf16().collect();
     let extension: Vec<u16> = extensions.first().copied().unwrap_or_default().encode_utf16().chain([0]).collect();
-    let mut filename = vec![0_u16; 32768];
+    let mut filename = vec![0_u16; if multiple { 262144 } else { 32768 }];
     let mut flags = OFN_EXPLORER | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
     if let Some(initial) = save_as {
         flags |= OFN_OVERWRITEPROMPT;
@@ -1365,6 +1375,7 @@ pub(crate) fn pick_file_path_with_extensions(title: &str, description: &str, ext
         }
     } else {
         flags |= OFN_FILEMUSTEXIST;
+        if multiple { flags |= OFN_ALLOWMULTISELECT; }
     }
     let mut dialog = OPENFILENAMEW {
         lStructSize: std::mem::size_of::<OPENFILENAMEW>() as u32,
@@ -1385,10 +1396,14 @@ pub(crate) fn pick_file_path_with_extensions(title: &str, description: &str, ext
     };
     if chosen == 0 {
         let error = unsafe { CommDlgExtendedError() };
-        return if error == 0 { Ok(None) } else { Err(std::io::Error::other(format!("File dialog error {error:#x}"))) };
+        return if error == 0 { Ok(Vec::new()) } else { Err(std::io::Error::other(format!("File dialog error {error:#x}"))) };
     }
-    let end = filename.iter().position(|unit| *unit == 0).unwrap_or(filename.len());
-    Ok(Some(std::ffi::OsString::from_wide(&filename[..end]).into()))
+    let mut fields = filename.split(|unit| *unit == 0).take_while(|field| !field.is_empty())
+        .map(std::ffi::OsString::from_wide);
+    let Some(first) = fields.next() else { return Ok(Vec::new()); };
+    let first = std::path::PathBuf::from(first);
+    let rest = fields.map(|name| first.join(name)).collect::<Vec<_>>();
+    Ok(if rest.is_empty() { vec![first] } else { rest })
 }
 
 pub fn save_document_as(workspace: &mut dtool_core::Workspace, id: ContextId, path: &std::path::Path) -> Result<(), dtool_core::CommandError> {

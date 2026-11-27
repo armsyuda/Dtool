@@ -1006,6 +1006,10 @@ const PIXEL_MENU_ROWS: &[MenuRow] = &[
     (3, "layer.arrange.align.distribute_horizontally", "menu.layer.arrange.align.distribute_horizontally", Some("layer.arrange.distribute.h"), ITEM),
     (3, "layer.arrange.align.distribute_vertically", "menu.layer.arrange.align.distribute_vertically", Some("layer.arrange.distribute.v"), ITEM),
     (3, "layer.arrange.align.sep4", "", None, SEP),
+    (3, "layer.arrange.match.width", "menu.layer.arrange.match.width", Some(dtool_core::commands::align::MATCH_WIDTH), ITEM),
+    (3, "layer.arrange.match.height", "menu.layer.arrange.match.height", Some(dtool_core::commands::align::MATCH_HEIGHT), ITEM),
+    (3, "layer.arrange.match.rotation", "menu.layer.arrange.match.rotation", Some(dtool_core::commands::align::MATCH_ROTATION), ITEM),
+    (3, "layer.arrange.align.sep5", "", None, SEP),
     (3, "layer.arrange.align.align_layers_by_stars", "menu.layer.arrange.align.align_layers_by_stars", None, ITEM),
     (2, "layer.arrange.insert", "menu.layer.arrange.insert", None, ITEM),
     (3, "layer.arrange.insert.default", "menu.layer.arrange.insert.default", None, TOG),
@@ -1963,6 +1967,15 @@ pub(crate) fn show_queried_menu_bar_with_toolbars(ui:&mut egui::Ui,mut session:O
     });
         });
     action
+}
+
+pub(crate) fn show_read_only_caption(ui: &mut egui::Ui, title: &str) {
+    egui::Panel::top("dtool.shell.read_only_caption")
+        .exact_size(36.0)
+        .resizable(false)
+        .frame(egui::Frame::new().fill(dtool_design::theme::surface(ui.ctx(), "menu_bar"))
+            .inner_margin(egui::Margin::symmetric(8, 3)))
+        .show(ui, |ui| draw_window_caption(ui, title));
 }
 
 fn draw_window_caption(ui: &mut egui::Ui, title: &str) {

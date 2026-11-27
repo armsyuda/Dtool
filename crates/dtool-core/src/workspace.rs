@@ -611,6 +611,10 @@ impl Workspace {
             return (scope.context.or(self.active_id), Err(err));
         }
         let target = scope.context.or(self.active_id);
+        static CATALOG: std::sync::OnceLock<dtool_protocol::CommandCatalog> = std::sync::OnceLock::new();
+        if crate::commands::persona::slice_blocks(&command, CATALOG.get_or_init(dtool_protocol::CommandCatalog::new)) {
+            return (target, Err(crate::commands::persona::slice_read_only()));
+        }
         if let Some(result) = UI_SESSION_ROUTE.get().and_then(|route| route(&mut self.ui_session.0, &command)) {
             return (target, result);
         }

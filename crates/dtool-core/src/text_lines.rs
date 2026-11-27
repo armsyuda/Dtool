@@ -99,7 +99,7 @@ pub fn register_precise_text_ink(provider: PreciseTextInkProvider) -> bool {
     PRECISE_TEXT_INK.set(provider).is_ok() || PRECISE_TEXT_INK.get().is_some()
 }
 
-pub(crate) fn precise_text_ink(doc: &Document, id: ObjectId, tolerance: f64) -> Option<Vec<TextInk>> {
+pub fn precise_text_ink(doc: &Document, id: ObjectId, tolerance: f64) -> Option<Vec<TextInk>> {
     PRECISE_TEXT_INK.get().and_then(|provider| provider(doc, id, tolerance))
 }
 
@@ -242,6 +242,11 @@ pub fn text_outline_from(doc: &Document, id: ObjectId, outlines: impl FnOnce(&Do
         return Err(CommandError::new("TEXT_EMPTY"));
     }
     let polygons = outlines(doc, id).ok_or_else(|| CommandError::new("TEXT_OUTLINES_UNAVAILABLE"))?;
+    outline_polygons(id, &polygons)
+}
+
+pub(crate) fn outline_polygons(id: ObjectId, polygons: &[Vec<[f32; 2]>]) -> Result<TextOutline, dtool_protocol::CommandError> {
+    use dtool_protocol::CommandError;
     let mut path = kurbo::BezPath::new();
     for polygon in polygons.iter().filter(|p| p.len() >= 3 && p.iter().all(|v| v[0].is_finite() && v[1].is_finite())) {
         path.move_to((f64::from(polygon[0][0]), f64::from(polygon[0][1])));

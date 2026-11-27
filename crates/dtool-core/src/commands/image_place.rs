@@ -38,6 +38,8 @@ struct Place {
     source: Option<ImageResource>,
     name: Option<String>,
     picture_frame: Option<crate::ObjectId>,
+    #[serde(default)]
+    fill_frame: bool,
 }
 
 fn place(session: &mut Session, command: &Command) -> CommandResult {
@@ -75,6 +77,15 @@ fn place(session: &mut Session, command: &Command) -> CommandResult {
             return Err(CommandError::invalid_params());
         }
         let resource = crate::resources::replace_placement(&mut document, id, resource, args.rgba, link, place_path)?;
+        if args.fill_frame
+            && let Some(mut frame) = super::picture_frame::get_frame(&document, id)
+        {
+            frame.fit = super::picture_frame::ImageFit::MaxFit;
+            frame.content = super::picture_frame::ContentTransform::default();
+            frame.manual_layout = None;
+            frame.image = Some(resource);
+            super::picture_frame::put_frame(&mut document, frame);
+        }
         return super::document_change::commit(session, PLACE, document, vec![id], json!({"id":id.0,"object_id":id.0,"resource":resource.0,"ids":[id.0]}));
     }
     if link {

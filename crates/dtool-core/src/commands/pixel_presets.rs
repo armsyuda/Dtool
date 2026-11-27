@@ -101,7 +101,8 @@ fn omit_legacy_imported_pressure(saved: &BrushTip, previous: &mut BrushTip, incl
 
 pub fn editor_tool(tool: &str) -> Option<&'static str> {
     crate::context_toolbar::canonical_tool(tool).filter(|tool| {
-        super::pixel_brush::operation(tool).is_some_and(|op| op != crate::brush::BrushOp::Pixel)
+        *tool != crate::context_toolbar::CALLIGRAPHY_TOOL
+            && super::pixel_brush::operation(tool).is_some_and(|op| op != crate::brush::BrushOp::Pixel)
     })
 }
 

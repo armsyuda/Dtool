@@ -2,10 +2,10 @@ use dtool_core::command::Session;
 use dtool_core::object::ObjectId;
 use dtool_core::resources::{ImageFormat,ResourceLocation,ResourceRow,ResourceStatus};
 use dtool_core::text_link::TextLinkRow;
-use dtool_core::Command;
+use dtool_core::{Command, Document};
 use dtool_strings::text;
 use serde_json::{json,Value};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 #[derive(Default)]
@@ -20,6 +20,8 @@ pub struct ResourceManagerDialog {
     pub relink_path:String,
     pub error:Option<String>,
     pub owner:Option<dtool_core::workspace::ContextId>,
+    thumbnails: HashMap<u64, Option<egui::TextureHandle>>,
+    thumbnail_generation: Option<u64>,
 }
 
 #[derive(Default)]
@@ -30,16 +32,17 @@ struct Pending {
     #[cfg(windows)]
     pick_relink: Option<u64>,
     #[cfg(windows)]
-    browse_folder: Option<FolderField>,
+    browse_folder: Option<FolderAction>,
     #[cfg(windows)]
     reveal:Option<u64>,
     close:bool,
 }
 
 #[cfg(windows)]
-enum FolderField {
-    Destination,
-    Relink,
+enum FolderAction {
+    MakeLinked(u64),
+    Collect(Vec<u64>),
+    Relink(Vec<u64>),
 }
 
 pub fn status_text(status:ResourceStatus)->&'static str {
@@ -111,6 +114,7 @@ fn resource_table<const N: usize>(
     id: &'static str,
     columns: [(&str, f32); N],
     count: usize,
+    layout: TableLayout<'_>,
     mut row: impl FnMut(&mut egui::Ui, usize, &[f32; N]),
 ) {
     let gap = ui.spacing().item_spacing.x;
@@ -126,24 +130,33 @@ fn resource_table<const N: usize>(
         }
     });
     ui.separator();
-    let row_height = ui.spacing().interact_size.y;
-    let table_height = (ui.available_height() - 156.0).clamp(100.0, 420.0);
-    egui::ScrollArea::vertical().id_salt(id).max_height(table_height)
+    egui::ScrollArea::vertical().id_salt(id).max_height(layout.height)
         .auto_shrink([false, false])
-        .show_rows(ui, row_height, count, |ui, range| {
+        .show_rows(ui, layout.row_height, count, |ui, range| {
             for index in range {
                 ui.push_id(index, |ui| {
-                    let frame = egui::Frame::new().fill(if index % 2 == 0 {
+                    let frame = egui::Frame::new().fill(if (layout.is_selected)(index) {
+                        dtool_design::color("layers.selected")
+                    } else if index % 2 == 0 {
                         ui.visuals().faint_bg_color
                     } else {
                         egui::Color32::TRANSPARENT
                     });
                     frame.show(ui, |ui| {
-                        ui.horizontal(|ui| row(ui, index, &widths));
+                        ui.horizontal(|ui| {
+                            ui.set_min_size(egui::vec2(width + gap * (N - 1) as f32, layout.row_height));
+                            row(ui, index, &widths);
+                        });
                     });
                 });
             }
         });
+}
+
+struct TableLayout<'a> {
+    height: f32,
+    row_height: f32,
+    is_selected: &'a dyn Fn(usize) -> bool,
 }
 
 fn table_cell<R>(ui: &mut egui::Ui, width: f32, contents: impl FnOnce(&mut egui::Ui) -> R) -> R {
@@ -156,7 +169,7 @@ fn table_cell<R>(ui: &mut egui::Ui, width: f32, contents: impl FnOnce(&mut egui:
 
 fn table_label(ui: &mut egui::Ui, width: f32, label: impl Into<egui::WidgetText>, hover: impl Into<egui::WidgetText>) {
     table_cell(ui, width, |ui| {
-        ui.add(egui::Label::new(label).truncate()).on_hover_text(hover);
+        ui.add(egui::Label::new(label).selectable(false).truncate()).on_hover_text(hover);
     });
 }
 
@@ -170,6 +183,7 @@ fn table_status(ui: &mut egui::Ui, width: f32, status: ResourceStatus) {
     table_label(ui, width, label, value);
 }
 
+#[cfg(not(windows))]
 fn resource_path_field(ui: &mut egui::Ui, label: &str, value: &mut String) {
     ui.horizontal(|ui| {
         ui.label(label);
@@ -191,6 +205,8 @@ impl ResourceManagerDialog {
         self.last_located=None;
         self.selected_text=None;
         self.owner=None;
+        self.thumbnails.clear();
+        self.thumbnail_generation = None;
     }
 
     pub fn open_for(&mut self,owner:dtool_core::workspace::ContextId,session:&Session) {
@@ -212,45 +228,86 @@ impl ResourceManagerDialog {
 
     pub fn show(&mut self,ctx:&egui::Context,session:&mut Session,doc_dir:Option<&Path>) -> Option<ObjectId> {
         if !self.open {return None;}
+        if self.thumbnail_generation != Some(session.generation) {
+            self.thumbnails.clear();
+            self.thumbnail_generation = Some(session.generation);
+        }
         let images=dtool_core::resources::resource_rows(&session.document,doc_dir);
         let texts=dtool_core::text_link::text_link_rows(&session.document);
         let mut pending=Pending::default();
         let screen = ctx.content_rect();
-        let default_width = (screen.width() - 40.0).clamp(360.0, 800.0);
-        let default_height = (screen.height() - 96.0).clamp(320.0, 490.0);
+        let available = (screen.size() - egui::vec2(24.0, 56.0)).max(egui::vec2(180.0, 96.0));
+        let initial = egui::vec2(1120.0, 670.0).min(available);
         let mut open = self.open;
         egui::Window::new(text("dialog.resource_manager.title"))
             .collapsible(false)
             .open(&mut open)
-            .default_size(egui::vec2(default_width, default_height))
-            .min_width(default_width.min(460.0))
-            .default_pos(egui::pos2(screen.center().x - default_width * 0.5, screen.top() + 68.0))
+            .default_size(initial)
+            .min_size(egui::vec2(460.0, 320.0).min(available))
+            .max_size(available)
+            .default_pos(egui::pos2(screen.center().x - initial.x * 0.5, screen.top() + 68.0))
+            .constrain_to(screen)
             .resizable(true)
-            .show(ctx,|ui| {
-            dtool_design::dialog_frame(ui,|ui| {
-                ui.horizontal(|ui| {
-                    let width = (ui.available_width() - ui.spacing().item_spacing.x) * 0.5;
-                    for (tab, label) in ["rm.images", "rm.text"].into_iter().enumerate() {
-                        let selected = self.active_tab == tab;
-                        let response = dtool_design::with_icon_selection(ui, |ui| {
-                            ui.add(egui::Button::selectable(selected, text(label)).min_size(egui::vec2(width, 24.0)))
+            .show(ctx, |ui| {
+                ui.scope(|ui| {
+                    ui.set_width(ui.available_width().min(available.x));
+                    ui.set_max_height(ui.available_height().min(available.y));
+                    dtool_design::dialog_frame(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            let width = (ui.available_width() - ui.spacing().item_spacing.x) * 0.5;
+                            for (tab, label) in ["rm.images", "rm.text"].into_iter().enumerate() {
+                                let selected = self.active_tab == tab;
+                                let response = dtool_design::with_icon_selection(ui, |ui| {
+                                    ui.add(egui::Button::selectable(selected, text(label)).min_size(egui::vec2(width, 24.0)))
+                                });
+                                if response.clicked() && !selected {
+                                    self.active_tab = tab;
+                                    self.last_located = None;
+                                }
+                            }
                         });
-                        if response.clicked() && !selected {
-                            self.active_tab = tab;
-                            self.last_located = None;
+                        ui.add_space(dtool_design::space("md"));
+                        let compact = ui.available_height() < 380.0 || ui.available_width() < 610.0;
+                        let scroll_id = if self.active_tab == 0 { "resource_manager_images" } else { "resource_manager_text" };
+                        let mut body = |ui: &mut egui::Ui| {
+                            if self.active_tab == 0 {
+                                self.image_tab(ui, &images, &session.document, compact);
+                                if compact {
+                                    ui.add_space(dtool_design::space("sm"));
+                                    self.image_actions(ui, &images, doc_dir, &mut pending);
+                                    self.image_details(ui, &images, &session.document);
+                                }
+                            } else {
+                                self.text_tab(ui, &texts, &mut pending, compact);
+                            }
+                            if let Some(message) = &self.error { ui.label(message); }
+                        };
+                        if compact {
+                            let footer = ui.spacing().interact_size.y + ui.spacing().item_spacing.y * 2.0 + 2.0;
+                            let height = (ui.available_height() - footer).max(24.0);
+                            dtool_design::dialog_options_scroll(ui, scroll_id, height, body);
+                        } else {
+                            body(ui);
                         }
-                    }
+                        ui.separator();
+                        ui.horizontal(|ui| {
+                            let actions_width = (ui.available_width() - 90.0).max(0.0);
+                            ui.allocate_ui_with_layout(egui::vec2(actions_width, 0.0),
+                                egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                                    if !compact && self.active_tab == 0 {
+                                        self.image_actions(ui, &images, doc_dir, &mut pending);
+                                    }
+                                });
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if dtool_design::button(ui, text("button.close")).clicked() {
+                                    pending.close = true;
+                                }
+                            });
+                        });
+                        if dtool_design::dialog_keys(ui)==Some(dtool_design::DialogKey::Cancel) {pending.close=true;}
+                    });
                 });
-                ui.add_space(dtool_design::space("md"));
-                if self.active_tab==0 {self.image_tab(ui,&images,doc_dir,&mut pending);} else {self.text_tab(ui,&texts,&mut pending);}
-                if let Some(message)=&self.error {ui.label(message);}
-                ui.separator();
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if dtool_design::button(ui,text("button.close")).clicked() {pending.close=true;}
-                });
-                if dtool_design::dialog_keys(ui)==Some(dtool_design::DialogKey::Cancel) {pending.close=true;}
             });
-        });
         #[cfg(windows)]
         if let Some(id) = pending.reveal {
             let path = session.document.image_resource(dtool_core::resources::ResourceId(id))
@@ -289,13 +346,23 @@ impl ResourceManagerDialog {
             }
         }
         #[cfg(windows)]
-        if let Some(field) = pending.browse_folder {
-            let title = text(match field { FolderField::Destination => "rm.select_destination", FolderField::Relink => "rm.select_folder" });
+        if let Some(action) = pending.browse_folder {
+            let title = text(match action {
+                FolderAction::Relink(_) => "rm.select_folder",
+                _ => "rm.select_destination",
+            });
             match crate::dialogs::pick_folder_path(title) {
                 Ok(Some(path)) => {
-                    let input = match field { FolderField::Destination => &mut self.folder, FolderField::Relink => &mut self.relink_path };
-                    *input = path.to_string_lossy().into_owned();
-                    self.error = None;
+                    let doc_dir = dir_param(doc_dir);
+                    let command = match action {
+                        FolderAction::MakeLinked(id) =>
+                            Command::with_params("resource.make_linked", json!({"id":id,"folder":path,"doc_dir":doc_dir})),
+                        FolderAction::Collect(ids) =>
+                            Command::with_params("resource.collect", json!({"ids":ids,"folder":path,"doc_dir":doc_dir})),
+                        FolderAction::Relink(ids) =>
+                            Command::with_params("resource.relink", json!({"ids":ids,"path":path,"doc_dir":doc_dir})),
+                    };
+                    pending.commands.push(command);
                 }
                 Ok(None) => {}
                 Err(_) => self.error = Some(text("error.io_error").to_owned()),
@@ -330,144 +397,266 @@ impl ResourceManagerDialog {
         located
     }
 
-    fn image_tab(&mut self,ui:&mut egui::Ui,rows:&[ResourceRow],doc_dir:Option<&Path>,pending:&mut Pending) {
-        dtool_design::dialog_section(ui, |ui| resource_table(ui, "resource_images", [
-            ("rm.name", 3.1), ("rm.status", 1.2), ("rm.locations", 2.3),
-            ("rm.file_size", 1.2), ("rm.uses", 0.8),
-        ], rows.len(), |ui, index, widths| {
-            let row = &rows[index];
-            let mut checked = self.selected.contains(&row.id.0);
-            let (toggled, clicked) = table_cell(ui, widths[0], |ui| {
-                let toggled = dtool_design::toggle(ui, &mut checked, "").on_hover_text(&row.name).changed();
-                let clicked = dtool_design::with_icon_selection(ui, |ui| {
-                    ui.add(egui::Button::selectable(checked, &row.name).truncate())
-                }).on_hover_text(&row.name).clicked();
-                (toggled, clicked)
-            });
-            if toggled || clicked { self.last_located = None; }
-            if toggled {
-                self.selection_anchor = Some(row.id.0);
-                if checked { self.selected.insert(row.id.0); } else { self.selected.remove(&row.id.0); }
-            } else if clicked {
-                let modifiers = ui.input(|input| input.modifiers);
-                if modifiers.shift {
-                    let anchor = rows.iter().position(|item| Some(item.id.0) == self.selection_anchor).unwrap_or(index);
-                    if !modifiers.command { self.selected.clear(); }
-                    self.selected.extend(rows[anchor.min(index)..=anchor.max(index)].iter().map(|item| item.id.0));
-                } else {
-                    self.selection_anchor = Some(row.id.0);
-                    if !modifiers.command { self.selected.clear(); }
-                    if !self.selected.remove(&row.id.0) { self.selected.insert(row.id.0); }
-                }
-            }
-            table_status(ui, widths[1], row.status);
-            let locations = row.locations.iter().map(location_label).collect::<Vec<_>>().join(", ");
-            let locations = if locations.is_empty() { "—" } else { &locations };
-            table_label(ui, widths[2], locations, locations);
-            let size = row.file_size_bytes.map(file_size_label).unwrap_or_else(|| "—".into());
-            let bytes = row.file_size_bytes.map(|bytes| format!("{bytes} B")).unwrap_or_default();
-            table_label(ui, widths[3], size, bytes);
-            let uses = row.uses.len().to_string();
-            table_label(ui, widths[4], &uses, &uses);
-        }));
-        ui.add_space(dtool_design::space("md"));
-        let selected: Vec<_> = rows.iter().filter(|row| self.selected.contains(&row.id.0)).collect();
-        let single = match selected.as_slice() { [row] => Some(*row), _ => None };
-        if let Some(row) = single {
-            let placed_size = placed_size_label(row.placed_size);
-            let details = [
-                (TYPE_KEY, format_label(row.format).to_owned()),
-                ("rm.original_size", format!("{} × {}", row.original_size[0], row.original_size[1])),
-                ("rm.original_dpi", format!("{:.1}", row.original_dpi)),
-                ("rm.placed_size", if placed_size.is_empty() { "—".into() } else { placed_size }),
-                ("rm.placed_dpi", row.placed_size.map_or_else(|| "—".into(), |_| format!("{:.1}", row.placed_dpi))),
-                ("rm.colour_space", row.colour_space.clone()),
-            ];
-            dtool_design::dialog_section(ui, |ui| {
-                dtool_design::panel_columns(ui, details.len(), 154.0, |ui, index| {
-                    let (key, value) = &details[index];
-                    ui.horizontal_wrapped(|ui| {
-                        ui.weak(text(key));
-                        ui.label(value);
-                    });
+    fn image_tab(&mut self, ui: &mut egui::Ui, rows: &[ResourceRow], document: &Document, compact: bool) {
+        if compact {
+            let height = (ui.spacing().interact_size.y + ui.spacing().item_spacing.y) * 4.0;
+            self.image_list(ui, rows, document, height, [
+                ("rm.name", 4.0), ("rm.status", 1.2), ("rm.locations", 1.5),
+            ]);
+        } else {
+            let details_width = (ui.available_width() * 0.24).clamp(196.0, 278.0);
+            let list_width = ui.available_width() - details_width - ui.spacing().item_spacing.x * 2.0;
+            let height = (ui.available_height() - 120.0).clamp(220.0, 532.0);
+            let panel_height = height + 36.0;
+            ui.horizontal_top(|ui| {
+                ui.allocate_ui_with_layout(egui::vec2(list_width, panel_height), egui::Layout::top_down(egui::Align::Min), |ui| {
+                    ui.set_width(list_width);
+                    self.image_list(ui, rows, document, height, [
+                        ("rm.name", 4.5), ("rm.status", 0.9), ("rm.locations", 1.1),
+                        ("rm.placement", 1.15), ("rm.file_size", 1.05), ("rm.placed_dpi", 0.95),
+                        (TYPE_KEY, 0.8),
+                    ]);
+                });
+                ui.allocate_ui_with_layout(egui::vec2(details_width, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
+                    ui.set_width(details_width);
+                    self.image_details(ui, rows, document);
                 });
             });
         }
+    }
+
+    fn image_list<const N: usize>(
+        &mut self, ui: &mut egui::Ui, rows: &[ResourceRow], document: &Document, height: f32,
+        columns: [(&str, f32); N],
+    ) {
+        let selected = self.selected.clone();
+        dtool_design::dialog_section(ui, |ui| {
+            resource_table(ui, "resource_images", columns, rows.len(), TableLayout {
+                height,
+                row_height: 38.0,
+                is_selected: &|index| selected.contains(&rows[index].id.0),
+            }, |ui, index, widths| {
+                let row = &rows[index];
+                let top = ui.cursor().min;
+                for ((key, _), width) in columns.into_iter().zip(widths) {
+                    match key {
+                        "rm.name" => table_cell(ui, *width, |ui| {
+                            let (rect, _) = ui.allocate_exact_size(egui::vec2(36.0, 32.0), egui::Sense::hover());
+                            self.paint_thumbnail(ui, document, row, rect);
+                            ui.add(egui::Label::new(&row.name).selectable(false).truncate())
+                                .on_hover_text(&row.name);
+                        }),
+                        "rm.status" if matches!(row.status, ResourceStatus::Missing | ResourceStatus::Modified) => {
+                            table_status(ui, *width, row.status);
+                        }
+                        _ => {
+                            let label = match key {
+                                "rm.status" => text("rm.current").to_owned(),
+                                "rm.locations" => row.locations.iter().map(location_label).collect::<Vec<_>>().join(", "),
+                                "rm.placement" => document.image_resource(row.id)
+                                    .map(|image| text(if image.embedded { "rm.embedded" } else { "rm.linked" }).to_owned())
+                                    .unwrap_or_default(),
+                                "rm.file_size" => row.file_size_bytes.map(file_size_label).unwrap_or_default(),
+                                "rm.placed_dpi" if row.placed_size.is_some() => format!("{:.0} dpi", row.placed_dpi),
+                                TYPE_KEY => format_label(row.format).to_owned(),
+                                _ => String::new(),
+                            };
+                            let label = if label.is_empty() { "—" } else { &label };
+                            table_label(ui, *width, label, label);
+                        }
+                    }
+                }
+                let rect = egui::Rect::from_min_size(top, egui::vec2(
+                    widths.iter().sum::<f32>() + ui.spacing().item_spacing.x * (N - 1) as f32, 38.0,
+                ));
+                let response = ui.interact(rect, ui.id().with(row.id.0), egui::Sense::click());
+                if response.hovered() || response.has_focus() {
+                    ui.painter().rect_stroke(rect, 2.0, ui.visuals().widgets.hovered.bg_stroke, egui::StrokeKind::Inside);
+                }
+                if response.clicked() {
+                    self.last_located = None;
+                    let modifiers = ui.input(|input| input.events.iter().rev().find_map(|event| match event {
+                        egui::Event::PointerButton { button: egui::PointerButton::Primary, pressed: false, modifiers, .. } =>
+                            Some(*modifiers),
+                        _ => None,
+                    }).unwrap_or(input.modifiers));
+                    if modifiers.shift {
+                        let anchor = rows.iter().position(|item| Some(item.id.0) == self.selection_anchor).unwrap_or(index);
+                        if !modifiers.command { self.selected.clear(); }
+                        self.selected.extend(rows[anchor.min(index)..=anchor.max(index)].iter().map(|item| item.id.0));
+                    } else {
+                        self.selection_anchor = Some(row.id.0);
+                        if modifiers.command {
+                            if !self.selected.remove(&row.id.0) { self.selected.insert(row.id.0); }
+                        } else {
+                            self.selected.clear();
+                            self.selected.insert(row.id.0);
+                        }
+                    }
+                }
+            });
+        });
+    }
+
+    fn paint_thumbnail(&mut self, ui: &egui::Ui, document: &Document, row: &ResourceRow, rect: egui::Rect) {
+        if !ui.is_rect_visible(rect) { return; }
+        if !self.thumbnails.contains_key(&row.id.0) {
+            if self.thumbnails.len() >= 128 { self.thumbnails.clear(); }
+            // Imported raster data is already colour-converted and available even if its
+            // linked source has moved. Sample the tiles without expanding the full image.
+            let raster = row.uses.iter().find_map(|&id| {
+                (document.placed_resource(id) == Some(row.id)).then(|| document.pixel_layers.get(id)).flatten()
+            });
+            let image = if let Some(raster) = raster.filter(|raster| raster.width > 0 && raster.height > 0) {
+                let scale = (176.0 / raster.width.max(raster.height) as f32).min(1.0);
+                let width = (raster.width as f32 * scale).round().max(1.0) as u32;
+                let height = (raster.height as f32 * scale).round().max(1.0) as u32;
+                let mut rgba = Vec::with_capacity((width * height * 4) as usize);
+                for y in 0..height {
+                    for x in 0..width {
+                        rgba.extend_from_slice(&raster.get(
+                            (u64::from(2 * x + 1) * u64::from(raster.width) / u64::from(2 * width)) as u32,
+                            (u64::from(2 * y + 1) * u64::from(raster.height) / u64::from(2 * height)) as u32,
+                        ));
+                    }
+                }
+                Some(egui::ColorImage::from_rgba_unmultiplied([width as usize, height as usize], &rgba))
+            } else {
+                document.image_resource(row.id).and_then(|resource| resource.data.as_deref())
+                    .and_then(|bytes| dtool_io::image_import::embedded_thumbnail(bytes, 176))
+                    .map(|image| egui::ColorImage::from_rgba_unmultiplied(
+                        [image.width() as usize, image.height() as usize], image.as_raw(),
+                    ))
+            };
+            self.thumbnails.insert(row.id.0, image.map(|image| {
+                ui.ctx().load_texture(format!("resource.{}", row.id.0), image, egui::TextureOptions::LINEAR)
+            }));
+        }
+        ui.painter().rect_filled(rect, 2.0, ui.visuals().extreme_bg_color);
+        if let Some(texture) = self.thumbnails.get(&row.id.0).and_then(Option::as_ref) {
+            let size = texture.size_vec2();
+            let fit = (rect.width() / size.x).min(rect.height() / size.y);
+            ui.painter().image(texture.id(), egui::Rect::from_center_size(rect.center(), size * fit),
+                egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
+        }
+    }
+
+    fn image_details(&mut self, ui: &mut egui::Ui, rows: &[ResourceRow], document: &Document) {
+        let mut selected = rows.iter().filter(|row| self.selected.contains(&row.id.0));
+        let Some(row) = selected.next().filter(|_| selected.next().is_none()) else { return };
+        ui.add_space(dtool_design::space("sm"));
+        dtool_design::dialog_section(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.label(egui::RichText::new(&row.name).strong());
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 126.0), egui::Sense::hover());
+            self.paint_thumbnail(ui, document, row, rect.shrink(4.0));
+            let placed_size = placed_size_label(row.placed_size);
+            let details = [
+                (TYPE_KEY, format_label(row.format).to_owned()),
+                ("rm.original_size", format!("{} × {} px", row.original_size[0], row.original_size[1])),
+                ("rm.original_dpi", format!("{:.1}", row.original_dpi)),
+                ("rm.placed_size", if placed_size.is_empty() { "—".into() } else { format!("{placed_size} pt") }),
+                ("rm.placed_dpi", row.placed_size.map_or_else(|| "—".into(), |_| format!("{:.1}", row.placed_dpi))),
+                ("rm.colour_space", row.colour_space.clone()),
+                ("rm.icc_profile", row.icc.clone().unwrap_or_default()),
+                ("rm.uses", row.uses.len().to_string()),
+            ];
+            egui::Grid::new("resource_image_details").num_columns(2).show(ui, |ui| {
+                for (key, value) in details {
+                    ui.weak(text(key));
+                    let value = if value.is_empty() { "—" } else { &value };
+                    ui.add(egui::Label::new(value).truncate()).on_hover_text(value);
+                    ui.end_row();
+                }
+            });
+        });
+        ui.add_space(dtool_design::space("sm"));
+    }
+
+    fn image_actions(&mut self, ui: &mut egui::Ui, rows: &[ResourceRow], doc_dir: Option<&Path>, pending: &mut Pending) {
+        let selected: Vec<_> = rows.iter().filter(|row| self.selected.contains(&row.id.0)).collect();
+        let single = match selected.as_slice() { [row] => Some(*row), _ => None };
         let available = |row: &ResourceRow| matches!(row.status, ResourceStatus::Linked | ResourceStatus::Modified);
-        let dir=dir_param(doc_dir);
+        let dir = dir_param(doc_dir);
+        #[cfg(not(windows))]
+        ui.horizontal_wrapped(|ui| {
+            resource_path_field(ui, text("rm.folder"), &mut self.folder);
+            resource_path_field(ui, text("rm.path"), &mut self.relink_path);
+        });
         ui.horizontal_wrapped(|ui| {
             if ui.add_enabled(selected.iter().any(|row| !row.uses.is_empty()), egui::Button::new(text("rm.locate"))).clicked() {
                 pending.locate = Some(selected.iter().flat_map(|row| row.uses.iter().copied()).collect());
             }
-            ui.add_enabled_ui(single.is_some(), |ui| {
-                if ui.add_enabled(cfg!(windows) || !self.relink_path.trim().is_empty(),
-                    egui::Button::new(text("rm.replace"))).clicked() {
-                    pending.replace = single.map(|row| row.id.0);
-                }
-                let (update, embed) = ui.add_enabled_ui(single.is_some_and(available), |ui| {
-                    (dtool_design::button(ui, text("rm.update")).clicked(), dtool_design::button(ui, text("rm.embed")).clicked())
-                }).inner;
-                if let Some(row) = single {
-                    if update {pending.commands.push(Command::with_params("resource.update",json!({"id":row.id.0,"doc_dir":dir})));}
-                    if embed {pending.commands.push(Command::with_params("resource.embed",json!({"id":row.id.0,"doc_dir":dir})));}
-                }
-            });
-        });
-        ui.separator();
-        ui.horizontal_wrapped(|ui| {
-            resource_path_field(ui, text("rm.folder"), &mut self.folder);
-            #[cfg(windows)]
-            if dtool_design::button(ui, text("pref.browse")).on_hover_text(text("rm.select_destination")).clicked() {
-                pending.browse_folder = Some(FolderField::Destination);
+            let available_single = single.filter(|row| available(row));
+            if ui.add_enabled(available_single.is_some(), egui::Button::new(text("rm.update"))).clicked()
+                && let Some(row) = available_single {
+                pending.commands.push(Command::with_params("resource.update", json!({"id":row.id.0,"doc_dir":dir})));
+            }
+            if ui.add_enabled(single.is_some() && (cfg!(windows) || !self.relink_path.trim().is_empty()),
+                egui::Button::new(text("rm.replace"))).clicked() {
+                pending.replace = single.map(|row| row.id.0);
             }
             let embedded = single.filter(|row| row.status == ResourceStatus::Embedded);
-            if ui.add_enabled(embedded.is_some(), egui::Button::new(text("rm.make_linked"))).clicked() {
-                if let Some(row) = embedded {
-                    pending.commands.push(Command::with_params("resource.make_linked", json!({"id":row.id.0,"folder":self.folder,"doc_dir":dir})));
-                }
+            let can_choose_folder = cfg!(windows) || !self.folder.trim().is_empty();
+            if ui.add_enabled(embedded.is_some() && can_choose_folder, egui::Button::new(text("rm.make_linked"))).clicked()
+                && let Some(row) = embedded {
+                #[cfg(windows)]
+                { pending.browse_folder = Some(FolderAction::MakeLinked(row.id.0)); }
+                #[cfg(not(windows))]
+                pending.commands.push(Command::with_params("resource.make_linked", json!({"id":row.id.0,"folder":self.folder,"doc_dir":dir})));
             }
-            let can_collect = !selected.is_empty() && selected.iter().all(|row| available(row)) && !self.folder.trim().is_empty();
+            let can_collect = !selected.is_empty() && selected.iter().all(|row| available(row)) && can_choose_folder;
             if ui.add_enabled(can_collect, egui::Button::new(text("rm.collect"))).clicked() {
                 let ids: Vec<_> = selected.iter().map(|row| row.id.0).collect();
+                #[cfg(windows)]
+                { pending.browse_folder = Some(FolderAction::Collect(ids)); }
+                #[cfg(not(windows))]
                 pending.commands.push(Command::with_params("resource.collect", json!({"ids":ids,"folder":self.folder,"doc_dir":dir})));
             }
-            #[cfg(windows)]
-            if ui.add_enabled(single.is_some_and(available), egui::Button::new(text("rm.reveal"))).clicked() {
-                pending.reveal = single.map(|row| row.id.0);
-            }
-        });
-        ui.horizontal_wrapped(|ui| {
-            let multiple = selected.len() > 1;
-            resource_path_field(ui, text(if multiple { "rm.folder" } else { "rm.path" }), &mut self.relink_path);
-            #[cfg(windows)]
-            if multiple && dtool_design::button(ui, text("pref.browse")).on_hover_text(text("rm.select_folder")).clicked() {
-                pending.browse_folder = Some(FolderField::Relink);
-            }
-            let has_path = !self.relink_path.trim().is_empty();
             let can_relink = !selected.is_empty() && selected.iter().all(|row| row.status != ResourceStatus::Embedded)
-                && (has_path || (cfg!(windows) && single.is_some()));
-            let label = if multiple { "rm.relink_selected" } else { "rm.relink" };
-            if ui.add_enabled(can_relink, egui::Button::new(text(label))).clicked() {
-                if has_path {
-                    let ids: Vec<_> = selected.iter().map(|row| row.id.0).collect();
-                    pending.commands.push(Command::with_params("resource.relink",
-                        json!({"ids":ids,"path":self.relink_path,"doc_dir":dir})));
+                && (cfg!(windows) || !self.relink_path.trim().is_empty());
+            let relink_label = if selected.len() > 1 { "rm.relink_selected" } else { "rm.relink" };
+            if ui.add_enabled(can_relink, egui::Button::new(text(relink_label))).clicked() {
+                #[cfg(windows)]
+                if let Some(row) = single {
+                    pending.pick_relink = Some(row.id.0);
                 } else {
-                    #[cfg(windows)]
-                    { pending.pick_relink = single.map(|row| row.id.0); }
+                    pending.browse_folder = Some(FolderAction::Relink(selected.iter().map(|row| row.id.0).collect()));
+                }
+                #[cfg(not(windows))]
+                {
+                    let ids: Vec<_> = selected.iter().map(|row| row.id.0).collect();
+                    pending.commands.push(Command::with_params("resource.relink", json!({"ids":ids,"path":self.relink_path,"doc_dir":dir})));
                 }
             }
+            if ui.add_enabled(available_single.is_some(), egui::Button::new(text("rm.embed"))).clicked()
+                && let Some(row) = available_single {
+                pending.commands.push(Command::with_params("resource.embed", json!({"id":row.id.0,"doc_dir":dir})));
+            }
+            #[cfg(windows)]
+            if ui.add_enabled(available_single.is_some(), egui::Button::new(text("rm.reveal"))).clicked() {
+                pending.reveal = available_single.map(|row| row.id.0);
+            }
+            let modified = rows.iter().any(|row| row.status == ResourceStatus::Modified);
+            if ui.add_enabled(modified, egui::Button::new(text("rm.update_all"))).clicked() {
+                pending.commands.push(Command::with_params("resource.update_all", json!({"doc_dir":dir})));
+            }
         });
-        let modified=rows.iter().any(|row|row.status==ResourceStatus::Modified);
-        if ui.add_enabled_ui(modified,|ui|dtool_design::button(ui,text("rm.update_all"))).inner.clicked() {
-            pending.commands.push(Command::with_params("resource.update_all",json!({"doc_dir":dir})));
-        }
     }
 
-    fn text_tab(&mut self,ui:&mut egui::Ui,rows:&[TextLinkRow],pending:&mut Pending) {
+    fn text_tab(&mut self,ui:&mut egui::Ui,rows:&[TextLinkRow],pending:&mut Pending,compact:bool) {
+        let row_height = ui.spacing().interact_size.y;
+        let height = if compact {
+            (row_height + ui.spacing().item_spacing.y) * rows.len().clamp(2, 4) as f32
+        } else {
+            (ui.available_height() - 90.0).clamp(100.0, 490.0)
+        };
+        let selected = self.selected_text;
         dtool_design::dialog_section(ui, |ui| resource_table(ui, "resource_texts", [
             ("rm.name", 2.8), ("rm.status", 1.5), ("rm.frames", 0.9), ("rm.path", 4.0),
-        ], rows.len(), |ui, index, widths| {
+        ], rows.len(), TableLayout {
+            height, row_height, is_selected: &|index| selected == Some(rows[index].story.0),
+        }, |ui, index, widths| {
             let row = &rows[index];
             let clicked = table_cell(ui, widths[0], |ui| {
                 dtool_design::with_icon_selection(ui, |ui| {

@@ -8,7 +8,7 @@ use crate::theme::ThemeStyle;
 const ICONS_JSON: &str = include_str!("../assets/icons.json");
 const ICON_APP_MAIN: &[u8] = include_bytes!("../assets/icons/dtool-256.png");
 
-pub const SVG_ICONS: [(&str, &str); 220] = [
+pub const SVG_ICONS: [(&str, &str); 223] = [
     ("app-update", include_str!("../assets/icons/app-update.svg")),
     ("ctx-transform-separately", include_str!("../assets/icons/ctx-transform-separately.svg")),
     ("tool-shape-star", include_str!("../assets/icons/tool-shape-star.svg")),
@@ -117,6 +117,9 @@ pub const SVG_ICONS: [(&str, &str); 220] = [
     ("tool-pen-pencil", include_str!("../assets/icons/tool-pen-pencil.svg")),
     ("tool-shape-curve", include_str!("../assets/icons/tool-shape-curve.svg")),
     ("tool-transform-rotate", include_str!("../assets/icons/tool-transform-rotate.svg")),
+    ("cmd-match-width", include_str!("../assets/icons/cmd-match-width.svg")),
+    ("cmd-match-height", include_str!("../assets/icons/cmd-match-height.svg")),
+    ("cmd-match-rotation", include_str!("../assets/icons/cmd-match-rotation.svg")),
     ("tool-transform-scale", include_str!("../assets/icons/tool-transform-scale.svg")),
     ("tool-transform-shear", include_str!("../assets/icons/tool-transform-shear.svg")),
     ("adj-layer", include_str!("../assets/icons/adj-layer.svg")),

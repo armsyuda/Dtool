@@ -1,5 +1,5 @@
 use dtool_core::scene::Scene;
-use dtool_core::table::{cell_at, table_grid, CellRect};
+use dtool_core::table::{cell_at, table_grid};
 use dtool_core::table::model::{CellId, TableNode};
 use dtool_core::table::{merge, selection};
 use dtool_core::{Object, ObjectId, ObjectKind, Session, StoryId, ViewState};
@@ -218,24 +218,28 @@ fn selected_headers(selection: &selection::TableSelection, rows: bool) -> Option
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct TrackDrag {
     table: ObjectId,
     axis: usize,
+    indices: Vec<u32>,
     index: usize,
     start: f32,
-    edge: f32,
-    size: f32,
+    leading_tracks: usize,
+    leading_sum: f32,
     version: u64,
 }
 
 impl TrackDrag {
-    fn size_at(self, doc: &dtool_core::Document, point: [f32; 2]) -> Option<f32> {
+    fn size_at(&self, doc: &dtool_core::Document, point: [f32; 2], minimum_drag: f32) -> Option<f32> {
         if doc.version != self.version { return None; }
         let object = doc.get_object(self.table)?;
         let local = object_local(object, point)?;
-        let min_size = dtool_core::units::units_per_point(doc.units, doc.dpi).min(self.size);
-        Some((self.size + local[self.axis] - self.start).max(min_size))
+        let delta = local[self.axis] - self.start;
+        if delta.abs() < minimum_drag { return None; }
+        let average = self.leading_sum / self.leading_tracks as f32;
+        let min_size = dtool_core::units::units_per_point(doc.units, doc.dpi).min(average);
+        Some(((self.leading_sum + delta) / self.leading_tracks as f32).max(min_size))
     }
 }
 
@@ -295,11 +299,12 @@ impl CountDrag {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum HeaderHit {
     Select(ObjectId, Header),
     Resize(TrackDrag),
     Count(CountDrag),
+    SelectAll(ObjectId),
 }
 
 fn object_local(object: &Object, point: [f32; 2]) -> Option<[f32; 2]> {
@@ -317,6 +322,9 @@ fn header_hit(session: &Session, view: &ViewState, point: [f32; 2]) -> Option<He
     let grid = table_grid(table);
     let zoom = view.zoom.max(1e-4);
     let margin = HEADER_SIZE / zoom;
+    if local.iter().all(|coordinate| (-margin..0.0).contains(coordinate)) {
+        return Some(HeaderHit::SelectAll(object.id));
+    }
     let (axis, edges, sizes) = if (-margin..0.0).contains(&local[1]) {
         (0, &grid.col_x, &table.col_widths_pt)
     } else if (-margin..0.0).contains(&local[0]) {
@@ -326,7 +334,7 @@ fn header_hit(session: &Session, view: &ViewState, point: [f32; 2]) -> Option<He
     };
     let at = local[axis];
     let end = *edges.last()?;
-    if (end..end + margin).contains(&at) {
+    if (end + 4.0 / zoom..end + margin).contains(&at) {
         return Some(HeaderHit::Count(CountDrag { table: object.id, axis, start: at, version: session.document.version }));
     }
     let boundary = edges.partition_point(|edge| *edge < at);
@@ -334,10 +342,24 @@ fn header_hit(session: &Session, view: &ViewState, point: [f32; 2]) -> Option<He
         .filter(|index| *index > 0 && *index < edges.len())
         .min_by(|a, b| (edges[*a] - at).abs().total_cmp(&(edges[*b] - at).abs()));
     if let Some(edge) = near.filter(|index| (edges[*index] - at).abs() <= 4.0 / zoom) {
-        let index = edge - 1;
+        let index = (edge - 1) as u32;
+        let current = selection::current(session);
+        let indices = if current.table == Some(object.id) {
+            selected_headers(&current, axis == 1).map(<[u32]>::to_vec)
+                .or_else(|| current.tracks.is_none().then(|| current.track_indices(table, axis == 1)))
+                .filter(|indices| indices.contains(&index)).unwrap_or_else(|| vec![index])
+        } else {
+            vec![index]
+        };
+        let mut leading_sum = 0.0;
+        let mut leading_tracks = 0;
+        for &track in indices.iter().take_while(|&&track| track <= index) {
+            leading_sum += sizes[track as usize];
+            leading_tracks += 1;
+        }
         return Some(HeaderHit::Resize(TrackDrag {
-            table: object.id, axis, index, start: at, edge: edges[edge],
-            size: sizes[index], version: session.document.version,
+            table: object.id, axis, indices, index: index as usize, start: at, leading_tracks, leading_sum,
+            version: session.document.version,
         }));
     }
     let index = edges.windows(2).position(|pair| pair[0] <= at && at < pair[1])?;
@@ -371,6 +393,7 @@ pub(crate) fn menu_target(session: &Session, rect: Rect, pointer: Pos2) -> Optio
     };
     let (table, header) = match header {
         HeaderHit::Select(id, header) => (id, header),
+        HeaderHit::SelectAll(_) => return None,
         HeaderHit::Resize(drag) => {
             let header = if drag.axis == 0 { Header::Column(drag.index) } else { Header::Row(drag.index) };
             (drag.table, header)
@@ -448,16 +471,25 @@ fn header_menu(ui: &mut Ui, session: &mut Session, target: HeaderMenu) -> Option
     None
 }
 
-fn paint_track_preview(ui: &Ui, response: &Response, session: &Session, view: &ViewState, drag: TrackDrag, size: f32) {
+fn paint_track_preview(ui: &Ui, response: &Response, session: &Session, view: &ViewState, drag: &TrackDrag, size: f32) {
     let Some(object) = session.document.get_object(drag.table) else { return; };
-    let edge = drag.edge + size - drag.size;
+    let ObjectKind::Table(table) = &object.kind else { return; };
+    let tracks = if drag.axis == 0 { &table.col_widths_pt } else { &table.row_heights_pt };
     let margin = HEADER_SIZE / view.zoom.max(1e-4);
-    let ends = if drag.axis == 0 { [[edge, -margin], [edge, object.size[1].abs()]] }
-        else { [[-margin, edge], [object.size[0].abs(), edge]] };
-    ui.painter_at(response.rect).line_segment(
-        ends.map(|point| screen(response.rect, view, object_point(object, point))),
-        egui::Stroke::new(1.5, dtool_design::color("accent")),
-    );
+    let accent = dtool_design::color("table.selection.outline");
+    let mut edge = 0.0;
+    for (index, &length) in tracks.iter().enumerate() {
+        let selected = drag.indices.binary_search(&(index as u32)).is_ok();
+        edge += if selected { size } else { length };
+        if selected {
+            let ends = if drag.axis == 0 { [[edge, -margin], [edge, object.size[1].abs()]] }
+                else { [[-margin, edge], [object.size[0].abs(), edge]] };
+            ui.painter_at(response.rect).line_segment(
+                ends.map(|point| screen(response.rect, view, object_point(object, point))),
+                egui::Stroke::new(1.5, accent),
+            );
+        }
+    }
 }
 
 fn resize_cursor(axis: usize) -> egui::CursorIcon {
@@ -480,51 +512,62 @@ fn paint_grid(ui: &Ui, response: &Response, session: &Session, view: &ViewState)
     let selection = dtool_core::table::selection::current(session);
     let grid = table_grid(table);
     let painter = ui.painter_at(response.rect);
-    let accent = dtool_design::color("accent");
+    let accent = dtool_design::color("table.selection.outline");
     let points = |[l, t, r, b]: [f32; 4]| {
         [[l, t], [r, t], [r, b], [l, b]].map(|point| screen(response.rect, view, object_point(object, point)))
     };
-    let selected: Vec<&CellRect> = grid.rects.iter().filter(|cell| selection.cells.contains(&CellId(cell.id))).collect();
-    for cell in &selected {
-        painter.add(egui::Shape::convex_polygon(points(cell.rect).to_vec(), accent.gamma_multiply(0.12), egui::Stroke::NONE));
+    let selected_ids: std::collections::HashSet<_> = selection.cells.iter().copied().collect();
+    let fill = dtool_design::color("table.selection.fill");
+    for cell in grid.rects.iter().filter(|cell| selected_ids.contains(&CellId(cell.id))) {
+        painter.add(egui::Shape::convex_polygon(points(cell.rect).to_vec(), fill, egui::Stroke::NONE));
     }
     // Shared edges are drawn once, including the segments next to merged cells.
-    let mut edges = std::collections::HashMap::new();
+    let mut edges = std::collections::HashMap::<_, (u8, u8)>::new();
     for cell in &grid.rects {
-        let active = selection.cells.contains(&CellId(cell.id));
+        let active = selected_ids.contains(&CellId(cell.id));
         let row_end = cell.row + cell.row_span;
         let col_end = cell.col + cell.col_span;
         for col in cell.col..col_end {
-            *edges.entry((true, col, cell.row)).or_insert(false) |= active;
-            *edges.entry((true, col, row_end)).or_insert(false) |= active;
+            let (total, selected) = edges.entry((true, col, cell.row)).or_default();
+            *total += 1;
+            *selected += u8::from(active);
+            let (total, selected) = edges.entry((true, col, row_end)).or_default();
+            *total += 1;
+            *selected += u8::from(active);
         }
         for row in cell.row..row_end {
-            *edges.entry((false, cell.col, row)).or_insert(false) |= active;
-            *edges.entry((false, col_end, row)).or_insert(false) |= active;
+            let (total, selected) = edges.entry((false, cell.col, row)).or_default();
+            *total += 1;
+            *selected += u8::from(active);
+            let (total, selected) = edges.entry((false, col_end, row)).or_default();
+            *total += 1;
+            *selected += u8::from(active);
         }
     }
-    let grid_stroke = egui::Stroke::new(1.0, accent.gamma_multiply(0.45));
-    let selected_stroke = egui::Stroke::new(1.5, accent);
-    for active in [false, true] {
-        for (&(horizontal, col, row), &selected) in &edges {
-            if active != selected { continue; }
+    let grid_stroke = egui::Stroke::new(1.0, accent.gamma_multiply(0.50));
+    let selected_stroke = egui::Stroke::new(2.5, accent);
+    for outline in [false, true] {
+        for (&(horizontal, col, row), &(total, selected)) in &edges {
+            let boundary = selected == 1 && total <= 2;
+            if outline != boundary { continue; }
             let (col, row) = (col as usize, row as usize);
             let segment = [
                 [grid.col_x[col], grid.row_y[row]],
                 [grid.col_x[col + usize::from(horizontal)], grid.row_y[row + usize::from(!horizontal)]],
             ];
             let segment = segment.map(|point| screen(response.rect, view, object_point(object, point)));
-            painter.line_segment(segment, if active { selected_stroke } else { grid_stroke });
+            painter.line_segment(segment, if outline { selected_stroke } else { grid_stroke });
         }
     }
     if object.locked || !object.pickable { return; }
     let margin = HEADER_SIZE / view.zoom.max(1e-4);
     let header = |rect, label: String, active| {
         let corners = points(rect);
-        let bg = if active { ui.visuals().selection.bg_fill } else { ui.visuals().widgets.inactive.bg_fill };
+        let bg = if active { dtool_design::color("layers.selected") } else { ui.visuals().widgets.inactive.bg_fill };
         painter.add(egui::Shape::convex_polygon(corners.to_vec(), bg, egui::Stroke::new(1.0, ui.visuals().widgets.inactive.bg_stroke.color)));
         painter.text(corners[0].lerp(corners[2], 0.5), egui::Align2::CENTER_CENTER, label, egui::FontId::proportional(10.0), ui.visuals().text_color());
     };
+    header([-margin, -margin, 0.0, 0.0], "▦".into(), !selection.cells.is_empty() && selection.cells.len() == grid.rects.len());
     let columns = selection.track_indices(table, false);
     let rows = selection.track_indices(table, true);
     for (i, edge) in grid.col_x.windows(2).enumerate() {
@@ -601,7 +644,7 @@ pub fn handle(ui: &mut Ui, response: &Response, session: &mut Session, scene: &S
         let cursor = match header_hit(session, view, point) {
             Some(HeaderHit::Resize(drag)) => resize_cursor(drag.axis),
             Some(HeaderHit::Count(drag)) => resize_cursor(drag.axis),
-            Some(HeaderHit::Select(..)) => egui::CursorIcon::PointingHand,
+            Some(HeaderHit::Select(..) | HeaderHit::SelectAll(_)) => egui::CursorIcon::PointingHand,
             None if hit(session, scene, point).is_some() => egui::CursorIcon::Text,
             None => egui::CursorIcon::Crosshair,
         };
@@ -697,17 +740,17 @@ pub fn handle(ui: &mut Ui, response: &Response, session: &mut Session, scene: &S
     let press = ui.data(|data| data.get_temp::<TablePress>(press_id));
     if let Some(drag) = ui.data(|data| data.get_temp::<TrackDrag>(resize_id)) {
         let pointer = released.or_else(|| ui.input(|input| input.pointer.latest_pos()));
-        let size = pointer.and_then(|pos| drag.size_at(&session.document, to_doc(pos)));
+        let size = pointer.and_then(|pos| drag.size_at(&session.document, to_doc(pos), view.zoom.max(1e-4).recip()));
         if released.is_some() || !ui.input(|input| input.pointer.primary_down()) {
             ui.data_mut(|data| {
                 data.remove::<TrackDrag>(resize_id);
                 data.remove::<TablePress>(press_id);
             });
-            if let Some(size) = size.filter(|size| released.is_some() && (*size - drag.size).abs() * view.zoom >= 1.0) {
+            if let Some(size) = size.filter(|_| released.is_some()) {
                 text_input::finish_text_input(session);
                 let axis = if drag.axis == 0 { "column" } else { "row" };
                 session.run(&Command::with_params("table.track.resize", json!({
-                    "id": drag.table.0, "axis": axis, "index": drag.index, "size": size
+                    "id": drag.table.0, "axis": axis, "indices": drag.indices, "size": size
                 })))?;
                 response.request_focus();
                 ui.ctx().request_repaint();
@@ -717,7 +760,7 @@ pub fn handle(ui: &mut Ui, response: &Response, session: &mut Session, scene: &S
             paint_grid(ui, response, session, view);
             if let Some(size) = size {
                 ui.ctx().set_cursor_icon(resize_cursor(drag.axis));
-                paint_track_preview(ui, response, session, view, drag, size);
+                paint_track_preview(ui, response, session, view, &drag, size);
             }
         }
         return Ok(());
@@ -774,7 +817,12 @@ pub fn handle(ui: &mut Ui, response: &Response, session: &mut Session, scene: &S
             response.request_focus();
             ui.ctx().request_repaint();
         } else if response.clicked() || response.double_clicked() {
-            if let Some(HeaderHit::Select(id, header)) = header_hit(session, view, to_doc(pos)) {
+            let header = header_hit(session, view, to_doc(pos));
+            if let Some(HeaderHit::SelectAll(id)) = header {
+                text_input::finish_text_input(session);
+                session.run_named("table.selection.set", json!({"id": id, "mode": "all"}))?;
+                response.request_focus();
+            } else if let Some(HeaderHit::Select(id, header)) = header {
                 text_input::finish_text_input(session);
                 ui.data_mut(|data| data.remove::<CellAnchor>(anchor_id));
                 let (shift, toggle) = ui.input(|input| (input.modifiers.shift, input.modifiers.command));
@@ -861,4 +909,40 @@ pub fn handle(ui: &mut Ui, response: &Response, session: &mut Session, scene: &S
     }
     paint_grid(ui, response, session, view);
     Ok(())
+}
+
+
+#[cfg(test)]
+mod track_drag_tests {
+    use super::*;
+
+    #[test]
+    fn header_drag_targets_single_or_multiple_tracks_of_its_axis() {
+        let doc = dtool_core::Document::new([800.0, 600.0], dtool_core::document::Units::Px, 96.0, 1);
+        let mut session = Session::new(doc);
+        let id = session.run_named("table.create", json!({
+            "rows": 3, "cols": 3, "bounds": [120.0, 60.0], "pos": [100.0, 100.0],
+        })).unwrap()["id"].as_u64().unwrap();
+        for (mode, key, indices, axis, start, end, expected) in [
+            ("columns", "columns", vec![1], 0, [180.0, 90.0], [190.0, 90.0], vec![40.0, 50.0, 40.0]),
+            ("columns", "columns", vec![0, 2], 0, [230.0, 90.0], [250.0, 90.0], vec![50.0, 50.0, 50.0]),
+            ("rows", "rows", vec![0, 2], 1, [90.0, 160.0], [90.0, 180.0], vec![30.0, 20.0, 30.0]),
+        ] {
+            session.run_named("table.selection.set", json!({"id": id, "mode": mode, (key): indices})).unwrap();
+            let HeaderHit::Resize(drag) = header_hit(&session, &session.view, start).unwrap() else {
+                panic!("expected a track boundary");
+            };
+            assert_eq!(drag.indices, indices);
+            assert_eq!(drag.axis, axis);
+            assert!(drag.size_at(&session.document, start, 1.0).is_none());
+            let size = drag.size_at(&session.document, end, 1.0).unwrap();
+            let name = if axis == 0 { "column" } else { "row" };
+            session.run_named("table.track.resize", json!({"id": id, "axis": name, "indices": drag.indices, "size": size})).unwrap();
+            let ObjectKind::Table(table) = &session.document.get_object(ObjectId(id)).unwrap().kind else {
+                panic!("expected a table");
+            };
+            let tracks = if axis == 0 { &table.col_widths_pt } else { &table.row_heights_pt };
+            assert_eq!(*tracks, expected);
+        }
+    }
 }

@@ -2,8 +2,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use dtool_core::brush::{BrushOp, BrushSettings, TipKind};
-use dtool_core::commands::pixel_brush::{MAX_POINTS, STROKE, preview, settings, symmetry_frame};
-use dtool_core::context_toolbar::OPTIONS_SET;
+use dtool_core::commands::pixel_brush::{MAX_POINTS, STROKE, clone_layer, preview, settings, symmetry_frame};
+use dtool_core::context_toolbar::{CLONE_ALIGNED, CLONE_PICK_SOURCE, OPTIONS_SET};
+use dtool_core::geometry::{apply_matrix, invert_matrix, object_matrix};
 use dtool_core::{Command, Document, Session};
 use egui::{Color32, Pos2, Rect, Response, TouchId, TouchPhase, Ui};
 use serde_json::json;
@@ -78,6 +79,41 @@ pub(crate) struct Draft {
     pub document: Arc<Document>,
 }
 
+#[derive(Debug, Clone)]
+struct CloneSource {
+    context: Option<dtool_core::ContextId>,
+    document: dtool_core::document::DocInstance,
+    layer: dtool_core::ObjectId,
+    fraction: [f32; 2],
+    aligned_delta: Option<[f32; 2]>,
+}
+
+fn layer_fraction(layer: &dtool_core::Object, point: [f32; 2]) -> Option<[f32; 2]> {
+    let local = apply_matrix(&invert_matrix(&object_matrix(layer))?, point);
+    let fraction = std::array::from_fn(|axis| (local[axis] - layer.pos[axis]) / layer.size[axis].abs());
+    fraction.iter().all(|value| value.is_finite()).then_some(fraction)
+}
+
+fn layer_world(layer: &dtool_core::Object, fraction: [f32; 2]) -> [f32; 2] {
+    apply_matrix(&object_matrix(layer), std::array::from_fn(|axis| {
+        layer.pos[axis] + fraction[axis] * layer.size[axis].abs()
+    }))
+}
+
+impl CloneSource {
+    fn layer<'a>(&self, session: &'a Session) -> Option<&'a dtool_core::Object> {
+        // A history restore replaces the document instance within the same workspace tab.
+        let same_document = match self.context {
+            Some(context) => session.context == Some(context),
+            None => session.context.is_none() && self.document == session.document.instance,
+        };
+        if !same_document || clone_layer(session) != Some(self.layer) {
+            return None;
+        }
+        session.document.get_object(self.layer)
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub(super) struct Gesture {
     points: Vec<Sample>,
@@ -90,6 +126,9 @@ pub(super) struct Gesture {
     last_preview: Option<Instant>,
     invert: bool,
     symmetry_drag: Option<[f32; 2]>,
+    clone_source: Option<CloneSource>,
+    clone_stroke_start: Option<[f32; 2]>,
+    clone_stroke_delta: Option<[f32; 2]>,
 }
 
 impl Gesture {
@@ -118,6 +157,8 @@ impl Gesture {
         self.rendered_points = 0;
         self.last_preview = None;
         self.symmetry_drag = None;
+        self.clone_stroke_start = None;
+        self.clone_stroke_delta = None;
     }
 
     fn sample(&mut self, point: [f32; 2], screen: Pos2, time: f64, sensors: Sensors) {
@@ -156,12 +197,13 @@ impl Gesture {
             .map(|sample| sample.sensors.tilt)
             .collect();
         let velocity: Vec<_> = self.points.iter().map(|sample| sample.velocity).collect();
-        Command::with_params(
-            STROKE,
-            json!({
-                "points": points, "pressure": pressure, "tilt": tilt, "velocity": velocity, "invert": self.invert,
-            }),
-        )
+        let mut params = json!({
+            "points": points, "pressure": pressure, "tilt": tilt, "velocity": velocity, "invert": self.invert,
+        });
+        if let Some(source) = self.clone_stroke_start {
+            params["clone_source"] = json!(source);
+        }
+        Command::with_params(STROKE, params)
     }
 
     fn update_draft(&mut self, ui: &Ui, session: &Session) {
@@ -207,10 +249,11 @@ impl Gesture {
         )
         .unwrap_or(settings.size_px)
             * session.view.zoom;
-        let aspect = settings
-            .stamp
-            .as_ref()
-            .map_or([1.0; 2], |image| image.aspect());
+        let aspect = if settings.tip_kind == TipKind::Round {
+            [1.0, settings.roundness]
+        } else {
+            settings.stamp.as_ref().map_or([1.0; 2], |image| image.aspect())
+        };
         self.outline = response.hover_pos().map(|point| {
             (
                 point,
@@ -220,8 +263,18 @@ impl Gesture {
                 aspect,
             )
         });
+        let pick_source = op == BrushOp::Clone
+            && session.tool_options.flag(&session.active_tool, CLONE_PICK_SOURCE) == Some(true);
+        let aligned = session.tool_options.flag(&session.active_tool, CLONE_ALIGNED).unwrap_or(true);
         if self.outline.is_some() {
-            ui.ctx().set_cursor_icon(egui::CursorIcon::None);
+            let needs_source = op == BrushOp::Clone && self.clone_source.as_ref().and_then(|source| source.layer(session)).is_none();
+            let picking = op == BrushOp::Clone && (pick_source || ui.input(|input| input.modifiers.alt));
+            if needs_source || picking {
+                self.outline = None;
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+            } else {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::None);
+            }
         }
         let (events, time) = ui.input(|input| (input.events.clone(), input.time));
         let mut pending = None::<Contact>;
@@ -268,10 +321,29 @@ impl Gesture {
                         touch.phase == TouchPhase::Start && touch.pos.distance(pos) < 0.5
                     });
                     self.cancel();
+                    let point = to_doc(pos);
+                    if op == BrushOp::Clone {
+                        if pick_source || modifiers.alt {
+                            if self.pick_clone_source(session, point) {
+                                response.request_focus();
+                                ui.ctx().request_repaint();
+                                if pick_source {
+                                    return Some(Command::with_params(OPTIONS_SET, json!({
+                                        "tool": session.active_tool,
+                                        "options": { (CLONE_PICK_SOURCE): false },
+                                    })));
+                                }
+                            }
+                            continue;
+                        }
+                        if !self.start_clone_stroke(session, point, aligned) {
+                            continue;
+                        }
+                    }
                     self.contact = touch.map(|touch| touch.id);
                     self.owner = Some((session.generation, session.active_tool.clone()));
                     self.sample(
-                        to_doc(pos),
+                        point,
                         pos,
                         time,
                         touch.map_or_else(Sensors::default, |touch| touch.sensors),
@@ -318,6 +390,9 @@ impl Gesture {
                     }
                     self.sample(to_doc(pos), pos, time, sensors);
                     let command = self.command();
+                    if op == BrushOp::Clone && let Some(source) = self.clone_source.as_mut() {
+                        source.aligned_delta = self.clone_stroke_delta;
+                    }
                     self.cancel();
                     ui.ctx().request_repaint();
                     return Some(command);
@@ -336,6 +411,64 @@ impl Gesture {
             ui.ctx().request_repaint();
         }
         None
+    }
+
+    fn pick_clone_source(&mut self, session: &Session, point: [f32; 2]) -> bool {
+        let Some(object) = clone_layer(session).and_then(|id| session.document.get_object(id)) else {
+            return false;
+        };
+        let Some(fraction) = layer_fraction(object, point) else { return false };
+        if !fraction.iter().all(|value| (0.0..1.0).contains(value)) {
+            return false;
+        }
+        self.clone_source = Some(CloneSource {
+            context: session.context, document: session.document.instance, layer: object.id, fraction, aligned_delta: None,
+        });
+        true
+    }
+
+    fn start_clone_stroke(&mut self, session: &Session, point: [f32; 2], aligned: bool) -> bool {
+        let Some(source) = self.clone_source.as_ref() else { return false };
+        let Some(layer) = source.layer(session) else { return false };
+        let Some(destination) = layer_fraction(layer, point) else { return false };
+        let fresh_delta = std::array::from_fn(|axis| source.fraction[axis] - destination[axis]);
+        let delta = if aligned { source.aligned_delta.unwrap_or(fresh_delta) } else { fresh_delta };
+        let world = layer_world(layer, std::array::from_fn(|axis| destination[axis] + delta[axis]));
+        self.clone_stroke_start = Some(world);
+        self.clone_stroke_delta = aligned.then_some(delta);
+        true
+    }
+
+    fn paint_clone_source(&self, painter: &egui::Painter, rect: Rect, session: &Session) {
+        if session.view.canvas_flags.preview_mode { return; }
+        let Some(source) = self.clone_source.as_ref() else { return };
+        let Some(layer) = source.layer(session) else { return };
+        let hover_source = || {
+            let mut fraction = source.fraction;
+            if session.tool_options.flag(&session.active_tool, CLONE_ALIGNED).unwrap_or(true)
+                && let Some(delta) = source.aligned_delta
+                && let Some((point, ..)) = self.outline
+                && let Some(destination) = layer_fraction(layer, dtool_core::view::canvas_to_doc(
+                    &session.view, [rect.min.x, rect.min.y], [point.x, point.y],
+                ))
+            {
+                fraction = std::array::from_fn(|axis| destination[axis] + delta[axis]);
+            }
+            layer_world(layer, fraction)
+        };
+        let world = self.clone_stroke_start.zip(self.points.first().zip(self.points.last()))
+            .map_or_else(hover_source, |(start, (first, last))| {
+                [start[0] + last.point[0] - first.point[0], start[1] + last.point[1] - first.point[1]]
+            });
+        let at = super::screen(rect, &session.view, world);
+        if rect.contains(at) {
+            for (width, colour) in [(3.5, super::CURSOR_EDGE), (1.5, super::CURSOR_FACE)] {
+                let stroke = egui::Stroke::new(width, colour);
+                for direction in [egui::vec2(6.0, 0.0), egui::vec2(0.0, 6.0)] {
+                    painter.line_segment([at - direction, at + direction], stroke);
+                }
+            }
+        }
     }
 
     fn input_symmetry(
@@ -395,10 +528,11 @@ impl Gesture {
     }
 
     pub fn paint(&self, ui: &Ui, rect: Rect, session: &Session) {
-        if dtool_core::commands::pixel_brush::operation(&session.active_tool).is_none() {
-            return;
-        }
+        let Some(op) = dtool_core::commands::pixel_brush::operation(&session.active_tool) else { return };
         let painter = ui.painter_at(rect);
+        if op == BrushOp::Clone {
+            self.paint_clone_source(&painter, rect, session);
+        }
         self.paint_symmetry(&painter, rect, session);
         if let Some((point, radius, kind, rotation, aspect)) = self
             .outline
@@ -415,6 +549,15 @@ impl Gesture {
                             point + rot * egui::vec2(x * radius * aspect[0], y * radius * aspect[1])
                         });
                     painter.add(egui::Shape::closed_line(vertices.to_vec(), stroke));
+                } else if aspect[1] < 1.0 {
+                    let rot = egui::emath::Rot2::from_angle(
+                        (rotation + session.view.rotation_deg).to_radians(),
+                    );
+                    let vertices = (0..48).map(|step| {
+                        let (sin, cos) = (std::f32::consts::TAU * step as f32 / 48.0).sin_cos();
+                        point + rot * egui::vec2(cos * radius, sin * radius * aspect[1])
+                    }).collect();
+                    painter.add(egui::Shape::closed_line(vertices, stroke));
                 } else {
                     painter.circle_stroke(point, radius, stroke);
                 }

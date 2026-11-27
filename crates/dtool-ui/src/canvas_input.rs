@@ -64,6 +64,7 @@ pub enum ToolKind {
     VectorBrush,
     PixelBrush(dtool_core::brush::BrushOp),
     PixelFlood { erase: bool },
+    RedEye,
     PixelMarquee(pixel_marquee::Kind),
     StrokeWidth,
     Knife,
@@ -93,6 +94,7 @@ pub enum Drag {
     Gradient { kind: Option<GradientKind>, transparency: bool, target: ObjectId, start: [f32; 2], current: [f32; 2] },
     MaskGradient { kind: GradientKind, start: [f32; 2], current: [f32; 2] },
     Line { start: [f32; 2], current: [f32; 2] },
+    RedEye { target: ObjectId, start: [f32; 2], current: [f32; 2] },
     ShapeParam { target: ObjectId, kind: ShapeParamKind, start: [f32; 2], current: [f32; 2], grab_offset: [f32; 2] },
     PictureFrame { shape: FrameShape, start: [f32; 2], current: [f32; 2] },
 }
@@ -269,6 +271,7 @@ pub fn tool_kind(active_tool: &str) -> ToolKind {
         "" | "move" | "tool.move" | "tool.select.object" | "tool.transform" | "tool.transform.scale" | "tool.transform.rotate" => ToolKind::Move,
         "tool.text.artistic" | "tool.text" | "tool.art_text" => ToolKind::ArtText,
         "tool.table" => ToolKind::Table,
+        dtool_core::commands::red_eye::TOOL => ToolKind::RedEye,
         "tool.crop" => ToolKind::Crop,
         "tool.flood_fill" => ToolKind::PixelFlood { erase: false },
         "tool.eraser.flood" => ToolKind::PixelFlood { erase: true },
@@ -888,7 +891,7 @@ impl CanvasInput {
         }
         if let Some(drag) = self.drag {
             let end = match drag {
-                Drag::Shape { current, .. } | Drag::ArtText { current, .. } | Drag::Crop { current, .. } | Drag::Gradient { current, .. } | Drag::MaskGradient { current, .. } | Drag::Line { current, .. } | Drag::ShapeParam { current, .. } | Drag::PictureFrame { current, .. } | Drag::Slice { current, .. } => current,
+                Drag::Shape { current, .. } | Drag::ArtText { current, .. } | Drag::Crop { current, .. } | Drag::Gradient { current, .. } | Drag::MaskGradient { current, .. } | Drag::Line { current, .. } | Drag::ShapeParam { current, .. } | Drag::PictureFrame { current, .. } | Drag::Slice { current, .. } | Drag::RedEye { current, .. } => current,
             };
             changed |= self.finish_drag(session, end, mods);
         }
@@ -1472,6 +1475,7 @@ impl CanvasInput {
                     .then(|| Command::with_params(dtool_core::commands::quickmask::GRADIENT,
                         json!({ "kind": kind, "start": start, "end": end })))
             }
+            Some(Drag::RedEye { target, start, .. }) => dtool_core::commands::red_eye::canvas_command(target, start, end),
             Some(Drag::Line { start, .. }) => {
                 let end = if mods.shift { crate::canvas_curves::constrain_angle(start, end) } else { end };
                 crate::canvas_curves::line_command(start, end).map(|mut command| {
@@ -2501,6 +2505,34 @@ impl CanvasInput {
                 let command = self.pixel_brush.input(ui, response, session, op, to_doc);
                 changed = self.run(session, command);
             }
+            ToolKind::RedEye => {
+                let target = dtool_core::commands::red_eye::canvas_target(session);
+                if response.hovered() {
+                    ui.ctx().set_cursor_icon(if target.is_some() { egui::CursorIcon::Crosshair } else { egui::CursorIcon::NotAllowed });
+                }
+                let (down, up) = crate::input::primary_button_positions(ui);
+                if let Some(target) = target
+                    && let Some(start) = down.filter(|pos| {
+                        response.enabled() && response.interact_rect.contains(*pos)
+                            && ui.ctx().layer_id_at(*pos) == Some(response.layer_id)
+                            && !egui::Popup::is_any_open(ui.ctx())
+                    })
+                {
+                    let start = to_doc(start);
+                    self.drag = Some(Drag::RedEye { target, start, current: start });
+                    response.request_focus();
+                }
+                if let (Some(Drag::RedEye { current, .. }), Some(pos)) = (self.drag.as_mut(), up.or(pointer)) {
+                    *current = to_doc(pos);
+                }
+                if let Some(Drag::RedEye { current, .. }) = self.drag {
+                    if up.is_some() {
+                        changed = self.finish_drag(session, current, mods);
+                    } else if !primary {
+                        self.drag = None;
+                    }
+                }
+            }
             ToolKind::PixelFlood { erase } => {
                 if response.hovered() {
                     ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
@@ -2651,6 +2683,15 @@ impl CanvasInput {
             Some(Drag::PictureFrame { shape: FrameShape::Ellipse, start, current }) => {
                 let r = area(start, current);
                 painter.add(egui::Shape::ellipse_stroke(r.center(), r.size() / 2.0, stroke));
+            }
+            Some(Drag::RedEye { start, current, .. }) => {
+                let centre = [(start[0] + current[0]) * 0.5, (start[1] + current[1]) * 0.5];
+                let radius = [(current[0] - start[0]).abs() * 0.5, (current[1] - start[1]).abs() * 0.5];
+                let outline = (0..64).map(|step| {
+                    let (sin, cos) = (std::f32::consts::TAU * step as f32 / 64.0).sin_cos();
+                    screen(rect, view, [centre[0] + cos * radius[0], centre[1] + sin * radius[1]])
+                }).collect();
+                painter.add(egui::Shape::closed_line(outline, Stroke::new(1.0, SELECTION_BLUE)));
             }
             Some(Drag::ArtText { start, current }) if self.art_selection.is_none() && (current[1] - start[1]).abs() * view.zoom >= 4.0 => {
                 let scale = dtool_core::units::units_per_point(session.document.units, session.document.dpi);

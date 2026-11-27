@@ -688,7 +688,7 @@ impl LayersPanel {
             self.thumbnails.clear();
             return false;
         };
-        let stamp = (owner, session.generation, session.document.version);
+        let stamp = (owner, session.artwork_generation(), session.document.version);
         let mut deferred = false;
         if self.thumbnail_stamp != Some(stamp) {
             let same_document = self.thumbnail_stamp.is_some_and(|old| old.0 == stamp.0);
@@ -708,7 +708,8 @@ impl LayersPanel {
             }
             if !deferred {
                 self.pending_text_thumbnails = None;
-                self.background_thumbnails = after_text_edit || !session.document.pixel_layers.is_empty();
+                self.background_thumbnails = after_text_edit || !session.document.pixel_layers.is_empty()
+                    || session.document.objects().len() >= 100;
                 self.stale_thumbnails.clear();
                 if same_document && self.background_thumbnails {
                     self.stale_thumbnails.extend(self.thumbnails.keys().copied());
@@ -1030,7 +1031,7 @@ impl LayersPanel {
                 dtool_core::commands::layer_meta::effective_tag_colours(&session.document)
             }).unwrap_or_default();
             let active = workspace.active().zip(workspace.session());
-            let stamp = active.map(|(context, session)| (context, session.generation, session.document.version));
+            let stamp = active.map(|(context, session)| (context, session.artwork_generation(), session.document.version));
             if self.symbol_stamp != stamp {
                 self.symbol_links = active.map(|(_, session)| {
                     dtool_core::commands::symbols::layer_links(&session.document)

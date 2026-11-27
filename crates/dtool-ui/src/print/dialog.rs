@@ -92,12 +92,13 @@ impl PrintDialog {
         let doc = &context.session.document;
         let mut regions = regions(doc, self.source);
         let mut sheets = Vec::new();
-        let (chrome, (cancel, print)) = show_modal(ui.ctx(), "dtool.print", text("print.title"), ClosePolicy::CancelOnly, false, |ui| {
+        let (chrome, (cancel, print)) = show_modal(ui.ctx(), "dtool.print", text("print.title"), ClosePolicy::CancelOnly, false, |ui| ui.scope(|ui| {
             let viewport = ui.ctx().content_rect();
             let width = (viewport.width() - 54.0).clamp(280.0, 980.0);
             let height = (viewport.height() - 154.0).clamp(170.0, 560.0);
             let inset = 2.0 * (dtool_design::space("sm") + dtool_design::stroke_width("thin"));
             ui.set_width(width);
+            ui.set_max_height(height);
             if width >= 700.0 {
                 let gap = 12.0;
                 let settings_width = (width * 0.48).clamp(324.0, 442.0);
@@ -167,7 +168,7 @@ impl PrintDialog {
                 let cancel = dtool_design::button(ui, text("print.cancel")).clicked();
                 (cancel, print)
             }).inner
-        });
+        }).inner);
         if cancel || chrome == DialogResult::Cancel {
             return true;
         }
@@ -546,12 +547,13 @@ impl PrintDialog {
         }
         if let Some((_, _, textures)) = &self.preview {
             let stage_width = ui.available_width();
+            let min_stage_height = if show_title { 84.0 } else { 56.0 };
             let clipped = egui::Frame::new()
                 .fill(dtool_design::theme::surface(ui.ctx(), "pasteboard"))
                 .corner_radius(6.0)
                 .inner_margin(12)
                 .show(ui, |ui| {
-                    let size = Vec2::new((stage_width - 24.0).max(1.0), (height - 104.0).max(84.0));
+                    let size = Vec2::new((stage_width - 24.0).max(1.0), (height - 104.0).max(min_stage_height));
                     let (stage, _) = ui.allocate_exact_size(size, egui::Sense::hover());
                     preview_sheet(ui, doc, paper, side, self.sizing(), layout, textures, stage)
                 }).inner;

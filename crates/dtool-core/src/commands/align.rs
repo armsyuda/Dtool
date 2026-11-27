@@ -1,4 +1,7 @@
-use crate::command::{resolve_target_ids, selection_bounds, transform_members, Session};
+use crate::command::{
+    Session, TransformSetArgs, execute_transform_set, resolve_target_ids, selection_bounds, transform_box,
+    transform_members, transform_target_ids,
+};
 use crate::commands::curve_edit::{commit_contours, editable_curve, world_contours};
 use crate::curve::PointId;
 use crate::data_merge::layout::{object_page_index, spread_ranges};
@@ -12,6 +15,10 @@ pub const DISTRIBUTE_PREFIX: &str = "layer.arrange.distribute.";
 pub const ALIGN_EDGES: [&str; 6] = ["left", "centre", "right", "top", "middle", "bottom"];
 pub const DISTRIBUTE_AXES: [&str; 2] = ["h", "v"];
 pub const PATH_POINTS_ALIGN: &str = "path.points.align";
+pub const MATCH_WIDTH: &str = "layer.arrange.match.width";
+pub const MATCH_HEIGHT: &str = "layer.arrange.match.height";
+pub const MATCH_ROTATION: &str = "layer.arrange.match.rotation";
+pub const MATCH_COMMANDS: &[&str] = &[MATCH_WIDTH, MATCH_HEIGHT, MATCH_ROTATION];
 
 pub fn align_deltas(rects: &[[f32; 4]], edge: &str, target: [f32; 4]) -> Vec<[f32; 2]> {
     rects
@@ -136,7 +143,7 @@ fn op(name: &str) -> Option<Op> {
 }
 
 pub fn is_align_command(name: &str) -> bool {
-    op(name).is_some()
+    op(name).is_some() || MATCH_COMMANDS.contains(&name)
 }
 
 fn parse(params: &serde_json::Value) -> Result<AlignArgs, CommandError> {
@@ -144,6 +151,90 @@ fn parse(params: &serde_json::Value) -> Result<AlignArgs, CommandError> {
         return Ok(AlignArgs::default());
     }
     serde_json::from_value(params.clone()).map_err(|_| CommandError::invalid_params())
+}
+
+fn match_value(doc: &crate::Document, object: &crate::Object, command: &str) -> Option<f32> {
+    if object.is_layer_folder() || crate::artboard::is_artboard(object) {
+        return None;
+    }
+    match command {
+        MATCH_WIDTH | MATCH_HEIGHT => {
+            let axis = if command == MATCH_WIDTH { 2 } else { 3 };
+            let extent = transform_box(doc, object)[axis];
+            (extent.is_finite() && extent > 0.0).then_some(extent)
+        }
+        MATCH_ROTATION => object.rotation_deg.is_finite().then_some(object.rotation_deg),
+        _ => None,
+    }
+}
+
+fn match_plan(session: &Session, command: &Command) -> Result<(ObjectId, Vec<ObjectId>, TransformSetArgs), CommandError> {
+    if !session.has_document {
+        return Err(CommandError::no_document());
+    }
+    let args = parse(&command.params)?;
+    if args.spacing.is_some() || args.relative_to.is_some_and(|mode| mode != RelativeTo::Key) {
+        return Err(CommandError::invalid_params());
+    }
+    let ids = args.ids.map_or_else(|| session.selection.ids.clone(), |ids| ids.into_iter().map(ObjectId).collect());
+    if ids.len() < 2 {
+        return Err(CommandError::invalid_params());
+    }
+    let doc = &session.document;
+    let key = args.key_id.map(ObjectId).or_else(|| session.selection.key().filter(|id| ids.contains(id)))
+        .unwrap_or(ids[0]);
+    let reference = doc.get_object(key).filter(|_| ids.contains(&key)).ok_or_else(CommandError::invalid_params)?;
+    let value = match_value(doc, reference, &command.name).ok_or_else(CommandError::invalid_params)?;
+    let members = alignment_members(doc, &ids)?;
+    let mut targets = Vec::new();
+    for id in ids.into_iter().filter(|id| *id != key) {
+        let object = doc.get_object(id).ok_or_else(CommandError::not_found)?;
+        let current = match_value(doc, object, &command.name).ok_or_else(CommandError::invalid_params)?;
+        let mut layer = Some(object);
+        for _ in 0..=doc.objects().len() {
+            let Some(item) = layer else { break };
+            if item.locked {
+                return Err(CommandError::new("LOCKED"));
+            }
+            layer = item.parent_id.and_then(|parent| doc.get_object(parent));
+        }
+        if layer.is_some() || members.get(&id).is_some_and(|children| children.iter().any(|child| {
+            doc.get_object(*child).is_some_and(|item| item.locked)
+        })) {
+            return Err(CommandError::invalid_params());
+        }
+        if (current - value).abs() > 0.0001 {
+            targets.push(id);
+        }
+    }
+    let mut transform = TransformSetArgs { anchor: Some(crate::transform::Anchor::Centre), ..Default::default() };
+    match command.name.as_str() {
+        MATCH_WIDTH => transform.w = Some(value),
+        MATCH_HEIGHT => transform.h = Some(value),
+        MATCH_ROTATION => transform.rotation_deg = Some(value),
+        _ => return Err(CommandError::invalid_params()),
+    }
+    Ok((key, targets, transform))
+}
+
+fn match_objects(session: &mut Session, command: &Command) -> dtool_protocol::CommandResult {
+    let (key, targets, transform) = match_plan(session, command)?;
+    if !targets.is_empty() {
+        let affected = transform_target_ids(&session.document, &targets);
+        let old = session.snapshot_objects(&affected);
+        let mut draft = session.document.clone();
+        execute_transform_set(&mut draft, &targets, &transform)?;
+        let objects: Vec<_> = affected.iter().filter_map(|id| draft.get_object(*id)).collect();
+        let redo = Command::with_params("object.restore", serde_json::json!({ "objects": objects }));
+        session.document = draft;
+        session.push_restore_undo(&command.name, redo, old);
+    }
+    let changed: Vec<_> = targets.iter().map(|id| id.0).collect();
+    Ok(serde_json::json!({
+        "doc_version": session.generation,
+        "key_id": key.0,
+        "changes": [{ "name": command.name, "ids": changed }]
+    }))
 }
 
 struct LayoutSpread {
@@ -355,6 +446,9 @@ pub fn can_execute(session: &Session, command: &Command) -> Option<bool> {
     if command.name == PATH_POINTS_ALIGN {
         return Some(plan_points(session, command).is_ok());
     }
+    if MATCH_COMMANDS.contains(&command.name.as_str()) {
+        return Some(match_plan(session, command).is_ok());
+    }
     let op = op(&command.name)?;
     Some((|| {
         if !session.has_document {
@@ -371,6 +465,9 @@ pub fn can_execute(session: &Session, command: &Command) -> Option<bool> {
 pub fn run(session: &mut Session, command: &Command) -> Option<Result<serde_json::Value, CommandError>> {
     if command.name == PATH_POINTS_ALIGN {
         return Some(align_points(session, command));
+    }
+    if MATCH_COMMANDS.contains(&command.name.as_str()) {
+        return Some(match_objects(session, command));
     }
     let op = op(&command.name)?;
     Some((|| {

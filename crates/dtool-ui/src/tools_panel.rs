@@ -234,6 +234,14 @@ fn base_flyouts() -> Vec<ToolFlyout> {
             ],
         },
         ToolFlyout {
+            parent: ToolId(dtool_core::context_toolbar::CLONE_TOOL),
+            children: vec![],
+        },
+        ToolFlyout {
+            parent: ToolId(dtool_core::commands::red_eye::TOOL),
+            children: vec![],
+        },
+        ToolFlyout {
             parent: ToolId("tool.symmetry"),
             children: vec![],
         },

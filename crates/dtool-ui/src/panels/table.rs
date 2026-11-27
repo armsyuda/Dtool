@@ -56,6 +56,8 @@ fn common<T: PartialEq>(current: &mut Option<T>, next: T) {
     if current.as_ref() != Some(&next) { *current = None; }
 }
 
+const TABLE_FORMAT_EDIT: &str = "table.panel.format";
+
 impl TablePanel {
     pub fn show(&mut self, ui: &mut Ui, session: Option<&mut Session>) {
         dtool_design::panel_frame(ui, |ui| {
@@ -64,6 +66,19 @@ impl TablePanel {
                 ui.label(text("table.panel.select_table"));
                 return;
             };
+            use dtool_core::edit_session::EditEnd;
+            let format_edit = session.edit.as_ref().is_some_and(|edit| edit.key == TABLE_FORMAT_EDIT);
+            let (cancel_edit, pointer_down) = ui.input(|input| (
+                input.key_pressed(egui::Key::Escape), input.pointer.primary_down(),
+            ));
+            if format_edit && cancel_edit {
+                self.error = session.end_edit(EditEnd::Cancel).err().map(|error| text(&error.message_key).into());
+                ui.ctx().request_repaint();
+                return;
+            }
+            if format_edit && !pointer_down && session.selection.ids.is_empty() {
+                let _ = session.end_edit(EditEnd::Commit);
+            }
             let current = if session.active_tool == "tool.table" { selection::current(session) } else { selection::TableSelection::default() };
             let Some(object) = current.table.or_else(|| match session.selection.ids.as_slice() {
                 [id] => Some(*id),
@@ -103,6 +118,25 @@ impl TablePanel {
             });
             let suffix = dtool_core::commands::ruler_units::suffix(session.document.units);
             let command = ui.add_enabled_ui(!object.locked, |ui| {
+                let selection = ui.horizontal_wrapped(|ui| {
+                    let select_all = Command::with_params("table.selection.set", json!({"id": id, "mode": "all"}));
+                    let all = !ids.is_empty() && table.cells.iter().filter(|cell| cell.merged_into.is_none()).count() == ids.len();
+                    let mut action = None;
+                    if self.icons.studio_button(ui, "tool-table", text("table.panel.select_all"), all).clicked() {
+                        action = Some(select_all);
+                    }
+                    for (name, key, icon) in [
+                        (dtool_core::table::merge::MERGE, "menu.text.table.merge_cells", "cmd-group"),
+                        (dtool_core::table::merge::UNMERGE, "menu.text.table.separate_cells", "cmd-ungroup"),
+                    ] {
+                        let command = Command::new(name);
+                        let enabled = session.can_execute(&command);
+                        if ui.add_enabled_ui(enabled, |ui| self.icons.studio_button(ui, icon, text(key), false)).inner.clicked() {
+                            action = Some(command);
+                        }
+                    }
+                    action
+                }).inner;
                 let frame = egui::CollapsingHeader::new(text("table.panel.frame"))
                     .default_open(true).show(ui, |ui| self.frame_controls(ui, &frame, suffix)).body_returned.flatten();
                 let stroke_fill = egui::CollapsingHeader::new(text("table.panel.stroke_fill"))
@@ -115,21 +149,54 @@ impl TablePanel {
                         .show(ui, |ui| self.track_controls(ui, session, table, &current, id, suffix))
                         .body_returned.flatten()
                 });
-                let cells = egui::CollapsingHeader::new(text("table.panel.cells"))
-                    .default_open(true).show(ui, |ui| match &appearance {
-                        Some(appearance) => self.cell_controls(ui, appearance, suffix),
-                        None => { ui.label(text("table.panel.select_cells")); None }
-                    }).body_returned.flatten();
-                frame.map(|patch| Command::with_params("table.format.set", json!({"id":id.0,"frame":patch})))
+                let (cells, paragraph) = egui::CollapsingHeader::new(text("table.panel.cells"))
+                    .default_open(true).show(ui, |ui| {
+                        let Some(appearance) = &appearance else {
+                            ui.label(text("table.panel.select_cells"));
+                            return (None, None);
+                        };
+                        let ranges = super::paragraph::active_ranges(session);
+                        let mut styles = ranges.iter().filter_map(|(id, [start, end])| {
+                            let story = session.document.stories.iter().find(|story| story.id == *id)?;
+                            let style = dtool_core::text_cmd::query_para_style(&story.paras, *start, *end);
+                            serde_json::from_value::<dtool_tools::dtool_text::ParaStyle>(style).ok()
+                        }).map(|style| style.align);
+                        let mut align = styles.next();
+                        for value in styles { common(&mut align, value); }
+                        let paragraph = ui.add_enabled_ui(!ranges.is_empty(), |ui| super::paragraph::alignment_buttons(ui, align, true))
+                            .inner.and_then(|align| super::paragraph::patch_command(&ranges, json!({"align": align})));
+                        (self.cell_controls(ui, appearance, suffix), paragraph)
+                    }).body_returned.unwrap_or_default();
+                selection.or_else(|| frame.map(|patch| Command::with_params("table.format.set", json!({"id":id.0,"frame":patch})))
                     .or_else(|| stroke_fill.or(cells).map(|mut patch| {
                         patch["id"] = json!(id.0);
                         patch["cells"] = json!(current.cells);
                         Command::with_params(Command::TABLE_CELL_FORMAT_SET, patch)
-                    })).or(tracks)
+                    })).or(paragraph).or(tracks))
             }).inner;
             if let Some(command) = command {
-                self.error = session.run(&command).err()
-                    .map(|error| text(&error.message_key).to_string());
+                let preview = matches!(command.name.as_str(), "table.format.set" | Command::TABLE_CELL_FORMAT_SET)
+                    && (pointer_down || format_edit);
+                if format_edit && !preview {
+                    let _ = session.end_edit(EditEnd::Commit);
+                }
+                let result = if command.name == selection::SET {
+                    crate::canvas::frame_text_input::finish_text_input(session);
+                    crate::tools_panel::handle_tool_command(session, &Command::with_params("ui.tool.set", json!({"id": "tool.table"})))
+                        .and_then(|_| session.run(&command))
+                } else if preview {
+                    session.preview(TABLE_FORMAT_EDIT, &command)
+                } else {
+                    session.run(&command)
+                };
+                self.error = result.err().map(|error| text(&error.message_key).to_string());
+                ui.ctx().request_repaint();
+            }
+            if !pointer_down && session.edit.as_ref().is_some_and(|edit| edit.key == TABLE_FORMAT_EDIT) {
+                if let Err(error) = session.end_edit(EditEnd::Commit) {
+                    self.error = Some(text(&error.message_key).into());
+                }
+                ui.ctx().request_repaint();
             }
             if let Some(error) = &self.error { ui.label(error); }
         });
@@ -335,27 +402,42 @@ impl TablePanel {
                 (CellRotation::R180, "180°"), (CellRotation::R270, "270°"),
             ] {
                 let selected = state.rotation == Some(rotation);
-                let button = egui::Button::new(label).small().selected(selected);
-                if ui.add(button).labelled_by(caption).clicked() { chosen = Some(rotation); }
+                let angle = match rotation {
+                    CellRotation::R0 => 0.0, CellRotation::R90 => std::f32::consts::FRAC_PI_2,
+                    CellRotation::R180 => std::f32::consts::PI, CellRotation::R270 => -std::f32::consts::FRAC_PI_2,
+                };
+                let texture = self.icons.themed_texture(ui.ctx(), "ctx-text-valign-top", dtool_design::icon_texture_px(ui));
+                let button = texture.as_ref().map_or_else(|| egui::Button::new(label), |texture|
+                    egui::Button::image(egui::Image::new(texture).fit_to_exact_size(egui::vec2(14.0, 14.0))
+                        .rotate(angle, egui::vec2(0.5, 0.5))));
+                let response = dtool_design::studio_icon_button(ui, button, 24.0, selected)
+                    .labelled_by(caption).on_hover_text(label);
+                if response.clicked() { chosen = Some(rotation); }
             }
             chosen
         }) {
             patch = Some(json!({"rotation":rotation}));
         }
         ui.separator();
-        ui.label(text("table.panel.insets"));
-        for (index, (side, key)) in [
-            ("left", "table.inset.left"), ("top", "table.inset.top"),
-            ("right", "table.inset.right"), ("bottom", "table.inset.bottom"),
-        ].into_iter().enumerate() {
-            if let Some(value) = scalar(ui, key, state.insets[index], suffix) {
-                patch = Some(json!({"inset_patch":{side:value}}));
+        ui.horizontal(|ui| {
+            ui.strong(text("table.panel.insets"));
+            if self.icons.studio_button(ui, if state.linked == Some(true) { "panel-aspect-linked" } else { "panel-aspect-unlinked" },
+                text("table.panel.link_insets"), state.linked == Some(true)).clicked()
+            {
+                patch = Some(json!({"inset_patch":{"linked": state.linked != Some(true)}}));
             }
-        }
-        let mut linked = state.linked.unwrap_or_default();
-        if wrapped_toggle(ui, &mut linked, "table.panel.link_insets", state.linked.is_none()) {
-            patch = Some(json!({"inset_patch":{"linked":linked}}));
-        }
+        });
+        let sides = [
+            (0, "left", "table.inset.left"), (2, "right", "table.inset.right"),
+            (1, "top", "table.inset.top"), (3, "bottom", "table.inset.bottom"),
+        ];
+        dtool_design::panel_columns(ui, 2, 108.0, |ui, column| {
+            for &(index, side, key) in sides.iter().skip(column).step_by(2) {
+                if let Some(value) = scalar(ui, key, state.insets[index], suffix) {
+                    patch = Some(json!({"inset_patch":{side:value}}));
+                }
+            }
+        });
         ui.separator();
         if let Some(advance) = choice(ui, "table.panel.initial_advance", state.advance, &[
             (InitialAdvance::Default, text("table.advance.default")), (InitialAdvance::Ascent, text("table.advance.ascent")),
@@ -375,15 +457,28 @@ impl TablePanel {
 fn width_and_pattern(ui: &mut Ui, label: &str, width: Option<f32>, style: Option<LineStyle>)
     -> (Option<f32>, Option<LineStyle>)
 {
-    let mut result = (None, None);
-    dtool_design::panel_columns(ui, 2, dtool_design::size("panel.group.min_width"), |ui, index| {
-        if index == 0 {
-            result.0 = scalar(ui, label, width, "pt");
-        } else {
-            result.1 = stroke_pattern(ui, style);
+    let mut picked = None;
+    property_row(ui, label, 112.0, |ui, caption| ui.horizontal(|ui| {
+        let mut value = width.unwrap_or(0.0);
+        let field_width = 50.0;
+        let rail_width = (ui.available_width() - field_width - ui.spacing().item_spacing.x).max(24.0);
+        let maximum = value.max(24.0);
+        let rail = dtool_design::logarithmic_slider_rail(ui, &mut value, 0.0..=maximum, rail_width, text(label), true, 0.05);
+        if rail.changed() {
+            picked = Some((value * 20.0).round() / 20.0);
         }
-    });
-    result
+        let spec = dtool_design::NumericSpec::new("").range(0.0..=f64::from(f32::MAX))
+            .width(field_width).decimals(2).suffix("pt");
+        let display = picked.or(width).map_or(dtool_design::NumericValue::Mixed, |number| {
+            dtool_design::NumericValue::Value(f64::from(number))
+        });
+        let (response, event) = dtool_design::numeric_field(ui, ui.make_persistent_id(label), display, &spec);
+        response.labelled_by(caption);
+        if let dtool_design::NumericEvent::Preview(number) | dtool_design::NumericEvent::Commit(number) = event {
+            picked = Some(number as f32);
+        }
+    }));
+    (picked, stroke_pattern(ui, style))
 }
 
 pub(super) fn stroke_pattern(ui: &mut Ui, current: Option<LineStyle>) -> Option<LineStyle> {
@@ -561,10 +656,15 @@ fn committed_number(ui: &mut Ui, key: &str, label: egui::Id, value: Option<f32>,
 }
 
 pub(super) fn paint_choice(ui: &mut Ui, key: &str, paint: Option<&Paint>, draft: &mut Hsva) -> Option<Paint> {
-    paint_choice_with(ui, key, paint, draft, |_, _| {})
+    paint_popup(ui, key, paint, draft, true, |_, _| {})
 }
 
 pub(super) fn paint_choice_with(ui: &mut Ui, key: &str, paint: Option<&Paint>, draft: &mut Hsva, draw: impl FnOnce(&Ui, &Response)) -> Option<Paint> {
+    paint_popup(ui, key, paint, draft, false, draw)
+}
+
+fn paint_popup(ui: &mut Ui, key: &str, paint: Option<&Paint>, draft: &mut Hsva, live: bool,
+    draw: impl FnOnce(&Ui, &Response)) -> Option<Paint> {
     property_row(ui, key, dtool_design::size("icon.size.lg"), |ui, label| {
         let colour = paint.and_then(crate::fill_stroke::paint_well_colour);
         let value = if paint.is_none() { WellValue::Mixed } else { colour.map_or(WellValue::None, WellValue::Colour) };
@@ -578,10 +678,16 @@ pub(super) fn paint_choice_with(ui: &mut Ui, key: &str, paint: Option<&Paint>, d
         }
         let mut chosen = None;
         egui::Popup::menu(&well).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
-            egui::color_picker::color_picker_hsva_2d(ui, draft, egui::color_picker::Alpha::OnlyBlend);
+            let width = (ui.ctx().content_rect().width() - 24.0).clamp(120.0, 276.0);
+            ui.set_width(width);
+            ui.spacing_mut().slider_width = width;
+            if egui::color_picker::color_picker_hsva_2d(ui, draft, egui::color_picker::Alpha::OnlyBlend) && live {
+                chosen = Some(Paint::Solid { colour: picker_colour(*draft) });
+            }
             ui.horizontal(|ui| {
-                if dtool_design::button(ui, text("button.apply")).clicked() {
-                    chosen = Some(Paint::Solid { colour: picker_colour(*draft) });
+                let finish = if live { "button.close" } else { "button.apply" };
+                if dtool_design::button(ui, text(finish)).clicked() {
+                    if !live { chosen = Some(Paint::Solid { colour: picker_colour(*draft) }); }
                     ui.close();
                 }
                 if dtool_design::button(ui, text("paint.none")).clicked() {

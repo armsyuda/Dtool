@@ -2,16 +2,27 @@ use std::sync::mpsc;
 
 use dtool_core::Session;
 use dtool_core::workspace::DocContext;
-use dtool_export::raster::{ExportError, JobReceipt};
+use dtool_export::raster::{ExportError, JobReceipt, OverwriteDecision};
 use dtool_strings::text;
 use dtool_core::slice::{OutputId, OutputSize, SliceOutput, SliceSource, SliceTarget};
 use serde_json::json;
+
+mod workspace;
+pub(crate) use workspace::select_source;
+
+struct OverwriteRequest {
+    path: std::path::PathBuf,
+    reply: mpsc::Sender<OverwriteDecision>,
+}
 
 #[derive(Default)]
 pub struct SlicesPanel {
     error: Option<String>,
     job: Option<mpsc::Receiver<Result<JobReceipt, ExportError>>>,
     receipt: Option<JobReceipt>,
+    overwrite_rx: Option<mpsc::Receiver<OverwriteRequest>>,
+    overwrite: Option<OverwriteRequest>,
+    draft: workspace::OutputDraft,
 }
 
 impl SlicesPanel {
@@ -92,12 +103,25 @@ impl SlicesPanel {
             .map_or_else(|| title.clone(), |name| name.to_string_lossy().into_owned());
         let repaint = ctx.clone();
         let (sender, receiver) = mpsc::channel();
+        let (overwrite_tx, overwrite_rx) = mpsc::channel();
         std::thread::spawn(move || {
-            let result = dtool_export::slices::run(&document, &target, &directory, &title, &file_name);
+            let result = if target == SliceTarget::LayerQueue {
+                dtool_export::slices::run_confirming(&document, &target, &directory, &title, &file_name, |item| {
+                    let (reply, answer) = mpsc::channel();
+                    if overwrite_tx.send(OverwriteRequest { path: item.path.clone(), reply }).is_err() {
+                        return OverwriteDecision::Cancel;
+                    }
+                    repaint.request_repaint();
+                    answer.recv().unwrap_or(OverwriteDecision::Cancel)
+                })
+            } else {
+                dtool_export::slices::run(&document, &target, &directory, &title, &file_name)
+            };
             let _ = sender.send(result);
             repaint.request_repaint();
         });
         self.job = Some(receiver);
+        self.overwrite_rx = Some(overwrite_rx);
         self.receipt = None;
         self.error = None;
     }
@@ -115,6 +139,7 @@ impl SlicesPanel {
             Err(mpsc::TryRecvError::Disconnected) => Err(ExportError::Io("slice worker".into())),
         };
         self.job = None;
+        self.overwrite_rx = None;
         match result {
             Ok(receipt) => self.receipt = Some(receipt),
             Err(error) => self.error = Some(error.message_key().into()),

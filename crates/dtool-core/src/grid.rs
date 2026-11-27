@@ -55,7 +55,7 @@ impl Default for Grid {
             show: false,
             spacing: [64.0, 64.0],
             subdivisions: 4,
-            show_pixel: false,
+            show_pixel: true,
             show_baseline: false,
             baseline_spacing: 12.0,
             baseline: None,

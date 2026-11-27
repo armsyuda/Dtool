@@ -62,7 +62,11 @@ pub fn run(session: &mut Session, command: &Command) -> Option<CommandResult> {
         if !session.has_document { return Err(CommandError::no_document()); }
         if command.name == "slice.list" {
             let mut slices = session.document.slices.clone();
-            for slice in &mut slices { slice.bounds = slice.resolved_bounds(&session.document)?; }
+            for slice in &mut slices {
+                if !matches!(slice.source, SliceSource::Layer(id) if session.document.get_object(id).is_none()) {
+                    slice.bounds = slice.resolved_bounds(&session.document)?;
+                }
+            }
             return Ok(json!({"slices": slices, "selected_id": session.active_slice, "doc_version": session.generation}));
         }
         if command.name == "slice.select" {
@@ -87,7 +91,7 @@ pub fn run(session: &mut Session, command: &Command) -> Option<CommandResult> {
         let params = command.params.as_object().ok_or_else(CommandError::invalid_params)?;
         match command.name.as_str() {
             "slice.create" => {
-                if params.keys().any(|key| !matches!(key.as_str(), "rect" | "source" | "name")) { return Err(CommandError::invalid_params()); }
+                if params.keys().any(|key| !matches!(key.as_str(), "rect" | "source" | "name" | "layer")) { return Err(CommandError::invalid_params()); }
                 let high = slices.iter().map(|slice| slice.id.0).max().unwrap_or(0).checked_add(1).ok_or_else(CommandError::invalid_params)?;
                 target = SliceId(next.max(high).max(1));
                 next = target.0.checked_add(1).ok_or_else(CommandError::invalid_params)?;
@@ -96,22 +100,36 @@ pub fn run(session: &mut Session, command: &Command) -> Option<CommandResult> {
                     Some(Value::String(name)) if !name.trim().is_empty() => name.clone(),
                     _ => return Err(CommandError::invalid_params()),
                 };
+                let layer = match params.get("layer") {
+                    None => false,
+                    Some(Value::Bool(layer)) => *layer,
+                    _ => return Err(CommandError::invalid_params()),
+                };
                 let mut slice = match (params.get("rect"), params.get("source")) {
-                    (Some(value), None) => create_manual_slice(bounds(value)?, name, target),
+                    (Some(value), None) if !layer => create_manual_slice(bounds(value)?, name, target),
                     (None, Some(value)) => {
                         let source = value.as_u64().map(ObjectId).ok_or_else(CommandError::invalid_params)?;
                         let mut slice = create_linked_slice(source, name, target);
-                        slice.bounds = crate::slice::source_bounds(&session.document, source)?;
+                        if layer {
+                            if let Some(existing) = slices.iter().find(|entry| entry.source == SliceSource::Layer(source)) {
+                                session.active_slice = Some(existing.id);
+                                return Ok(json!({"id": existing.id.0, "doc_version": session.generation, "changes": []}));
+                            }
+                            slice.source = SliceSource::Layer(source);
+                        }
+                        slice.bounds = slice.resolved_bounds(&session.document)?;
                         slice
                     },
                     _ => return Err(CommandError::invalid_params()),
                 };
-                let output_id = slices.iter().flat_map(|slice| &slice.outputs).map(|output| output.id.0)
-                    .max().unwrap_or(0).checked_add(1).ok_or_else(CommandError::invalid_params)?;
-                slice.outputs.push(SliceOutput {
-                    id: OutputId(output_id), enabled: true, format: "png".into(),
-                    size: OutputSize::Scale(1.0), suffix: String::new(), path: None, options: None,
-                });
+                if !layer {
+                    let output_id = slices.iter().flat_map(|slice| &slice.outputs).map(|output| output.id.0)
+                        .max().unwrap_or(0).checked_add(1).ok_or_else(CommandError::invalid_params)?;
+                    slice.outputs.push(SliceOutput {
+                        id: OutputId(output_id), enabled: true, format: "png".into(),
+                        size: OutputSize::Scale(1.0), suffix: String::new(), path: None, options: None,
+                    });
+                }
                 slices.push(slice);
             },
             "slice.update" => {
