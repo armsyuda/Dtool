@@ -77,9 +77,6 @@ fn c13_missing_profile_is_reported_not_substituted_then_found_when_supplied() {
 #[test]
 fn c13_bundled_adobe_swop_is_the_unmodified_adobe_profile() {
     let path = repo_icc_dir().join("USWebCoatedSWOP.icc");
-    if !path.is_file() {
-        return;
-    }
     let bytes = std::fs::read(&path).unwrap();
     assert_eq!(bytes.len(), 557_168);
     assert_eq!(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize, bytes.len());
@@ -102,9 +99,6 @@ fn c13_cmyk_tiff_export_embeds_the_selected_swop_profile() {
     use dtool_core::document::{Document, Units};
     use dtool_export::cmyk::{export_tiff_cmyk, CmykOptions};
     use dtool_export::{ExportArea, ExportControl, ExportFormat, ExportRequest};
-    if !repo_icc_dir().join("USWebCoatedSWOP.icc").is_file() {
-        return;
-    }
     let doc = Document::new([16.0, 16.0], Units::Px, 96.0, 1);
     let out = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("c13_swop_{}.tif", std::process::id()));
     let request = ExportRequest { format: ExportFormat::Tiff, area: ExportArea::WholeDocument, pages: None, path: out.clone(), preset: None, options: serde_json::json!({}) };

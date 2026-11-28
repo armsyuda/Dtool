@@ -50,8 +50,9 @@ pub mod quick_fx;
 pub mod appearance;
 pub mod path_brushes;
 pub mod pixel_brushes;
+pub mod clone_sources;
 
-use crate::dock::{DockSide, Layout, PanelId};
+use crate::dock::{DockSide, Layout, PanelId, PanelUpdate};
 use crate::presets::PresetStore;
 use std::path::Path;
 use crate::panel_ids::{all_panel_ids, named_panel_ids, panel_registry, panel_title, remaining_panel_ids, PanelEntry};
@@ -85,6 +86,7 @@ pub struct PanelRegistry {
     pub styles: styles::StylesPanel,
     pub path_brushes: path_brushes::PathBrushesPanel,
     pub pixel_brushes: pixel_brushes::Panel,
+    pub clone_sources: clone_sources::Panel,
     pub text_wrap: text_wrap::TextWrapPanel,
     pub quick_fx: quick_fx::QuickFxPanel,
     pub text_styles: text_styles::TextStylesPanel,
@@ -114,12 +116,14 @@ pub fn window_panel(action: &str) -> Option<PanelId> {
         symbols::WINDOW_PANEL => Some(PanelId::Other(symbols::PANEL_KEY.to_string())),
         constraints::WINDOW_PANEL => Some(PanelId::Other(constraints::PANEL_KEY.to_string())),
         pixel_brushes::WINDOW_PANEL => Some(PanelId::Other(pixel_brushes::PANEL_KEY.to_owned())),
+        clone_sources::WINDOW_PANEL => Some(PanelId::Other(clone_sources::PANEL_KEY.to_owned())),
         path_brushes::WINDOW_PANEL => Some(PanelId::Other(path_brushes::PANEL_KEY.to_string())),
         "window.vector.appearance" => Some(PanelId::Other(appearance::PANEL_KEY.to_string())),
         "window.vector.quick_fx" => Some(PanelId::Effects),
         "window.layout.pages" => Some(PanelId::Pages),
         "window.general.transform" => Some(PanelId::Other("transform".into())),
         "window.general.navigator" => Some(PanelId::Navigator),
+        "window.general.snapshots" => Some(PanelId::Other(SNAPSHOTS_PANEL_KEY.into())),
         WINDOW_SWATCHES => Some(PanelId::Swatches),
         WINDOW_COLOUR => Some(PanelId::Colour),
         WINDOW_PARAGRAPH => Some(PanelId::Paragraph),
@@ -136,7 +140,7 @@ pub fn window_panel(action: &str) -> Option<PanelId> {
     }
 }
 
-pub const WINDOW_PANELS: &[&str] = &[symbols::WINDOW_PANEL, path_brushes::WINDOW_PANEL, pixel_brushes::WINDOW_PANEL, "window.vector.appearance", "window.vector.quick_fx", "window.layout.pages", "window.general.transform", "window.general.navigator", WINDOW_SWATCHES, WINDOW_COLOUR, WINDOW_PARAGRAPH, WINDOW_CHARACTER, WINDOW_TEXT_FRAME, WINDOW_GLYPH_BROWSER, WINDOW_ASSETS, WINDOW_STYLES, WINDOW_TEXT_WRAP, WINDOW_TEXT_STYLES, WINDOW_TABLE, WINDOW_TABLE_FORMATS];
+pub const WINDOW_PANELS: &[&str] = &[symbols::WINDOW_PANEL, path_brushes::WINDOW_PANEL, pixel_brushes::WINDOW_PANEL, clone_sources::WINDOW_PANEL, "window.vector.appearance", "window.vector.quick_fx", "window.layout.pages", "window.general.transform", "window.general.navigator", "window.general.snapshots", WINDOW_SWATCHES, WINDOW_COLOUR, WINDOW_PARAGRAPH, WINDOW_CHARACTER, WINDOW_TEXT_FRAME, WINDOW_GLYPH_BROWSER, WINDOW_ASSETS, WINDOW_STYLES, WINDOW_TEXT_WRAP, WINDOW_TEXT_STYLES, WINDOW_TABLE, WINDOW_TABLE_FORMATS];
 
 thread_local! {
     static SHOWN_WINDOW_PANELS: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
@@ -170,6 +174,10 @@ pub fn toggle_panel(layout: &mut Layout, id: &PanelId) -> bool {
 
 pub fn workspace_panel(ui: &mut egui::Ui, id: &PanelId, registry: &mut PanelRegistry, workspace: &mut dtool_core::workspace::Workspace) -> bool {
     match id {
+        PanelId::Other(key) if key == clone_sources::PANEL_KEY => {
+            registry.clone_sources.show(ui, workspace);
+            true
+        }
         PanelId::Other(key) if key == pixel_brushes::PANEL_KEY => {
             registry.pixel_brushes.show(ui, workspace);
             true
@@ -326,13 +334,14 @@ impl PanelRegistry {
     }
 
     pub fn has_body(&self, id: &PanelId) -> bool {
-        matches!(id, PanelId::Layers | PanelId::Navigator | PanelId::Effects | PanelId::Swatches | PanelId::Paragraph | PanelId::Character | PanelId::Stroke | PanelId::Colour) || matches!(id, PanelId::Other(key) if key == TEXT_FRAME_PANEL_KEY || key == glyph_browser::GLYPH_BROWSER_PANEL_KEY || key == assets::ASSETS_PANEL_KEY || key == symbols::PANEL_KEY || key == constraints::PANEL_KEY || key == styles::STYLES_PANEL_KEY || key == path_brushes::PANEL_KEY || key == pixel_brushes::PANEL_KEY || key == text_wrap::TEXT_WRAP_PANEL_KEY || key == text_styles::TEXT_STYLES_PANEL_KEY || key == table::PANEL_KEY || key == table_formats::PANEL_KEY) || self.bodies.iter().any(|(known, _)| known == id)
+        matches!(id, PanelId::Layers | PanelId::Navigator | PanelId::Effects | PanelId::Swatches | PanelId::Paragraph | PanelId::Character | PanelId::Stroke | PanelId::Colour) || matches!(id, PanelId::Other(key) if key == TEXT_FRAME_PANEL_KEY || key == glyph_browser::GLYPH_BROWSER_PANEL_KEY || key == assets::ASSETS_PANEL_KEY || key == symbols::PANEL_KEY || key == constraints::PANEL_KEY || key == styles::STYLES_PANEL_KEY || key == path_brushes::PANEL_KEY || key == pixel_brushes::PANEL_KEY || key == clone_sources::PANEL_KEY || key == text_wrap::TEXT_WRAP_PANEL_KEY || key == text_styles::TEXT_STYLES_PANEL_KEY || key == table::PANEL_KEY || key == table_formats::PANEL_KEY) || self.bodies.iter().any(|(known, _)| known == id)
     }
 
     pub fn ids(&self) -> Vec<PanelId> {
         let mut ids = all_panel_ids();
         ids.push(PanelId::Other(path_brushes::PANEL_KEY.to_string()));
         ids.push(PanelId::Other(pixel_brushes::PANEL_KEY.to_owned()));
+        ids.push(PanelId::Other(clone_sources::PANEL_KEY.to_owned()));
         let text_styles_id = PanelId::Other(text_styles::TEXT_STYLES_PANEL_KEY.to_string());
         if !ids.iter().any(|id| id.key() == text_styles::TEXT_STYLES_PANEL_KEY) {
             ids.push(text_styles_id);
@@ -349,8 +358,10 @@ impl PanelRegistry {
         let mut extra: Vec<PanelId> = self.bodies.iter().map(|(id, _)| id.clone()).collect();
         extra.push(PanelId::Other(path_brushes::PANEL_KEY.to_string()));
         extra.push(PanelId::Other(pixel_brushes::PANEL_KEY.to_owned()));
+        extra.push(PanelId::Other(clone_sources::PANEL_KEY.to_owned()));
         extra.push(PanelId::Other(constraints::PANEL_KEY.to_string()));
         extra.push(PanelId::Other(SLICES_PANEL_KEY.into()));
+        extra.push(PanelId::Other(SNAPSHOTS_PANEL_KEY.into()));
         extra.push(PanelId::Other(AI_IMAGE_PANEL_KEY.into()));
         extra.push(PanelId::Other(table::PANEL_KEY.to_string()));
         extra.push(PanelId::Other(table_formats::PANEL_KEY.to_string()));
@@ -515,15 +526,13 @@ pub fn run_command(layout: &mut Layout, registry: &PanelRegistry, name: &str, pa
             layout.panel_state_json(&id)
         })),
         "ui.panel.query" => Some(panel().map(|id| layout.panel_state_json(&id))),
-        "ui.panel.set" if dtool_core::commands::palettes::is_swatches_set(params) => Some(dtool_core::commands::palettes::apply_view_set(&params["set"]).and_then(|state| {
+        "ui.panel.set" if dtool_core::commands::palettes::is_swatches_set(params) => Some((|| {
             let id = PanelId::Swatches;
-            let mut layout_params = params.clone();
-            layout_params["id"] = json!(dtool_core::commands::palettes::SWATCHES_PANEL);
-            if ["side", "visible", "floated", "os_window"].iter().any(|key| params.get(*key).is_some()) {
-                layout.run_command(name, &layout_params).unwrap_or_else(|| Ok(Value::Null))?;
-            }
+            let update = PanelUpdate::parse(params)?;
+            let state = dtool_core::commands::palettes::apply_view_set(&params["set"])?;
+            update.apply(layout, &id);
             Ok(json!({ "panel": dtool_core::commands::palettes::SWATCHES_PANEL, "state": state, "layout": layout.panel_state_json(&id) }))
-        })),
+        })()),
         "ui.panel.state" | "ui.panel.set" => layout.run_command(name, params),
         _ => None,
     }

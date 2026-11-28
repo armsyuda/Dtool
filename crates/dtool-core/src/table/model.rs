@@ -53,6 +53,12 @@ pub struct EdgeStyle {
     pub width_pt: f32,
     #[serde(default, skip_serializing_if = "crate::paint::LineStyle::is_solid")]
     pub line_style: crate::paint::LineStyle,
+    #[serde(default, skip_serializing_if = "edge_is_centred")]
+    pub align: crate::paint::StrokeAlign,
+}
+
+fn edge_is_centred(align: &crate::paint::StrokeAlign) -> bool {
+    *align == crate::paint::StrokeAlign::Centre
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -178,6 +184,8 @@ pub struct TableNode {
     pub format: Option<TableFormatId>,
     pub frame_local: TableFrameFormat,
     pub frame_mask: FrameFormatMask,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text_defaults: Option<crate::defaults::TextDefaults>,
 }
 
 #[derive(Deserialize)]
@@ -197,6 +205,8 @@ struct TableNodeWire {
     frame_local: TableFrameFormat,
     #[serde(default)]
     frame_mask: FrameFormatMask,
+    #[serde(default)]
+    text_defaults: Option<crate::defaults::TextDefaults>,
 }
 
 impl TryFrom<TableNodeWire> for TableNode {
@@ -216,6 +226,7 @@ impl TryFrom<TableNodeWire> for TableNode {
             format: wire.format,
             frame_local: wire.frame_local,
             frame_mask: wire.frame_mask,
+            text_defaults: wire.text_defaults,
         })
     }
 }

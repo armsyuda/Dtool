@@ -13,10 +13,8 @@ fn run(ctx: &egui::Context, events: Vec<egui::Event>, add: impl FnMut(&mut egui:
 }
 
 #[test]
-fn backdrop_token_is_translucent() {
-    let colour = backdrop_color();
-    assert!(colour.a() > 0 && colour.a() < 255);
-    assert_ne!(colour, egui::Color32::from_rgb(255, 0, 255));
+fn backdrop_preserves_canvas_brightness() {
+    assert_eq!(backdrop_color(), egui::Color32::TRANSPARENT);
 }
 
 #[test]

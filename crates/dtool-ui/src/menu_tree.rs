@@ -140,10 +140,10 @@ const PIXEL_MENU_ROWS: &[MenuRow] = &[
     (2, "edit.paste.without_format", "menu.edit.paste.without_format", Some("edit.paste_without_format"), ITEM),
     (1, "edit.sep4", "", None, SEP),
     (1, "edit.defaults", "menu.edit.defaults", None, ITEM),
-    (2, "edit.defaults.synchronise_from_selection", "menu.edit.defaults.synchronise_from_selection", None, ITEM),
-    (2, "edit.defaults.save", "menu.edit.defaults.save", None, ITEM),
-    (2, "edit.defaults.revert", "menu.edit.defaults.revert", None, ITEM),
-    (2, "edit.defaults.factory_reset", "menu.edit.defaults.factory_reset", None, ITEM),
+    (2, "edit.defaults.synchronise_from_selection", "menu.edit.defaults.synchronise_from_selection", Some("defaults.sync"), ITEM),
+    (2, "edit.defaults.save", "menu.edit.defaults.save", Some("defaults.save"), ITEM),
+    (2, "edit.defaults.revert", "menu.edit.defaults.revert", Some("defaults.revert"), ITEM),
+    (2, "edit.defaults.factory_reset", "menu.edit.defaults.factory_reset", Some("defaults.reset"), ITEM),
     (1, "edit.create_style", "menu.edit.create_style", None, ITEM),
     (1, "edit.sep5", "", None, SEP),
     (1, "edit.settings", "menu.edit.settings", None, ITEM),
@@ -792,7 +792,8 @@ const PIXEL_MENU_ROWS: &[MenuRow] = &[
     (2, "pixel.rasterise.rasterise_and_trim", "menu.pixel.rasterise.rasterise_and_trim", Some("layer.rasterise.trim"), ITEM),
     (2, "pixel.rasterise.rasterise", "menu.pixel.rasterise.rasterise", Some("layer.rasterise"), ITEM),
     (2, "pixel.rasterise.rasterise_to_mask", "menu.pixel.rasterise.rasterise_to_mask", None, ITEM),
-    (1, "pixel.inpaint", "menu.pixel.inpaint", None, ITEM),
+    (1, "pixel.content_aware.fill", "menu.pixel.content_aware.fill", Some(dtool_core::commands::inpaint::FILL_SELECTION), ITEM),
+    (1, "pixel.inpaint", "menu.pixel.inpaint", Some(dtool_core::commands::inpaint::ACTIVATE), ITEM),
     (0, "layer", "menu.layer", None, ITEM),
     (1, "layer.select", "menu.layer.select", None, ITEM),
     (2, "layer.select.next_layer", "menu.layer.select.next_layer", None, ITEM),
@@ -1766,7 +1767,7 @@ pub fn gui_row_gate(id: &str, session: &dtool_core::Session) -> Option<bool> {
         return Some(crate::dialogs::blend_options::can_edit_selection(session));
     }
     if id == LAYER_EFFECTS_MENU_ID {
-        return Some(crate::mask_actions::target(session).is_some());
+        return Some(crate::dialogs::layer_effects::editable_target(session).is_some());
     }
     if id == FIND_LAYER_MENU_ID {
         return Some(crate::panels::layers::reveal_target(session).is_some());

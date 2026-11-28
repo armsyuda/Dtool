@@ -30,6 +30,7 @@ fn table_with(cells: Vec<(u64, u32, VerticalAlign, CellRotation)>) -> TableNode 
         format: None,
         frame_local: TableFrameFormat::default(),
         frame_mask: FrameFormatMask::default(),
+        text_defaults: None,
     }
 }
 

@@ -15,7 +15,7 @@ fn make_doc() -> Document {
 }
 
 fn make_table() -> TableNode {
-    let mut table = TableNode { alloc: CellIdAllocator { high_water: 3 }, col_widths_pt: Vec::new(), row_heights_pt: Vec::new(), cells: Vec::new(), header_rows: 0, footer_rows: 0, format: None, frame_local: TableFrameFormat::default(), frame_mask: FrameFormatMask::default() };
+    let mut table = TableNode { alloc: CellIdAllocator { high_water: 3 }, col_widths_pt: Vec::new(), row_heights_pt: Vec::new(), cells: Vec::new(), header_rows: 0, footer_rows: 0, format: None, frame_local: TableFrameFormat::default(), frame_mask: FrameFormatMask::default(), text_defaults: None };
     table.col_widths_pt = vec![50.0, 10.0];
     table.row_heights_pt = vec![30.0];
     

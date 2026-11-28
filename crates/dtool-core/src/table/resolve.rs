@@ -191,6 +191,103 @@ pub fn resolve_cell(doc: &Document, table: &TableNode, cell: &TableCell) -> Cell
     resolved
 }
 
+pub(crate) fn story_cell(doc: &Document, id: crate::StoryId) -> Option<(&TableNode, &TableCell)> {
+    doc.objects.iter().find_map(|object| {
+        let crate::ObjectKind::Table(table) = &object.kind else { return None };
+        table.cells.iter().find(|cell| cell.story == id && cell.merged_into.is_none())
+            .map(|cell| (table, cell))
+    })
+}
+
+/// Resolve named cell typography below direct character and paragraph formatting.
+/// Keep inherited runs out of the stored story so changing a format stays live.
+pub fn styled_cell_story(doc: &Document, table: &TableNode, story: &crate::Story, format: &CellFormat) -> Option<crate::Story> {
+    use crate::text_styles::StyleKind;
+    use serde_json::{Value, json};
+
+    let preset = format.paragraph_style.as_deref().and_then(|name| doc.text_styles.resolve(StyleKind::Paragraph, name).ok());
+    if preset.is_none() && table.text_defaults.is_none() {
+        return None;
+    }
+    let mut character = serde_json::Map::new();
+    let mut paragraph = serde_json::Map::new();
+    if let Some(defaults) = &table.text_defaults {
+        let mut initial = crate::Story::default();
+        crate::text_cmd::style_new_story(&mut initial, &json!({ "text_defaults": defaults }), doc).ok()?;
+        character = initial.ranges.pop().and_then(|run| run.as_object().cloned()).unwrap_or_default();
+        paragraph = initial.paras.pop().and_then(|run| run.as_object().cloned()).unwrap_or_default();
+    }
+    let merge_character = |base: &mut serde_json::Map<String, Value>, patch: serde_json::Map<String, Value>| {
+        if patch.contains_key("family") && patch.get("family") != base.get("family") {
+            for key in ["style", "weight", "italic"] {
+                base.remove(key);
+            }
+        }
+        base.extend(patch);
+    };
+    if let Some(preset) = preset {
+        merge_character(&mut character, preset.clone());
+        paragraph.extend(preset);
+    }
+    character.entry("size_pt").or_insert_with(|| json!(crate::text_cmd::DEFAULT_SIZE_PT));
+    for fields in [&mut character, &mut paragraph] {
+        fields.remove("start");
+        fields.remove("end");
+    }
+    let len = story.text.chars().count();
+    let mut styled = story.clone();
+    let with_defaults = |runs: &[Value], props: &serde_json::Map<String, Value>, is_character| {
+        let merge = |base: &mut serde_json::Map<String, Value>, direct| {
+            if is_character { merge_character(base, direct); } else { base.extend(direct); }
+        };
+        if len == 0 {
+            let mut base = props.clone();
+            for run in runs.iter().filter_map(Value::as_object)
+                .filter(|run| !run.contains_key("frame"))
+            {
+                merge(&mut base, run.clone());
+            }
+            base.insert("start".into(), json!(0));
+            base.insert("end".into(), json!(0));
+            return Some(vec![Value::Object(base)]);
+        }
+        crate::commands::text_styles_cmd::restyle(runs, 0, len, true, |run| {
+            if !run.contains_key("frame") {
+                let direct = std::mem::take(run);
+                run.clone_from(props);
+                merge(run, direct);
+            }
+            Ok(())
+        }).ok()
+    };
+    styled.ranges = with_defaults(&story.ranges, &character, true)?;
+    styled.paras = with_defaults(&story.paras, &paragraph, false)?;
+    // Empty paragraphs have no scalar interval, so restyling an interval
+    // leaves their direct runs untouched.
+    for run in styled.paras.iter_mut().filter_map(Value::as_object_mut) {
+        if run.get("start") == run.get("end") {
+            for (key, value) in &paragraph {
+                run.entry(key.clone()).or_insert_with(|| value.clone());
+            }
+        }
+    }
+    Some(styled)
+}
+
+pub fn effective_story<'a>(doc: &Document, story: &'a crate::Story) -> std::borrow::Cow<'a, crate::Story> {
+    use std::borrow::Cow;
+    let Some((table, cell)) = story_cell(doc, story.id) else { return Cow::Borrowed(story) };
+    if let Some(styled) = styled_cell_story(doc, table, story, &resolve_cell(doc, table, cell)) {
+        Cow::Owned(styled)
+    } else if story.ranges.is_empty() {
+        let mut styled = story.clone();
+        crate::text_cmd::set_size_range(&mut styled, crate::text_cmd::DEFAULT_SIZE_PT);
+        Cow::Owned(styled)
+    } else {
+        Cow::Borrowed(story)
+    }
+}
+
 pub fn resolve_frame(doc: &Document, table: &TableNode) -> TableFrameFormat {
     let mut resolved = inherited_frame_format(doc, table);
     let local = &table.frame_local;

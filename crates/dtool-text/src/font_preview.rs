@@ -75,6 +75,12 @@ pub fn font_list(lib: &FontLibrary) -> Vec<String> {
     lib.families().into_iter().map(str::to_owned).collect()
 }
 
+pub fn appearance_preview_active(doc: &dtool_core::Document) -> bool {
+    let style = STYLE_PREVIEW.lock().unwrap_or_else(|error| error.into_inner()).as_ref()
+        .is_some_and(|preview| preview.document == doc.instance.0 && preview.version == doc.version);
+    style || preview_slot().iter().any(|preview| preview.doc == doc.instance.0)
+}
+
 pub fn font_preview() -> Option<FontPreview> {
     preview_slot().first().cloned()
 }

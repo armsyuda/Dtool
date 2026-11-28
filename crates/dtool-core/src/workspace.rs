@@ -232,6 +232,7 @@ pub struct Workspace {
     ai_connection: Arc<crate::ai_connection::AiConnection>,
     script_host: crate::script::ScriptHost,
     clipboard: AppClipboard,
+    clone_sources: crate::commands::pixel_brush::global_source::Store,
     snap_prefs: Option<crate::snap_prefs::SnapPrefsService>,
     native_extras: std::collections::HashMap<ContextId, serde_json::Value>,
     paired_page_moves: Vec<[(ContextId, u64); 2]>,
@@ -305,6 +306,7 @@ impl Workspace {
             ai_connection: Arc::new(crate::ai_connection::AiConnection::default()),
             script_host: crate::script::ScriptHost::default(),
             clipboard: AppClipboard::new(),
+            clone_sources: Default::default(),
             snap_prefs: None,
             native_extras: std::collections::HashMap::new(),
             paired_page_moves: Vec::new(),
@@ -488,6 +490,7 @@ impl Workspace {
         crate::commands::pages::normalize_layout_order(&mut document);
         crate::commands::masters::materialize_groups(&mut document);
         let mut session = Session::with_clipboard(document, self.clipboard.share());
+        session.clone_sources = self.clone_sources.clone();
         match &self.snap_prefs {
             Some(store) => session.snap_prefs = store.share(),
             None => self.snap_prefs = Some(session.snap_prefs.share()),

@@ -5,6 +5,10 @@ use serde::{Deserialize, Serialize};
 mod filters;
 pub(crate) use filters::{apply as filter_dabs, filter_padding};
 
+#[path = "brush_heal.rs"]
+mod heal;
+pub(crate) use heal::{heal_dabs, heal_region};
+
 #[path = "brush_image.rs"]
 mod brush_image;
 pub use brush_image::BrushImage;
@@ -30,6 +34,8 @@ pub enum BrushOp {
     Mixer,
     ColourReplace,
     Clone,
+    Heal,
+    Undo,
     Sponge,
     Tone,
     Dodge,
@@ -38,6 +44,12 @@ pub enum BrushOp {
     Sharpen,
     Smudge,
     Median,
+}
+
+impl BrushOp {
+    pub fn uses_sample_source(self) -> bool {
+        matches!(self, Self::Clone | Self::Heal)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -619,6 +631,7 @@ pub enum SharpenMode {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct OpParams {
     pub tonal_range: TonalRange,
+    pub filter_tonal_range: Option<TonalRange>,
     pub protect_hue: bool,
     pub sponge_mode: SpongeMode,
     pub sharpen_mode: SharpenMode,
@@ -635,6 +648,7 @@ impl Default for OpParams {
     fn default() -> Self {
         Self {
             tonal_range: TonalRange::Midtones,
+            filter_tonal_range: None,
             protect_hue: false,
             sponge_mode: SpongeMode::Saturate,
             sharpen_mode: SharpenMode::Clarity,
@@ -702,8 +716,7 @@ impl Dab {
         let (sin, cos) = settings.tip_transform.angle(angle).sin_cos();
         let size = dynamics.size_jitter.apply(size, noise(index, 18));
         let size = settings.size_px.max(1.0) * size.clamp(0.01, 1.0);
-        let base_roundness = if settings.tip_kind == TipKind::Round { settings.roundness } else { 1.0 };
-        let roundness = dynamics.roundness_jitter.apply(base_roundness, noise(index, 19)).clamp(0.01, 1.0);
+        let roundness = dynamics.roundness_jitter.apply(settings.roundness, noise(index, 19)).clamp(0.01, 1.0);
         let tilt_height = tilt_size.filter(|scale| *scale > 0.0).unwrap_or(1.0);
         let tilt_amount = sample.tilt[0].hypot(sample.tilt[1]).min(1.0);
         let [along_x, along_y] = dynamics.path_scatter.offset(sample, index, size, direction);
@@ -803,9 +816,12 @@ fn round_coverage(radius: f32, hardness: f32, distance: f32) -> Option<f32> {
     // Hardness sets the solid core. A raster-sized transition keeps the
     // hardest tips antialiased, including when their centers are fractional.
     let width = (radius * (1.0 - hardness.clamp(0.0, 1.0))).max(radius.min(2.0));
-    let core = radius - width + 0.5;
-    let t = ((distance - core) / width).max(0.0);
+    let t = ((distance - (radius - width + 0.5)) / width).max(0.0);
     Some(if t == 0.0 { 1.0 } else { (-6.0 * t * t).exp() })
+}
+
+fn round_core(radius: f32, hardness: f32) -> f32 {
+    radius - (radius * (1.0 - hardness.clamp(0.0, 1.0))).max(radius.min(2.0)) + 0.5
 }
 
 impl BrushSettings {
@@ -815,7 +831,7 @@ impl BrushSettings {
             if dynamics.path_scatter.amount > 0.0 || dynamics.scatter.iter().any(|axis| axis.amount > 0.0) { return false; }
             let scaled = dynamics.size.kind == ControllerKind::Tilt
                 && dynamics.tilt_scale.is_some_and(|scale| scale > 0.0 && scale != 1.0);
-            let unflattened = !scaled && (kind != TipKind::Round || roundness == 1.0) && dynamics.roundness_jitter.amount == 0.0;
+            let unflattened = !scaled && roundness == 1.0 && dynamics.roundness_jitter.amount == 0.0;
             if kind == TipKind::Round && unflattened { return true; }
             let angle = a.angle(rotation.to_radians()) - b.angle(rotation.to_radians());
             if matches!(kind, TipKind::Square | TipKind::Round) {
@@ -1445,6 +1461,12 @@ impl ReverseAverage {
     }
 }
 
+pub(crate) fn independent_dabs(settings: &BrushSettings, op: BrushOp) -> bool {
+    matches!(op, BrushOp::Paint | BrushOp::Erase)
+        && !settings.sub_brushes.iter().any(|sub| sub.enabled)
+        && StrokeFinish::for_tip(settings, op, true, true).is_none()
+}
+
 pub(crate) fn is_filter(op: BrushOp) -> bool {
     matches!(op, BrushOp::Blur | BrushOp::Sharpen | BrushOp::Median | BrushOp::Smudge)
 }
@@ -1696,24 +1718,34 @@ fn sampled_stroke(dst: &mut RasterViewMut, dabs: &[Dab], settings: &BrushSetting
 
 pub(crate) fn clone_dabs(
     dst: &mut RasterViewMut,
-    source: &crate::pixel::PixelLayer,
     dabs: &[Dab],
     settings: &BrushSettings,
     origin: [u32; 2],
-    offset: [i64; 2],
+    mode: crate::blend::BlendMode,
+    sample: impl Fn([u32; 2]) -> [u8; 4],
 ) {
     for dab in dabs {
         let [left, top, right, bottom] = dab_bounds(dab, settings.tip_kind, [dst.width, dst.height]);
         for y in top..bottom {
-            let sy = (i64::from(origin[1]) + i64::from(y)).saturating_add(offset[1]);
-            if !(0..i64::from(source.height)).contains(&sy) { continue; }
             for x in left..right {
-                let sx = (i64::from(origin[0]) + i64::from(x)).saturating_add(offset[0]);
-                if !(0..i64::from(source.width)).contains(&sx) { continue; }
                 if let Some((_, coverage)) = dab.ink(settings, x as f32 - dab.x, y as f32 - dab.y) {
                     let alpha = dab.alpha * coverage;
                     if alpha > 0.0 {
-                        paint_pixel(dst, x, y, source.get(sx as u32, sy as u32), alpha, false, settings.protect_alpha);
+                        let mut colour = sample([origin[0] + x, origin[1] + y]);
+                        if mode.is_normal() {
+                            paint_pixel(dst, x, y, colour, alpha, false, settings.protect_alpha);
+                        } else {
+                            let mut current = dst.get_pixel(i64::from(x), i64::from(y));
+                            if settings.protect_alpha {
+                                let mut opaque = [current[0], current[1], current[2], 255];
+                                crate::blend::blend_pixel(&mut opaque, 0, [colour[0], colour[1], colour[2], 255], 1.0, mode);
+                                colour[..3].copy_from_slice(&opaque[..3]);
+                                paint_pixel(dst, x, y, colour, alpha, false, true);
+                            } else {
+                                crate::blend::blend_pixel(&mut current, 0, colour, alpha, mode);
+                                dst.set_pixel(i64::from(x), i64::from(y), current[0], current[1], current[2], current[3]);
+                            }
+                        }
                     }
                 }
             }
@@ -1721,7 +1753,51 @@ pub(crate) fn clone_dabs(
     }
 }
 
-fn paint_dab(
+pub(crate) fn restore_dabs(
+    dst: &mut RasterViewMut,
+    source: Option<&crate::pixel::PixelLayer>,
+    size: [u32; 2],
+    dabs: impl IntoIterator<Item = Vec<Dab>>,
+    settings: &BrushSettings,
+    origin: [u32; 2],
+    preserve_missing: bool,
+) {
+    let sample = |x, y| source.map_or([0; 4], |layer| {
+        let scale = |pixel, from, to| ((u64::from(pixel) * u64::from(to)) / u64::from(from)) as u32;
+        layer.get(scale(x, size[0], layer.width), scale(y, size[1], layer.height))
+    });
+    let opacity = settings.opacity.clamp(0.0, 1.0);
+    if opacity == 0.0 || settings.flow <= 0.0 { return; }
+    let width = dst.width as usize;
+    let mut coverage = vec![0.0; dst.rgba.len() / 4];
+    for dab in dabs.into_iter().flatten() {
+        dab_coverage(&dab, settings, dst.width, dst.height, |x, y, amount| {
+            accumulate_coverage(&mut coverage[y * width + x], amount, opacity);
+        });
+    }
+    for (index, (pixel, coverage)) in dst.rgba.chunks_exact_mut(4).zip(coverage).enumerate() {
+        if coverage == 0.0 { continue; }
+        let prior = sample(origin[0] + (index % width) as u32, origin[1] + (index / width) as u32);
+        if (prior[3] == 0 && (preserve_missing || settings.protect_alpha))
+            || (settings.protect_alpha && pixel[3] == 0)
+        {
+            continue;
+        }
+        let before = f32::from(pixel[3]) * (1.0 - coverage);
+        let after = f32::from(prior[3]) * coverage;
+        let alpha = before + after;
+        if alpha > 0.0 {
+            for (current, previous) in pixel[..3].iter_mut().zip(prior) {
+                *current = ((f32::from(*current) * before + f32::from(previous) * after) / alpha).round() as u8;
+            }
+        } else if pixel[3] != 0 {
+            pixel[..3].copy_from_slice(&prior[..3]);
+        }
+        if !settings.protect_alpha { pixel[3] = alpha.round() as u8; }
+    }
+}
+
+pub(crate) fn paint_dab(
     dst: &mut RasterViewMut,
     dab: &Dab,
     s: &BrushSettings,
@@ -1739,8 +1815,32 @@ fn paint_dab(
         texture_for(s, BrushTextureMode::Nozzle)
     } else { None };
 
+    let constant_ink = op == BrushOp::Paint && !s.protect_alpha
+        && !s.pixel_perfect && s.stamp.is_none() && s.additional_stamps.is_empty()
+        && s.sub_brush_color_blend == SubBrushColorBlend::Normal;
+    let solid_round = constant_ink && s.tip_kind == TipKind::Round && dab.roundness == 1.0
+        && dab.height_scale == 1.0 && dab.alpha == 1.0 && texture.is_none() && s.colour[3] == 255;
+    let radius = dab.size * 0.5;
+    let solid_radius = round_core(radius, dab.hardness) - 0.001;
     for py in y_min..y_max {
-        for px in x_min..x_max {
+        let dy = py as f32 - dab.y;
+        let (left, right) = if solid_round && solid_radius > dy.abs() && x_min < x_max {
+            let half_width = (solid_radius * solid_radius - dy * dy).sqrt();
+            let left = ((dab.x - half_width).ceil() as u32).clamp(x_min, x_max);
+            let right = ((dab.x + half_width).floor() as u32).saturating_add(1).clamp(left, x_max);
+            let row = py as usize * dst.width as usize;
+            for pixel in dst.rgba[(row + left as usize) * 4..(row + right as usize) * 4].as_chunks_mut::<4>().0 {
+                *pixel = s.colour;
+            }
+            (left, right)
+        } else {
+            (x_max, x_max)
+        };
+        for px in (x_min..left).chain(right..x_max) {
+            if constant_ink {
+                let offset = (py as usize * dst.width as usize + px as usize) * 4;
+                if dst.rgba[offset + 3] == 255 && dst.rgba[offset..offset + 3] == s.colour[..3] { continue; }
+            }
             let dx = px as f32 - dab.x;
             let dy = py as f32 - dab.y;
             let Some((colour, falloff)) = dab.ink(s, dx, dy) else { continue };
@@ -1769,7 +1869,7 @@ fn paint_dab(
     }
 }
 
-fn dab_bounds(dab: &Dab, kind: TipKind, [width, height]: [u32; 2]) -> [u32; 4] {
+pub(crate) fn dab_bounds(dab: &Dab, kind: TipKind, [width, height]: [u32; 2]) -> [u32; 4] {
     let extent = dab.extent(kind);
     [
         (dab.x - extent).floor().max(0.0) as u32,
@@ -1815,8 +1915,16 @@ fn paint_pixel(
         }
     }
 
-    let existing = dst.get_pixel(x as i64, y as i64);
     let src_a = alpha * (colour[3] as f32 / 255.0);
+    if src_a <= 0.0 { return; }
+    let existing = dst.get_pixel(x as i64, y as i64);
+    if !protect_alpha {
+        if src_a == 1.0 {
+            dst.set_pixel(x as i64, y as i64, colour[0], colour[1], colour[2], 255);
+            return;
+        }
+        if existing[3] == 255 && existing[..3] == colour[..3] { return; }
+    }
     let dst_a = existing[3] as f32 / 255.0;
 
     if protect_alpha {

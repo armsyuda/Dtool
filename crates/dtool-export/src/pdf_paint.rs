@@ -352,11 +352,7 @@ fn padded_focal_gradient<'a>(
 fn gradient_paint(kind: &GradientKind, stops: &[GradientStop], geom: &GradientGeom, output: &OutputColour) -> KrillaPaint {
     let (stops, geom) = padded_focal_gradient(*kind, stops, geom);
     let stops = gradient_stops(&stops, output);
-    let transform = if matches!(kind, GradientKind::Radial | GradientKind::Conical) {
-        affine(GradientGeom { ratio: 1.0, ..geom }.to_matrix())
-    } else {
-        affine(geom.to_matrix())
-    };
+    let transform = affine(geom.gradient_matrix(*kind));
     let spread_method = match geom.spread {
         GradientSpread::Pad => SpreadMethod::Pad,
         GradientSpread::Repeat => SpreadMethod::Repeat,
@@ -552,6 +548,7 @@ fn tiled_image_paint(
     raster_size: Option<(u32, u32)>,
     matrix: [f64; 6],
     converted: Option<krilla::image::Image>,
+    single_image: Option<(&BitmapPaint, kurbo::Rect)>,
 ) -> KrillaPaint {
     let mut width = 1.0_f32;
     let mut height = 1.0_f32;
@@ -574,6 +571,10 @@ fn tiled_image_paint(
         tile.finish();
     }
     let stream = builder.finish();
+    if let Some((bitmap, bounds)) = single_image {
+        let period = bitmap.tile_period([f64::from(width), f64::from(height)], kurbo::Affine::new(matrix), bounds);
+        [width, height] = period.map(|side| side as f32);
+    }
     Pattern {
         stream,
         transform: affine(matrix),
@@ -588,6 +589,7 @@ fn bitmap_to_paint<R: PdfPaintResources>(
     bitmap: &BitmapPaint,
     resources: &R,
     output: &OutputColour,
+    bounds: Option<kurbo::Rect>,
 ) -> KrillaPaint {
     tiled_image_paint(
         surface,
@@ -595,6 +597,7 @@ fn bitmap_to_paint<R: PdfPaintResources>(
         resources.resource_raster_size(&bitmap.resource_id),
         bitmap.matrix,
         resources.document().and_then(|doc| output.bitmap_image(doc, &bitmap.resource_id)),
+        bounds.map(|bounds| (bitmap, bounds)),
     )
 }
 
@@ -608,6 +611,7 @@ fn pattern_to_paint<R: PdfPaintResources>(
         resources.resource_bytes(&pattern.resource_id),
         resources.resource_raster_size(&pattern.resource_id),
         pattern.matrix,
+        None,
         None,
     )
 }
@@ -763,7 +767,7 @@ fn paint_for_output<R: PdfPaintResources>(
         Paint::Solid { colour } => Some(output.colour(*colour).into()),
         Paint::Gradient { kind, stops, geom } => Some(gradient_paint(kind, stops, geom, output)),
         Paint::Hatch(hatch) => Some(hatch_to_paint(surface, hatch, output)),
-        Paint::Bitmap(bitmap) => Some(bitmap_to_paint(surface, bitmap, resources, output)),
+        Paint::Bitmap(bitmap) => Some(bitmap_to_paint(surface, bitmap, resources, output, None)),
         Paint::Pattern(pattern) => Some(pattern_to_paint(surface, pattern, resources)),
         Paint::Mesh(mesh) => Some(mesh_to_paint(surface, mesh, output)),
         Paint::Diffusion(diffusion) => Some(diffusion_to_paint(surface, diffusion, output)),
@@ -779,6 +783,24 @@ pub fn paint_to_fill<R: PdfPaintResources>(
 ) -> Option<Fill> {
     let output = OutputColour::new(resources.document(), opts).ok()?;
     fill_for_output(surface, paint, opacity, &output, resources)
+}
+
+pub(crate) fn fill_for_output_at<R: PdfPaintResources>(
+    surface: &mut Surface<'_>,
+    paint: &Paint,
+    opacity: f32,
+    output: &OutputColour,
+    resources: &R,
+    bounds: kurbo::Rect,
+) -> Option<Fill> {
+    match paint {
+        Paint::Bitmap(bitmap) if bitmap.single_image => Some(Fill {
+            paint: bitmap_to_paint(surface, bitmap, resources, output, Some(bounds)),
+            opacity: unit_opacity(opacity),
+            rule: FillRule::NonZero,
+        }),
+        _ => fill_for_output(surface, paint, opacity, output, resources),
+    }
 }
 
 pub(crate) fn fill_for_output<R: PdfPaintResources>(
@@ -969,7 +991,7 @@ pub(crate) fn push_bitmap_transparency(
     let mut stream = surface.stream_builder();
     {
         let mut mask = stream.surface();
-        let paint = tiled_image_paint(&mut mask, None, None, matrix, Some(image));
+        let paint = tiled_image_paint(&mut mask, None, None, matrix, Some(image), None);
         mask.set_fill(Some(Fill { paint, opacity: NormalizedF32::ONE, rule: FillRule::NonZero }));
         mask.draw_path(&path);
         mask.finish();

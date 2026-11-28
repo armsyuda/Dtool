@@ -12,6 +12,7 @@ use dtool_tools::move_tool::{GestureKind, Handle, MoveTool, MoveToolAction, Poin
 use dtool_tools::shape_tool::{self, ShapeParamKind};
 use egui::{Pos2, Rect, Response, Stroke, Ui};
 use serde_json::json;
+use std::cell::OnceCell;
 use crate::input::primary_button_positions;
 
 pub(crate) const SELECTION_BLUE: egui::Color32 = egui::Color32::from_rgb(90, 166, 251);
@@ -21,6 +22,8 @@ mod artboard;
 mod blend;
 mod curve_energy;
 mod gradient_edit;
+mod inpaint;
+mod patch;
 pub(crate) use gradient_edit::Gradient as GradientPreview;
 mod measure;
 mod pixel_brush;
@@ -28,6 +31,7 @@ pub(crate) use pixel_brush::Draft as PixelBrushDraft;
 pub mod pixel_marquee;
 mod point_transform;
 mod shape_builder;
+mod shape_grid;
 mod snap_feedback;
 mod stroke_width;
 mod vector_crop;
@@ -36,6 +40,31 @@ pub(crate) mod warp_mesh;
 pub const HANDLE_PX: f32 = 6.0;
 pub const ROTATE_PX: f32 = 24.0;
 pub const MIN_DRAG_DOC: f32 = 0.5;
+
+/// Selection and stationary object geometry shared by one pointer update.
+pub(crate) struct DragSnapTargets<'a> {
+    session: &'a Session,
+    scene: &'a Scene,
+    prefs: dtool_core::snap_prefs::SnapPrefs,
+    exclude: Vec<ObjectId>,
+    boxes: OnceCell<Vec<[f32; 4]>>,
+}
+
+impl<'a> DragSnapTargets<'a> {
+    pub(crate) fn new(session: &'a Session, scene: &'a Scene) -> Self {
+        Self {
+            session,
+            scene,
+            prefs: session.snap_prefs.query(),
+            exclude: dtool_core::command::transform_target_ids(&session.document, &session.selection.ids),
+            boxes: OnceCell::new(),
+        }
+    }
+
+    fn boxes(&self) -> &[[f32; 4]] {
+        self.boxes.get_or_init(|| crate::canvas_tools::object_boxes(self.session, self.scene, &self.exclude))
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NavMode {
@@ -62,11 +91,18 @@ pub enum ToolKind {
     Pen { polyline: bool },
     Pencil,
     VectorBrush,
+    Blob { erase: bool },
+    VectorFlood,
     PixelBrush(dtool_core::brush::BrushOp),
     PixelFlood { erase: bool },
     RedEye,
+    Blemish,
+    Inpaint,
+    Patch,
     PixelMarquee(pixel_marquee::Kind),
     StrokeWidth,
+    Contour,
+    Corner,
     Knife,
     ShapeBuilder,
     PointTransform,
@@ -198,8 +234,12 @@ pub struct CanvasInput {
     blend: blend::Blend,
     gradient_edit: gradient_edit::GradientEditor,
     pixel_brush: pixel_brush::Gesture,
+    inpaint: inpaint::Gesture,
+    patch: patch::Gesture,
     pixel_marquee: pixel_marquee::Gesture,
     stroke_width: stroke_width::WidthTool,
+    contour: crate::contour_tool::ContourTool,
+    pub(crate) corner: crate::corner_tool::CornerTool,
     vector_crop: vector_crop::Crop,
     pub(crate) warp_mesh: warp_mesh::WarpMeshEditor,
     pub hover: Option<[f32; 2]>,
@@ -212,10 +252,19 @@ pub struct CanvasInput {
     pub owner: Option<GestureOwner>,
     pub last_point: Option<[f32; 2]>,
     shape_press: Option<Pos2>,
+    shape_grid: shape_grid::ShapeGrid,
     artboard_drag: Option<artboard::ArtboardDrag>,
     art_selection: Option<ObjectId>,
     art_draft: Option<ArtTextDraft>,
     origin_drag: Option<OriginDrag>,
+    symmetry_drag: Option<SymmetryDrag>,
+}
+
+#[derive(Debug, Clone)]
+struct SymmetryDrag {
+    start: [f32; 2],
+    offset: [f32; 2],
+    point: [f32; 2],
 }
 
 #[derive(Debug, Clone)]
@@ -256,6 +305,11 @@ fn kind_is_pen(active_tool: &str) -> bool {
     matches!(tool_kind(active_tool), ToolKind::Pen { .. })
 }
 
+fn blob_width(session: &Session) -> f32 {
+    let points = session.tool_options.number(&session.active_tool, dtool_core::context_toolbar::BLOB_WIDTH).unwrap_or(12.0);
+    (points as f32 * dtool_core::units::units_per_point(session.document.units, session.document.dpi)).max(0.5)
+}
+
 pub fn tool_kind(active_tool: &str) -> ToolKind {
     let tool = canonical(active_tool);
     if dtool_tools::frame_text::FrameTextTool::is_active(&tool) || dtool_tools::frame_text::FrameTextTool::is_active(active_tool) {
@@ -272,8 +326,11 @@ pub fn tool_kind(active_tool: &str) -> ToolKind {
         "tool.text.artistic" | "tool.text" | "tool.art_text" => ToolKind::ArtText,
         "tool.table" => ToolKind::Table,
         dtool_core::commands::red_eye::TOOL => ToolKind::RedEye,
+        dtool_core::commands::blemish::TOOL => ToolKind::Blemish,
+        dtool_core::commands::inpaint::TOOL => ToolKind::Inpaint,
+        dtool_core::commands::patch::TOOL => ToolKind::Patch,
         "tool.crop" => ToolKind::Crop,
-        "tool.flood_fill" => ToolKind::PixelFlood { erase: false },
+        dtool_core::commands::fill::TOOL | "tool.flood_fill" => ToolKind::PixelFlood { erase: false },
         "tool.eraser.flood" => ToolKind::PixelFlood { erase: true },
         "tool.vector_crop" => ToolKind::VectorCrop,
         "tool.slice" => ToolKind::Slice,
@@ -286,8 +343,13 @@ pub fn tool_kind(active_tool: &str) -> ToolKind {
         "tool.measure" => ToolKind::Measure,
         "tool.area" => ToolKind::Area,
         "tool.blend" => ToolKind::Blend,
-        "tool.paint.vector_brush" => ToolKind::VectorBrush,
+        "tool.paint.vector_brush" | "tool.symmetry" => ToolKind::VectorBrush,
+        dtool_core::context_toolbar::BLOB_BRUSH => ToolKind::Blob { erase: false },
+        dtool_core::context_toolbar::BLOB_ERASE => ToolKind::Blob { erase: true },
+        dtool_core::context_toolbar::VECTOR_FLOOD => ToolKind::VectorFlood,
         "tool.stroke_width" => ToolKind::StrokeWidth,
+        dtool_core::commands::contour::TOOL => ToolKind::Contour,
+        dtool_core::commands::curve_nodes::corner::TOOL => ToolKind::Corner,
         "tool.qr" | "tool.artboard" => ToolKind::Shape(ShapeKind::Rectangle),
         "tool.shape.line" => ToolKind::Line,
         "tool.picture_frame" | "tool.picture_frame.rect" => ToolKind::PictureFrame(FrameShape::Rect),
@@ -362,10 +424,15 @@ pub(crate) fn paint_canvas_cursor(
                 lines.extend([[p(10.0, 13.0), p(16.0, 13.0)], [p(13.0, 10.0), p(13.0, 16.0)]]);
             }
         }
-        CursorIcon::Crosshair => lines.extend([
-            [p(-6.5, 0.0), p(-3.0, 0.0)], [p(3.0, 0.0), p(6.5, 0.0)],
-            [p(0.0, -6.5), p(0.0, -3.0)], [p(0.0, 3.0), p(0.0, 6.5)],
-        ]),
+        CursorIcon::Crosshair => {
+            lines.extend([
+                [p(-6.5, 0.0), p(-3.0, 0.0)], [p(3.0, 0.0), p(6.5, 0.0)],
+                [p(0.0, -6.5), p(0.0, -3.0)], [p(0.0, 3.0), p(0.0, 6.5)],
+            ]);
+            if kind == Some(ToolKind::ArtText) {
+                painter.circle(point, 1.5, white, Stroke::new(1.0, ink));
+            }
+        }
         CursorIcon::PointingHand => {
             let palm = vec![p(-5.0, 6.0), p(-2.0, 4.0), p(4.0, 5.0), p(7.0, 8.0),
                 p(6.0, 13.0), p(3.0, 16.0), p(-1.0, 16.0), p(-5.0, 10.0)];
@@ -584,6 +651,13 @@ pub fn shape_command(kind: ShapeKind, start: [f32; 2], end: [f32; 2], mods: Mods
     Some(command)
 }
 
+const SYMMETRY_HANDLE_HIT: f32 = 8.0;
+
+fn symmetry_centre(settings: &serde_json::Value) -> Option<[f32; 2]> {
+    let active = settings["mirror"].as_bool() == Some(true) || settings["count"].as_u64().unwrap_or(1) > 1;
+    active.then(|| serde_json::from_value(settings["centre"].clone()).ok()).flatten()
+}
+
 fn configured_shape_command(
     session: &Session, kind: ShapeKind, start: [f32; 2], end: [f32; 2], mut mods: Mods,
 ) -> Option<Command> {
@@ -751,24 +825,31 @@ impl CanvasInput {
     }
 
     pub(crate) fn pixel_brush_draft(&self, session: &Session) -> Option<PixelBrushDraft> {
-        self.pixel_brush.draft(session)
+        self.pixel_brush.draft(session).or_else(|| self.patch.draft(session)).or_else(|| {
+            dtool_core::commands::inpaint::staged_document(session)
+                .map(|(revision, document)| PixelBrushDraft { revision, document, layer: None })
+        })
     }
 
     pub fn busy(&self) -> bool {
-        self.origin_drag.is_some() || self.artboard_drag.is_some() || self.shape_press.is_some() || self.drag.is_some() || self.move_tool.dragging
+        self.origin_drag.is_some() || self.symmetry_drag.is_some() || self.artboard_drag.is_some() || self.shape_press.is_some() || self.drag.is_some() || self.move_tool.dragging
             || self.nodes.grab.is_some() || self.nodes.marquee.is_some() || self.pencil.active()
             || self.knife.is_some() || self.shape_builder.active() || self.point_transform.active()
             || self.style_drag.is_some() || self.measure.active() || self.area.active() || self.vector_crop.active()
-            || self.blend.active() || self.gradient_edit.active() || self.warp_mesh.active() || self.stroke_width.active()
+            || self.blend.active() || self.gradient_edit.active() || self.warp_mesh.active() || self.stroke_width.active() || self.contour.active() || self.corner.active()
             || self.pixel_brush.active()
+            || self.inpaint.active()
+            || self.patch.active()
             || self.pixel_marquee.active()
     }
 
     pub fn cancel(&mut self) {
         self.move_tool.escape();
         self.origin_drag = None;
+        self.symmetry_drag = None;
         self.drag = None;
         self.shape_press = None;
+        self.shape_grid = Default::default();
         self.move_press = None;
         self.artboard_drag = None;
         self.art_selection = None;
@@ -794,7 +875,11 @@ impl CanvasInput {
         self.gradient_edit.cancel();
         self.warp_mesh.cancel();
         self.stroke_width.cancel();
+        self.contour.cancel();
+        self.corner.cancel();
         self.pixel_brush.cancel();
+        self.inpaint.cancel();
+        self.patch.cancel();
         self.pixel_marquee.cancel();
     }
 
@@ -804,6 +889,10 @@ impl CanvasInput {
         }
         let command = self.pen.finish_command(true);
         self.run(session, command)
+    }
+
+    pub(crate) fn picked_clone_source(&self, session: &Session) -> Option<serde_json::Value> {
+        self.pixel_brush.picked_source_params(session)
     }
 
     pub fn bind_context(&mut self, context: Option<u64>) {
@@ -934,14 +1023,14 @@ impl CanvasInput {
         }
     }
 
-    pub fn snap_drag(&mut self, session: &Session, scene: &Scene, point: [f32; 2], mods: Mods) -> [f32; 2] {
+    pub(crate) fn snap_drag(&mut self, targets: &DragSnapTargets<'_>, point: [f32; 2], mods: Mods) -> [f32; 2] {
         self.snap_mark = None;
         self.snap_axes = [None; 2];
         use crate::canvas_tools::{axis_snaps, box_guide_offset, gap_snap, guides_enabled};
         use dtool_core::snap_candidates::CandidateKind;
-        let prefs = session.snap_prefs.query();
+        let session = targets.session;
+        let prefs = &targets.prefs;
         let tolerance = prefs.screen_tolerance as f32 / session.view.zoom.max(1e-4);
-        let exclude = dtool_core::command::transform_target_ids(&session.document, &session.selection.ids);
         let (Some(press), Some(b)) = (self.press_at, self.start_box) else { return point };
         let delta = [point[0] - press[0], point[1] - press[1]];
         let snapped = match self.move_tool.gesture {
@@ -950,12 +1039,10 @@ impl CanvasInput {
                     if delta[0].abs() >= delta[1].abs() { [delta[0], 0.0] } else { [0.0, delta[1]] }
                 } else { delta };
                 let bounds = [b[0] + delta[0], b[1] + delta[1], b[2], b[3]];
-                let axes = axis_snaps(session, &crate::canvas_tools::box_points(b, delta), &exclude);
+                let axes = axis_snaps(session, &crate::canvas_tools::box_points(b, delta), &targets.exclude);
                 let gaps = prefs.enabled && prefs.object_snapping && prefs.snap_to_gaps_and_sizes;
-                let boxes = if guides_enabled(&prefs) || gaps {
-                    crate::canvas_tools::object_boxes(session, scene, &exclude)
-                } else { Vec::new() };
-                let guides = box_guide_offset(&boxes, bounds, prefs.include_bbox_midpoints, tolerance);
+                let boxes = if guides_enabled(prefs) || gaps { targets.boxes() } else { &[] };
+                let guides = box_guide_offset(boxes, bounds, prefs.include_bbox_midpoints, tolerance);
                 let correction = std::array::from_fn(|axis| {
                     if mods.shift && delta[axis] == 0.0 { return 0.0; }
                     let snap = axes[axis];
@@ -965,7 +1052,7 @@ impl CanvasInput {
                         (Some(g), _) => Some(g),
                         (None, s) => s.map(|s| s.delta),
                     };
-                    if gaps && let Some(gap) = gap_snap(&boxes, bounds, axis, tolerance)
+                    if gaps && let Some(gap) = gap_snap(boxes, bounds, axis, tolerance)
                         && edge.is_none_or(|d| gap.delta.abs() <= d.abs() || snap.is_some_and(|s| s.kind == CandidateKind::Pixel && d == s.delta))
                     {
                         return gap.delta;
@@ -985,7 +1072,7 @@ impl CanvasInput {
                 let local_grip = frame.to_local(grip);
                 let local = frame.to_local(current);
                 let projected = frame.to_world(std::array::from_fn(|i| if f[i] == 0.5 { local_grip[i] } else { local[i] }));
-                let mut axes = axis_snaps(session, &[projected], &exclude);
+                let mut axes = axis_snaps(session, &[projected], &targets.exclude);
                 let mut offset = axes.map(|snap| snap.map_or(0.0, |snap| snap.delta));
                 if prefs.enabled && prefs.object_snapping && prefs.snap_to_gaps_and_sizes
                     && frame.axes == [0.0; 2] && !mods.alt && !mods.shift
@@ -993,12 +1080,12 @@ impl CanvasInput {
                     && !(self.move_tool.proportional_text_corners && f.iter().all(|&edge| edge != 0.5))
                     && handle != Handle::FrameTextScale && !mods.ctrl
                 {
-                    let boxes = crate::canvas_tools::object_boxes(session, scene, &exclude);
+                    let boxes = targets.boxes();
                     for axis in 0..2 {
                         if f[axis] == 0.5 { continue; }
                         let fixed = frame.bounds[axis] + frame.bounds[axis + 2] * (1.0 - f[axis]);
                         let delta = projected[axis] - fixed;
-                        if let Some(other) = crate::canvas_tools::matched_size(&boxes, frame.bounds, axis, delta.abs(), tolerance) {
+                        if let Some(other) = crate::canvas_tools::matched_size(boxes, frame.bounds, axis, delta.abs(), tolerance) {
                             let size_offset = other[axis + 2].copysign(delta) - delta;
                             if axes[axis].is_none_or(|snap| size_offset.abs() < snap.delta.abs() || snap.kind == CandidateKind::Pixel) {
                                 axes[axis] = None;
@@ -1019,7 +1106,7 @@ impl CanvasInput {
                 let correction = [target[0] - projected[0], target[1] - projected[1]];
                 (offset != [0.0; 2] && correction != [0.0; 2]).then_some((correction, target))
             }
-            Some(GestureKind::Rotate) if !mods.shift && session.snap_prefs.query().enabled => {
+            Some(GestureKind::Rotate) if !mods.shift && prefs.enabled => {
                 let origin = self.move_tool.rotation_origin(mods.alt);
                 return match crate::canvas_tools::snap_rotation(origin, press, point) {
                     Some(p) => {
@@ -1040,10 +1127,10 @@ impl CanvasInput {
         }
     }
 
-    pub fn update_guides(&mut self, session: &Session, scene: &Scene, point: [f32; 2]) {
-        use crate::canvas_tools::{box_alignment_guides, gap_guides, guides_enabled, object_boxes, matched_size, size_guides, GUIDE_EPSILON};
+    pub(crate) fn update_guides(&mut self, targets: &DragSnapTargets<'_>, point: [f32; 2]) {
+        use crate::canvas_tools::{box_alignment_guides, gap_guides, guides_enabled, matched_size, size_guides, GUIDE_EPSILON};
         self.gap_guides.clear();
-        let prefs = session.snap_prefs.query();
+        let prefs = &targets.prefs;
         if !self.move_tool.dragging || !prefs.enabled || !prefs.dynamic_guides || !prefs.object_snapping {
             self.guide_lines.clear();
             return;
@@ -1056,10 +1143,9 @@ impl CanvasInput {
                     self.preview.as_ref().map_or([point[0] - press[0], point[1] - press[1]], |args| args.translate)
                 };
                 let rect = [b[0] + translate[0], b[1] + translate[1], b[2], b[3]];
-                let exclude = dtool_core::command::transform_target_ids(&session.document, &session.selection.ids);
-                let boxes = object_boxes(session, scene, &exclude);
-                self.gap_guides = gap_guides(&boxes, rect, prefs.snap_to_gaps_and_sizes);
-                if guides_enabled(&prefs) { box_alignment_guides(&boxes, rect, prefs.include_bbox_midpoints) } else { Vec::new() }
+                let boxes = targets.boxes();
+                self.gap_guides = gap_guides(boxes, rect, prefs.snap_to_gaps_and_sizes);
+                if guides_enabled(prefs) { box_alignment_guides(boxes, rect, prefs.include_bbox_midpoints) } else { Vec::new() }
             }
             (Some(GestureKind::Scale(_)), _, Some(b)) if prefs.snap_to_gaps_and_sizes
                 && !self.move_tool.transform_separately && self.move_tool.selection_frame.axes == [0.0; 2] =>
@@ -1069,11 +1155,10 @@ impl CanvasInput {
                     let min = dtool_core::geometry::apply_matrix(&matrix, [b[0], b[1]]);
                     let max = dtool_core::geometry::apply_matrix(&matrix, [b[0] + b[2], b[1] + b[3]]);
                     let rect = [min[0].min(max[0]), min[1].min(max[1]), (max[0] - min[0]).abs(), (max[1] - min[1]).abs()];
-                    let exclude = dtool_core::command::transform_target_ids(&session.document, &session.selection.ids);
-                    let boxes = object_boxes(session, scene, &exclude);
+                    let boxes = targets.boxes();
                     for axis in 0..2 {
                         if (args.scale[axis] - 1.0).abs() > GUIDE_EPSILON
-                            && let Some(other) = matched_size(&boxes, rect, axis, rect[axis + 2], GUIDE_EPSILON)
+                            && let Some(other) = matched_size(boxes, rect, axis, rect[axis + 2], GUIDE_EPSILON)
                         {
                             self.gap_guides.extend(size_guides(rect, other, axis));
                         }
@@ -1143,6 +1228,9 @@ impl CanvasInput {
         let mut command = art_text_command(start, end, scale);
         if new_art_text_is_vertical(session) {
             command.params["vertical"] = true.into();
+            if start == end {
+                command.params["at_insertion"] = true.into();
+            }
         }
         match session.run(&command) {
             Ok(reply) => {
@@ -1199,20 +1287,25 @@ impl CanvasInput {
 
     fn art_text_target(&mut self, scene: &Scene, session: &Session, point: [f32; 2]) -> Option<(ObjectId, dtool_core::StoryId, usize)> {
         crate::canvas::frame_text_input::path_text_at(scene, session, point).or_else(|| {
-            let mut id = self.hit(scene, session, point)?;
-            let doc = &session.document;
-            let mut object = doc.get_object(id)?;
-            let group_hit = object.is_group();
-            let tolerance = HIT_TOLERANCE_PX / session.view.zoom.max(1e-4);
-            for _ in 0..doc.objects.len() {
-                if !object.is_group() { break; }
-                id = hit_test_in_view(scene, session, point, tolerance, Some(id))?;
-                object = doc.get_object(id)?;
-            }
-            if group_hit && !dtool_core::scene::has_live_text_warp(doc, id) { return None; }
-            let dtool_core::object::ObjectKind::ArtText { story } = object.kind else { return None; };
-            Some((id, story, Self::art_caret_at(session, id, point)?))
+            let object = self.art_text_object_at(scene, session, point)?;
+            let story = object.story_id()?;
+            Some((object.id, story, Self::art_caret_at(session, object.id, point)?))
         })
+    }
+
+    fn art_text_object_at<'a>(&mut self, scene: &Scene, session: &'a Session, point: [f32; 2]) -> Option<&'a dtool_core::Object> {
+        let mut id = self.hit(scene, session, point)?;
+        let doc = &session.document;
+        let mut object = doc.get_object(id)?;
+        let group_hit = object.is_group();
+        let tolerance = HIT_TOLERANCE_PX / session.view.zoom.max(1e-4);
+        for _ in 0..doc.objects.len() {
+            if !object.is_group() { break; }
+            id = hit_test_in_view(scene, session, point, tolerance, Some(id))?;
+            object = doc.get_object(id)?;
+        }
+        if group_hit && !dtool_core::scene::has_live_text_warp(doc, id) { return None; }
+        matches!(object.kind, dtool_core::ObjectKind::ArtText { .. }).then_some(object)
     }
 
     fn art_caret_at(session: &Session, id: ObjectId, point: [f32; 2]) -> Option<usize> {
@@ -1420,6 +1513,7 @@ impl CanvasInput {
     }
 
     pub fn finish_drag(&mut self, session: &mut Session, end: [f32; 2], mods: Mods) -> bool {
+        let grid = std::mem::take(&mut self.shape_grid);
         let command = match self.drag.take() {
             Some(Drag::Shape { kind, start, .. }) => configured_shape_command(session, kind, start, end, mods).and_then(|mut command| {
                 if session.active_tool == "tool.qr" {
@@ -1435,7 +1529,7 @@ impl CanvasInput {
                         "source": "drag", "rect": [x, y, w, h], "page_index": page,
                     })));
                 }
-                let defaults = dtool_core::commands::defaults::current();
+                let defaults = dtool_core::commands::defaults::for_document(&session.document);
                 let mut stroke = defaults.stroke_for_document(&session.document);
                 if kind == ShapeKind::Spiral && (stroke.width <= 0.0 || matches!(stroke.paint, dtool_core::paint::Paint::None)) {
                     stroke = dtool_core::commands::curve_edit::default_stroke();
@@ -1448,7 +1542,7 @@ impl CanvasInput {
                 if dtool_core::context_toolbar::is_advanced_shape_tool(&session.active_tool) {
                     command.params["select"] = json!(true);
                 }
-                Some(command)
+                grid.command(command)
             }),
             Some(Drag::PictureFrame { shape, start, .. }) => picture_frame_command(shape, start, end, mods),
             Some(Drag::ArtText { start, .. }) => return self.create_art_text(session, start, end),
@@ -1541,11 +1635,24 @@ impl CanvasInput {
         }
         let view = session.view.clone();
         let kind = tool_kind(&session.active_tool);
+        let inpaint_was_pending = session.inpaint.pending();
+        dtool_core::commands::inpaint::poll(session);
+        if session.inpaint.pending() {
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
+        } else if inpaint_was_pending {
+            ui.ctx().request_repaint();
+        }
+        if kind != ToolKind::Inpaint { self.inpaint.cancel(); }
+        if kind != ToolKind::Patch { self.patch.cancel(); }
         if kind != ToolKind::Move { self.move_press = None; }
         if kind != ToolKind::Eyedropper {
             session.panel_colour_pick_previous = None;
         }
         if kind != ToolKind::Blend { self.blend.clear(); }
+        if kind != ToolKind::StrokeWidth && self.stroke_width.active() {
+            self.stroke_width.cancel();
+            crate::app_canvas::clear_geometry_preview(ui);
+        }
         if kind != ToolKind::VectorCrop { self.vector_crop.cancel(); }
         if !matches!(kind, ToolKind::PixelMarquee(_)) { self.pixel_marquee.cancel(); }
         if kind != ToolKind::Measure && self.measure.has_state() {
@@ -1633,8 +1740,15 @@ impl CanvasInput {
             ui.ctx().request_repaint();
             return;
         }
-        if escape && self.busy() {
+        if escape && kind == ToolKind::Inpaint && !egui::Popup::is_any_open(ui.ctx()) {
+            self.inpaint.cancel();
+            self.run(session, Some(Command::new(dtool_core::commands::inpaint::CANCEL)));
+            ui.ctx().request_repaint();
+            return;
+        }
+        if escape && self.busy() && !self.pixel_brush.adjusting() {
             self.cancel();
+            ui.ctx().request_repaint();
             return;
         }
         if escape && tool_kind(&session.active_tool) == ToolKind::Node && self.nodes.selected_count() != 0 {
@@ -1773,13 +1887,15 @@ impl CanvasInput {
                         self.drag = None;
                     }
                 }
+                let mut targets = None;
                 if (response.dragged() || primary && self.move_tool.gesture == Some(GestureKind::Move))
                     && self.move_tool.dragging
                 {
                     if let Some(p) = point {
-                        let p = self.snap_drag(session, scene, p, mods);
+                        let targets = targets.get_or_insert_with(|| DragSnapTargets::new(session, scene));
+                        let p = self.snap_drag(targets, p, mods);
                         self.drag_move(p, mods);
-                        self.update_guides(session, scene, p);
+                        self.update_guides(targets, p);
                     }
                 }
                 let transform_drag = self.move_tool.gesture.is_some_and(|kind| kind != GestureKind::Marquee);
@@ -1789,7 +1905,10 @@ impl CanvasInput {
                         transform_drag && !response.drag_stopped()
                             && (p[0] - start[0]).hypot(p[1] - start[1]) * view.zoom <= 3.0
                     });
-                    let p = click.unwrap_or_else(|| self.snap_drag(session, scene, p, mods));
+                    let p = click.unwrap_or_else(|| {
+                        let targets = targets.get_or_insert_with(|| DragSnapTargets::new(session, scene));
+                        self.snap_drag(targets, p, mods)
+                    });
                     self.release_move(scene, session, p, mods);
                     changed = true;
                 } else if response.clicked() && !param_gesture {
@@ -1845,6 +1964,7 @@ impl CanvasInput {
                         && !egui::Popup::is_any_open(ui.ctx())
                 }) {
                     self.shape_press = Some(start);
+                    self.shape_grid = Default::default();
                     response.request_focus();
                 }
                 let endpoint = up.or(pointer);
@@ -1880,6 +2000,10 @@ impl CanvasInput {
                 };
                 if let (Some(Drag::Shape { current, .. } | Drag::ShapeParam { current, .. } | Drag::PictureFrame { current, .. }), Some(p)) = (self.drag.as_mut(), point) {
                     *current = p;
+                }
+                if matches!(self.drag, Some(Drag::Shape { .. })) && keyboard
+                    && !matches!(session.active_tool.as_str(), "tool.qr" | "tool.artboard") {
+                    self.shape_grid.handle_keys(ui, view.zoom, down.is_some());
                 }
                 if matches!(self.drag, Some(Drag::Shape { .. } | Drag::ShapeParam { .. } | Drag::PictureFrame { .. })) {
                     if let (true, Some(p)) = (up.is_some(), point) {
@@ -1928,14 +2052,17 @@ impl CanvasInput {
                     if self.drag.is_none() && art_text_path_at(scene, session, to_doc(pointer)).is_some() {
                         ui.ctx().set_cursor_icon(egui::CursorIcon::None);
                         paint_art_text_path_cursor(ui, response.rect, pointer);
-                    } else if new_art_text_is_vertical(session) || session.text_edit.as_ref()
-                        .and_then(|edit| edit.object)
-                        .and_then(|id| session.document.get_object(id))
-                        .is_some_and(dtool_core::Object::is_vertical_art_text)
-                    {
-                        ui.ctx().set_cursor_icon(egui::CursorIcon::VerticalText);
                     } else {
-                        ui.ctx().set_cursor_icon(egui::CursorIcon::Text);
+                        // Hovering must not exit the current group-editing scope.
+                        let scope = self.scope;
+                        let target = self.art_text_object_at(scene, session, to_doc(pointer));
+                        self.scope = scope;
+                        let icon = match target {
+                            Some(object) if object.is_vertical_art_text() => egui::CursorIcon::VerticalText,
+                            Some(_) => egui::CursorIcon::Text,
+                            None => egui::CursorIcon::Crosshair,
+                        };
+                        ui.ctx().set_cursor_icon(icon);
                     }
                 }
                 let (down, up) = crate::input::primary_button_positions(ui);
@@ -1972,7 +2099,7 @@ impl CanvasInput {
                             changed = self.finish_drag(session, current, mods);
                         } else {
                             self.drag = None;
-                            changed = self.click_art_text(scene, session, current);
+                            changed = self.click_art_text(scene, session, start);
                         }
                     }
                 }
@@ -2193,22 +2320,71 @@ impl CanvasInput {
                     changed |= self.run(session, command);
                 }
             }
-            ToolKind::Pencil | ToolKind::VectorBrush => {
+            ToolKind::Pencil | ToolKind::VectorBrush | ToolKind::Blob { .. } => {
                 if response.hovered() {
                     ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
                 }
                 let px = 1.0 / view.zoom.max(1e-4);
                 let (down, up) = primary_button_positions(ui);
+                if kind == ToolKind::VectorBrush && !view.canvas_flags.preview_mode && !self.pencil.active() {
+                    let mut settings = dtool_core::commands::brush::vector_symmetry(session);
+                    if settings["lock"].as_bool() != Some(true)
+                        && let Some(centre) = symmetry_centre(&settings)
+                    {
+                        let at = screen(rect, &view, centre);
+                        if self.symmetry_drag.is_none()
+                            && let Some(start) = down.filter(|p| p.distance(at) <= SYMMETRY_HANDLE_HIT
+                                && response.enabled() && response.interact_rect.contains(*p)
+                                && ui.ctx().layer_id_at(*p) == Some(response.layer_id)
+                                && !egui::Popup::is_any_open(ui.ctx()))
+                        {
+                            let pointer = to_doc(start);
+                            self.symmetry_drag = Some(SymmetryDrag {
+                                start: centre,
+                                offset: [centre[0] - pointer[0], centre[1] - pointer[1]],
+                                point: centre,
+                            });
+                            self.claim(session);
+                            response.request_focus();
+                        }
+                        if let Some(drag) = self.symmetry_drag.as_mut() {
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                            if let Some(p) = up.or(pointer).map(to_doc) {
+                                drag.point = [p[0] + drag.offset[0], p[1] + drag.offset[1]];
+                            }
+                            if up.is_some() || !primary {
+                                if up.is_some() && (drag.point[0] - drag.start[0]).hypot(drag.point[1] - drag.start[1]) > 0.001 {
+                                    settings["centre"] = json!(drag.point);
+                                    self.run(session, Some(Command::with_params("symmetry.set", settings)));
+                                }
+                                self.symmetry_drag = None;
+                                self.owner = None;
+                            }
+                            ui.ctx().request_repaint();
+                            if paint_overlay {
+                                self.paint_preview(ui, rect, session, scene);
+                            }
+                            return;
+                        }
+                        if response.hovered() && pointer.is_some_and(|p| p.distance(at) <= SYMMETRY_HANDLE_HIT) {
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+                        }
+                    }
+                }
                 if let Some(at) = down.filter(|at| response.interact_rect.contains(*at)
                     && ui.ctx().layer_id_at(*at) == Some(response.layer_id)
                     && !egui::Popup::is_any_open(ui.ctx()))
                 {
                     let at = to_doc(at);
-                    let snapped = self.snap_free(session, at);
-                    if kind == ToolKind::VectorBrush {
-                        self.pencil.begin_brush(session, snapped);
+                    if matches!(kind, ToolKind::Blob { .. }) {
+                        self.pencil.press(at);
                     } else {
-                        self.pencil.begin(session, scene, at, snapped, near);
+                        let snapped = self.snap_free(session, at);
+                        if kind == ToolKind::VectorBrush {
+                            self.pencil.begin_brush(session, snapped);
+                        } else {
+                            self.pencil.begin(session, scene, at, snapped, near);
+                        }
                     }
                 }
                 if self.pencil.active() {
@@ -2227,11 +2403,33 @@ impl CanvasInput {
                     });
                     if let Some(at) = up {
                         self.pencil.drag(to_doc(at), 0.5 * px);
-                        let command = self.pencil.finish_command(1.5 * px, near);
+                        let command = if let ToolKind::Blob { erase } = kind {
+                            self.pencil.finish_blob(1.5 * px, blob_width(session), erase)
+                        } else {
+                            self.pencil.finish_command(1.5 * px, near)
+                        };
                         changed = self.run(session, command);
                     } else if !primary {
                         self.pencil.cancel();
                     }
+                }
+            }
+            ToolKind::VectorFlood => {
+                if response.hovered() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+                }
+                if response.clicked_by(egui::PointerButton::Primary)
+                    && !egui::Popup::is_any_open(ui.ctx())
+                    && let Some(pointer) = response.interact_pointer_pos()
+                {
+                    use dtool_core::context_toolbar::{VECTOR_FLOOD, VECTOR_FLOOD_FIT, VECTOR_FLOOD_INSERT, VECTOR_FLOOD_MODE, VECTOR_FLOOD_VISIBLE};
+                    let mode = session.tool_options.choice(VECTOR_FLOOD, VECTOR_FLOOD_MODE);
+                    let fit = session.tool_options.choice(VECTOR_FLOOD, VECTOR_FLOOD_FIT);
+                    let insert = session.tool_options.choice(VECTOR_FLOOD, VECTOR_FLOOD_INSERT);
+                    let visible = session.tool_options.flag(VECTOR_FLOOD, VECTOR_FLOOD_VISIBLE).unwrap_or(true);
+                    changed |= self.run(session, Some(Command::with_params("flood.vector", json!({
+                        "at": to_doc(pointer), "mode": mode, "fit": fit, "insert": insert, "visible_boundaries": visible, "select": true,
+                    }))));
                 }
             }
             ToolKind::Knife => {
@@ -2479,9 +2677,10 @@ impl CanvasInput {
                         }
                         ui.separator();
                         for (label, command) in [
+                            ("ctx.node.delete_keeping_shape", self.nodes.delete_keeping_shape_command(session)),
                             ("ctx.node.split_after", self.nodes.split_after_node_command(session)),
                             ("ctx.node.break", self.nodes.break_command(session)),
-                            ("ctx.node.join", crate::canvas_curves::join_command(session)),
+                            self.nodes.join_action(session),
                             ("ctx.node.close", self.nodes.close_command(session)),
                             ("ctx.node.smooth", self.nodes.smooth_command(session)),
                         ] {
@@ -2497,6 +2696,28 @@ impl CanvasInput {
                     self.nodes.sync(session);
                 }
             }
+            ToolKind::Corner => {
+                let (handled, command) = self.corner.input(ui, response, session);
+                if handled {
+                    changed = self.run(session, command);
+                } else if response.clicked() && let Some(pointer) = response.interact_pointer_pos() {
+                    let hit = self.hit(scene, session, to_doc(pointer)).filter(|id| {
+                        session.document.get_object(*id).and_then(dtool_core::commands::curve_nodes::corner::source).is_some()
+                    });
+                    changed = self.run(session, click_select_command(hit, &session.selection.ids, false));
+                }
+            }
+            ToolKind::Contour => {
+                let (handled, command) = self.contour.input(ui, response, session);
+                if handled {
+                    changed = self.run(session, command);
+                } else if response.clicked() && let Some(pointer) = response.interact_pointer_pos() {
+                    let hit = self.hit(scene, session, to_doc(pointer));
+                    let hit = hit.filter(|id| session.document.get_object(*id)
+                        .is_some_and(dtool_core::commands::contour::supports));
+                    changed = self.run(session, click_select_command(hit, &session.selection.ids, false));
+                }
+            }
             ToolKind::StrokeWidth => {
                 let command = self.stroke_width.input(ui, response, session, scene, to_doc, keyboard);
                 changed = self.run(session, command);
@@ -2504,6 +2725,36 @@ impl CanvasInput {
             ToolKind::PixelBrush(op) => {
                 let command = self.pixel_brush.input(ui, response, session, op, to_doc);
                 changed = self.run(session, command);
+            }
+            ToolKind::Inpaint => {
+                let command = self.inpaint.input(ui, response, session, to_doc);
+                changed = self.run(session, command);
+            }
+            ToolKind::Patch => {
+                let command = self.patch.input(ui, response, session, to_doc);
+                changed = self.run(session, command);
+            }
+            ToolKind::Blemish => {
+                use dtool_core::commands::{blemish, patch};
+                let available = patch::can_patch(session);
+                if let Some(position) = response.hover_pos() {
+                    if available && let Some(width) = blemish::document_width(session, blemish::width(session)) {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::None);
+                        let radius = (width * session.view.zoom * 0.5).max(1.0);
+                        let painter = ui.painter_at(response.rect);
+                        painter.circle_stroke(position, radius, Stroke::new(2.0, CURSOR_EDGE));
+                        painter.circle_stroke(position, radius, Stroke::new(1.0, CURSOR_FACE));
+                    } else {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::NotAllowed);
+                    }
+                }
+                if available && response.clicked_by(egui::PointerButton::Primary)
+                    && !egui::Popup::is_any_open(ui.ctx())
+                    && let Some(position) = response.interact_pointer_pos()
+                {
+                    let command = Command::with_params(blemish::APPLY, json!({"at": to_doc(position)}));
+                    changed = self.run(session, Some(command));
+                }
             }
             ToolKind::RedEye => {
                 let target = dtool_core::commands::red_eye::canvas_target(session);
@@ -2542,7 +2793,7 @@ impl CanvasInput {
                     && let Some(position) = response.interact_pointer_pos()
                 {
                     let command = dtool_core::commands::fill::canvas_command(session, erase, to_doc(position));
-                    changed = self.run(session, Some(command));
+                    changed = self.run(session, command);
                 }
             }
             ToolKind::PixelMarquee(kind) => {
@@ -2575,14 +2826,32 @@ impl CanvasInput {
     }
 
     pub fn paint_preview(&self, ui: &Ui, rect: Rect, session: &Session, scene: &Scene) {
+        if crate::app_canvas::appearance_preview_active(ui, session) { return; }
         if session.view.canvas_flags.preview_mode && !self.busy() && self.pen.nodes.is_empty() {
             return;
         }
         let painter = ui.painter_at(rect);
         let view = &session.view;
+        if tool_kind(&session.active_tool) == ToolKind::VectorBrush && !view.canvas_flags.preview_mode {
+            let settings = dtool_core::commands::brush::vector_symmetry(session);
+            let mirror = settings["mirror"].as_bool() == Some(true);
+            let count = settings["count"].as_u64().unwrap_or(1);
+            if let Some(centre) = symmetry_centre(&settings) {
+                let point = self.symmetry_drag.as_ref().map_or(centre, |drag| drag.point);
+                let centre = screen(rect, view, point);
+                let axis = Stroke::new(1.0, dtool_design::color("accent").gamma_multiply(0.6));
+                if mirror && count == 1 {
+                    painter.line_segment([egui::pos2(centre.x, rect.top()), egui::pos2(centre.x, rect.bottom())], axis);
+                }
+                painter.circle_stroke(centre, 5.0, axis);
+                painter.circle_filled(centre, 1.5, axis.color);
+            }
+        }
         let accent = if tool_kind(&session.active_tool) == ToolKind::Node { SELECTION_BLUE } else { dtool_design::color("accent") };
         let stroke = Stroke::new(dtool_design::stroke_width("md"), accent);
         self.pixel_brush.paint(ui, rect, session);
+        self.inpaint.paint(ui, rect, session);
+        if session.active_tool == dtool_core::commands::patch::TOOL { self.patch.paint(ui, rect, session); }
         self.pixel_marquee.paint(ui, rect, session);
         self.paint_artboard_drag(ui, rect, session, stroke);
         if !session.view.canvas_flags.preview_mode
@@ -2605,6 +2874,12 @@ impl CanvasInput {
         }
         if tool_kind(&session.active_tool) == ToolKind::Blend {
             self.blend.paint(ui, rect, session, stroke);
+        }
+        if tool_kind(&session.active_tool) == ToolKind::Corner {
+            self.corner.paint(ui, rect, session);
+        }
+        if tool_kind(&session.active_tool) == ToolKind::Contour {
+            self.contour.paint(ui, rect, session, stroke);
         }
         if tool_kind(&session.active_tool) == ToolKind::StrokeWidth {
             self.stroke_width.paint(ui, rect, session, stroke);
@@ -2667,13 +2942,19 @@ impl CanvasInput {
                 let mods = ui.input(|i| Mods { shift: i.modifiers.shift, ctrl: i.modifiers.command, alt: i.modifiers.alt });
                 if let Some(command) = configured_shape_command(session, kind, start, current, mods)
                     && let Ok(pos) = serde_json::from_value::<[f32; 2]>(command.params["pos"].clone())
-                    && let Ok(recipe) = serde_json::from_value::<dtool_core::shape::ShapeRecipe>(command.params)
+                    && let Ok(mut recipe) = serde_json::from_value::<dtool_core::shape::ShapeRecipe>(command.params)
                 {
-                    let object = dtool_core::Object { pos, size: recipe.size, shape: Some(recipe), ..Default::default() };
+                    let layout = self.shape_grid.layout(pos, recipe.size);
+                    self.shape_grid.paint_size(ui, &painter, rect);
+                    recipe.size = layout.size;
+                    let object = dtool_core::Object { size: layout.size, shape: Some(recipe), ..Default::default() };
                     let tolerance = 0.1 / f64::from((view.zoom * ui.ctx().pixels_per_point()).max(1e-4));
-                    for (points, closed) in dtool_core::outline::object_contours(&object, tolerance) {
-                        let points = points.into_iter().map(|p| screen(rect, view, [p[0] + pos[0], p[1] + pos[1]])).collect();
-                        painter.add(if closed { egui::Shape::closed_line(points, stroke) } else { egui::Shape::line(points, stroke) });
+                    let contours = dtool_core::outline::object_contours(&object, tolerance);
+                    for pos in layout.positions() {
+                        for (points, closed) in &contours {
+                            let points = points.iter().map(|p| screen(rect, view, [p[0] + pos[0], p[1] + pos[1]])).collect();
+                            painter.add(if *closed { egui::Shape::closed_line(points, stroke) } else { egui::Shape::line(points, stroke) });
+                        }
                     }
                 }
             }
@@ -2786,14 +3067,21 @@ impl CanvasInput {
             }
         };
         if let Some(contour) = self.pencil.preview() {
-            if let Some((style, opacity, _)) = self.pencil.brush()
+            if matches!(session.active_tool.as_str(), dtool_core::context_toolbar::BLOB_BRUSH | dtool_core::context_toolbar::BLOB_ERASE) {
+                let path = contour.points.iter().map(|node| screen(rect, view, crate::canvas_curves::p32(node.pos))).collect();
+                painter.add(egui::Shape::line(path, Stroke::new(blob_width(session) * view.zoom, accent.gamma_multiply(0.65))));
+            } else if let Some((style, opacity, _)) = self.pencil.brush()
                 && let Some(rgba) = dtool_core::scene::representative_colour(&style.paint)
             {
                 let width = style.width * view.zoom;
                 let alpha = (f32::from(rgba.a) * opacity).round() as u8;
                 let colour = egui::Color32::from_rgba_unmultiplied(rgba.r, rgba.g, rgba.b, alpha);
-                let path: Vec<_> = contour.points.iter().map(|node| screen(rect, view, crate::canvas_curves::p32(node.pos))).collect();
-                painter.add(egui::Shape::line(path, Stroke::new(width, colour)));
+                let points: Vec<_> = contour.points.iter().map(|node| node.pos).collect();
+                let spec = dtool_core::commands::brush::vector_symmetry(session);
+                for copy in dtool_core::commands::brush::symmetry_copies(&points, &spec) {
+                    let path = copy.into_iter().map(|pos| screen(rect, view, crate::canvas_curves::p32(pos))).collect();
+                    painter.add(egui::Shape::line(path, Stroke::new(width, colour)));
+                }
             } else {
                 curve(&contour);
             }

@@ -88,20 +88,20 @@ fn plan(session: &Session, name: &str, params: &Value) -> Result<Vec<(ObjectId, 
         match object.kind {
             ObjectKind::Curve(_) => {}
             ObjectKind::Shape => {
-                if object.locked {
+                if session.document.is_object_locked(object) {
                     return Err(CommandError::new("LOCKED"));
                 }
                 let path = object_outline(object).ok_or_else(|| CommandError::new("UNSUPPORTED_SHAPE"))?;
                 out.push((id, Conversion::Shape(Curve::from_kurbo(&path).with_source(id.0))));
             }
             ObjectKind::Compound(_) if name == CONVERT => {
-                if object.locked {
+                if session.document.is_object_locked(object) {
                     return Err(CommandError::new("LOCKED"));
                 }
                 out.push((id, Conversion::Compound));
             }
             ObjectKind::ArtText { .. } | ObjectKind::FrameText { .. } | ObjectKind::PathText(_) if name == CONVERT => {
-                if object.locked {
+                if session.document.is_object_locked(object) {
                     return Err(CommandError::new("LOCKED"));
                 }
                 let outline = crate::text_lines::text_outline_curve(&session.document, id)?;
@@ -137,6 +137,7 @@ fn convert(session: &mut Session, name: &str, params: &Value) -> CommandResult {
                     }
                     object.kind = ObjectKind::Curve(curve);
                     object.shape = None;
+                    object.contour = None;
                     object.qr_payload = None;
                     object.qr_content = None;
                 }

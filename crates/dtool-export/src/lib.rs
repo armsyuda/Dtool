@@ -445,22 +445,27 @@ fn selected_subtrees(doc: &Document, ids: &[dtool_core::ObjectId]) -> std::colle
 
 pub fn only_objects(doc: &Document, ids: &[dtool_core::ObjectId]) -> Document {
     let mut keep = selected_subtrees(doc, ids);
-    let mut ancestors = Vec::new();
-    for id in keep.iter() {
+    let mut ancestors = std::collections::HashSet::new();
+    for id in &keep {
         let mut current = doc.get_object(*id).and_then(|object| object.parent_id);
-        let mut steps = 0;
         while let Some(parent) = current {
-            if steps > doc.objects.len() {
+            if !ancestors.insert(parent) {
                 break;
             }
-            ancestors.push(parent);
             current = doc.get_object(parent).and_then(|object| object.parent_id);
-            steps += 1;
         }
     }
-    keep.extend(ancestors);
+    let masks: Vec<_> = doc.objects.iter().filter(|object| {
+        object.clip_role == dtool_core::object::ClipRole::Mask
+            && object.parent_id.is_some_and(|parent| ancestors.contains(&parent))
+    }).map(|object| object.id).collect();
+    keep.extend(selected_subtrees(doc, &masks));
+
     let mut out = doc.clone();
-    out.objects.retain(|object| keep.contains(&object.id));
+    out.render_suppressed_objects.extend(ancestors.iter().filter_map(|id| {
+        doc.get_object(*id).filter(|object| !keep.contains(id) && !object.is_group() && !dtool_core::artboard::is_artboard(object)).map(|object| object.id)
+    }));
+    out.objects.retain(|object| keep.contains(&object.id) || ancestors.contains(&object.id));
     out.pixel_selection = None;
     out
 }

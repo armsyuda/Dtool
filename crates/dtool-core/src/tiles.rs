@@ -82,7 +82,7 @@ impl StoredTile {
     }
 
     fn from_tile(tile: &Tile) -> Self {
-        Self::from_arc(tile.data.clone())
+        Self::from_arc(tile.shared_bytes())
     }
 }
 
@@ -644,7 +644,7 @@ mod k09_contracts {
     use crate::selection::PixelSelection;
 
     fn tile_bytes(session: &Session, id: ObjectId) -> Vec<u8> {
-        session.document.pixel_layers.get(id).and_then(|layer| layer.tile(0)).map(|tile| tile.data.to_vec()).unwrap_or_default()
+        session.document.pixel_layers.get(id).and_then(|layer| layer.tile(0)).map(|tile| tile.shared_bytes().to_vec()).unwrap_or_default()
     }
 
     fn spill_paths() -> Vec<PathBuf> {

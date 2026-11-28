@@ -61,7 +61,7 @@ impl Default for BlendOptionsDialog {
 pub fn blend_set_command(id: u64, mode: &str) -> Command { Command::with_params("layer.blend.set", json!({"id": id, "mode": mode})) }
 pub(crate) fn can_edit_selection(session: &Session) -> bool {
     session.has_document && !session.selection.ids.is_empty() && session.selection.ids.iter()
-        .all(|id| session.document.get_object(*id).is_some_and(|object| !object.locked))
+        .all(|id| session.document.get_object(*id).is_some_and(|object| !session.document.is_object_locked(object)))
 }
 
 impl BlendOptionsDialog {
@@ -144,7 +144,7 @@ impl BlendOptionsDialog {
         let mut changes = Vec::new();
         for &id in &self.selected {
             let object = session.document.get_object(id).ok_or("error.not_found")?;
-            if object.locked { return Err("error.locked"); }
+            if session.document.is_object_locked(object) { return Err("error.locked"); }
             let mode = mode.unwrap_or(object.blend_mode);
             let ranges = self.target_ranges(&object.blend_ranges);
             if object.blend_mode != mode || object.blend_ranges != ranges {

@@ -132,6 +132,42 @@ fn editor_tip(session: &Session, tool: &str) -> Result<BrushTip, CommandError> {
     })
 }
 
+/// Temporary adjustments to the current tool. The saved preset stays intact.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum TipAdjustment {
+    SizeHardness { size_px: f32, hardness: f32 },
+    ShapeSpacing { roundness: f32, spacing: f32 },
+    Rotation(f32),
+}
+
+pub fn adjust_tip(session: &mut Session, adjustment: TipAdjustment) {
+    use crate::context_toolbar::{CALLIGRAPHY_ANGLE, CALLIGRAPHY_ROUNDNESS, CALLIGRAPHY_TOOL};
+    let tool = session.active_tool.clone();
+    let Ok(mut tip) = editor_tip(session, &tool) else { return; };
+    match adjustment {
+        TipAdjustment::SizeHardness { size_px, hardness } => {
+            tip.size_px = size_px;
+            tip.hardness = hardness;
+            session.tool_options.set_number(&tool, "brush.width", size_px.into());
+            session.tool_options.set_number(&tool, "brush.hardness", f64::from(hardness) * 100.0);
+        }
+        TipAdjustment::ShapeSpacing { roundness, spacing } => {
+            tip.roundness = roundness;
+            tip.spacing = spacing;
+            if tool == CALLIGRAPHY_TOOL {
+                session.tool_options.set_number(&tool, CALLIGRAPHY_ROUNDNESS, f64::from(roundness) * 100.0);
+            }
+        }
+        TipAdjustment::Rotation(rotation) => {
+            tip.rotation = rotation;
+            if tool == CALLIGRAPHY_TOOL {
+                session.tool_options.set_number(&tool, CALLIGRAPHY_ANGLE, rotation.into());
+            }
+        }
+    }
+    session.tool_options.set_raster_tip(&tool, tip);
+}
+
 fn apply_tip(session: &mut Session, tool: &str, tip: BrushTip) {
     for (name, value) in [
         ("brush.width", tip.size_px),
@@ -235,7 +271,16 @@ fn execute(session: &mut Session, verb: &str, params: &Value) -> CommandResult {
             }
             let mut tip: BrushTip = serde_json::from_value(params["tip"].clone()).map_err(|_| CommandError::invalid_params())?;
             if !valid_tip(&tip) { return Err(CommandError::invalid_params()); }
-            if let Some(id) = id {
+            if params.get("save_as").is_some() {
+                let name = label(params, "save_as")?;
+                update(|library| {
+                    category_exists(library, &tip.category)?;
+                    tip.id = fresh_id(library)?;
+                    tip.name = name.to_owned();
+                    library.tips.push(tip.clone());
+                    Ok(Value::Null)
+                })?;
+            } else if let Some(id) = id {
                 if builtin(id) { return Err(CommandError::invalid_params()); }
                 update(|library| {
                     let saved = library.tips.iter_mut().find(|saved| saved.id == id).ok_or_else(CommandError::not_found)?;

@@ -301,9 +301,9 @@ pub(crate) fn tip_label(tip: &BrushTip) -> &str {
     }
 }
 
-const ROW_HEIGHT: f32 = 46.0;
+pub(crate) const ROW_HEIGHT: f32 = 46.0;
 
-fn row(ui: &mut Ui, tip: &BrushTip, texture: &egui::TextureHandle, width: f32, selected: bool) -> egui::Response {
+pub(crate) fn row(ui: &mut Ui, tip: &BrushTip, texture: &egui::TextureHandle, width: f32, selected: bool) -> egui::Response {
     let label = tip_label(tip);
     dtool_design::preview_list_row(ui, egui::vec2(width.max(1.0), ROW_HEIGHT), selected, label,
         format!("{:.0} px · {label}", tip.size_px), |ui, preview| {

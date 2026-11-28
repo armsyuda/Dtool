@@ -54,7 +54,7 @@ fn fill_rule_objects<'a>(session: &'a Session, params: &Value) -> Option<Vec<&'a
     let ids = super::arrange::target_ids(session, &Command::with_params(PATH_FILL_RULE, params.clone())).ok()?;
     ids.into_iter().map(|id| {
         let object = session.document.get_object(id)?;
-        (matches!(object.kind, ObjectKind::Shape | ObjectKind::Curve(_)) && !object.locked
+        (matches!(object.kind, ObjectKind::Shape | ObjectKind::Curve(_)) && !session.document.is_object_locked(object)
             && super::symbols::object_link(&session.document, id).is_none()).then_some(object)
     }).collect()
 }
@@ -80,7 +80,7 @@ fn set_fill_rule(session: &mut Session, command: &Command) -> CommandResult {
 }
 
 fn is_curve(doc: &Document, id: ObjectId) -> bool {
-    doc.get_object(id).is_some_and(|object| matches!(object.kind, ObjectKind::Curve(_)))
+    doc.get_object(id).is_some_and(|object| object.curve().is_some() && !doc.is_object_locked(object))
 }
 
 fn parse_id(value: &Value) -> Option<u64> {
@@ -113,7 +113,7 @@ fn can_join(session: &Session, params: &Value) -> bool {
     ids.len() >= 2 && ids.iter().collect::<HashSet<_>>().len() == ids.len()
         && ids.iter().all(|id| document.get_object(*id).is_some_and(|object| {
             join_context_matches(document, object, first)
-                && !object.locked
+                && !document.is_object_locked(object)
                 && object.curve().is_some_and(|curve| !curve.contour.closed && !curve.contour.is_empty())
         }))
         && parse_tolerance(params).is_ok()
@@ -148,7 +148,7 @@ fn compound_targets<'a>(session: &'a Session, command: &Command) -> Result<Vec<&
             .ok_or_else(|| CommandError::new("NOT_A_CURVE"))?;
         has_multiple_paths |= curve.contours().filter(|path| !path.is_empty()).take(2).count() > 1;
         has_closed |= curve.contours().any(|path| path.closed && path.points.len() >= 2);
-        if object.locked { return Err(CommandError::new("LOCKED")); }
+        if doc.is_object_locked(object) { return Err(CommandError::new("LOCKED")); }
         if !object.clip_role.is_none() || carries_path_text(doc, object.id)
             || doc.objects.iter().any(|child| child.parent_id == Some(object.id))
             || doc.layer_masks.iter().any(|mask| mask.object == object.id)
@@ -325,7 +325,7 @@ fn parse_tolerance(params: &Value) -> Result<f64, CommandError> {
 
 fn curve_source(doc: &Document, id: ObjectId) -> Result<(&Object, &Curve), CommandError> {
     let object = doc.get_object(id).ok_or_else(CommandError::not_found)?;
-    if object.locked {
+    if doc.is_object_locked(object) {
         return Err(CommandError::new("LOCKED"));
     }
     let curve = object.curve().ok_or_else(|| CommandError::new("NOT_A_CURVE"))?;
@@ -349,13 +349,16 @@ fn topology_curve(doc: &Document, id: ObjectId, preserve: bool) -> Result<(Objec
     Ok((object.clone(), curve.clone()))
 }
 
-fn place_topology(mut object: Object, curve: Curve, preserve: bool) -> Result<Object, CommandError> {
-    if preserve {
-        reframe(&mut object, curve)?;
-    } else {
-        object.kind = ObjectKind::Curve(curve);
-        fit_bounds(&mut object);
+fn place_topology(mut object: Object, mut curve: Curve, preserve: bool) -> Result<Object, CommandError> {
+    if !preserve {
+        // The untransformed editing path supplies points in document coordinates.
+        let offset = object.pos.map(|value| -f64::from(value));
+        curve.contour = offset_contour(&curve.contour, offset);
+        for contour in &mut curve.holes {
+            *contour = offset_contour(contour, offset);
+        }
     }
+    reframe(&mut object, curve)?;
     Ok(object)
 }
 
@@ -384,13 +387,24 @@ fn set_contour(curve: &mut Curve, subpath: usize, contour: Contour) {
     }
 }
 
-fn locate(curve: &Curve, point: PointId) -> Option<(usize, usize)> {
-    for (subpath, contour) in curve.contours().enumerate() {
-        if let Some(index) = contour.points.iter().position(|p| p.id == point) {
-            return Some((subpath, index));
-        }
+fn point_subpath(params: &Value) -> Result<Option<usize>, CommandError> {
+    match params.get("subpath") {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => value.as_u64()
+            .and_then(|index| usize::try_from(index).ok())
+            .map(Some)
+            .ok_or_else(CommandError::invalid_params),
     }
-    None
+}
+
+fn locate(curve: &Curve, point: PointId, subpath: Option<usize>) -> Option<(usize, usize)> {
+    let find = |contour: &Contour| contour.points.iter().position(|p| p.id == point);
+    if let Some(subpath) = subpath {
+        return find(contour_at(curve, subpath)?).map(|index| (subpath, index));
+    }
+    curve.contours().enumerate().find_map(|(subpath, contour)| {
+        find(contour).map(|index| (subpath, index))
+    })
 }
 
 fn fit_bounds(object: &mut Object) {
@@ -433,6 +447,23 @@ fn commit(session: &mut Session, name: &str, before: Document, reply: Value) -> 
     Ok(reply)
 }
 
+fn reposition_mask(
+    mask: &crate::raster_source::LayerMask,
+    source: &Object,
+    target: &Object,
+) -> crate::raster_source::LayerMask {
+    let [x, y, width, height] = mask.local_rect(source).map(f64::from);
+    // Reframing a curve translates its local axes without changing their directions.
+    let relative = curve_frame(target).inverse() * curve_frame(source);
+    let corner = relative * Point::new(x, y);
+    let [w, h] = target.size.map(|value| f64::from(value.abs()));
+    let frame = [(corner.x / w) as f32, (corner.y / h) as f32, (width / w) as f32, (height / h) as f32];
+    let mut mask = mask.clone();
+    mask.object = target.id;
+    mask.frame = (frame != [0.0, 0.0, 1.0, 1.0]).then_some(frame);
+    mask
+}
+
 fn path_break(session: &mut Session, command: &Command) -> CommandResult {
     if !session.has_document {
         return Err(CommandError::no_document());
@@ -443,7 +474,8 @@ fn path_break(session: &mut Session, command: &Command) -> CommandResult {
     let split_objects = params.get("split_objects").and_then(Value::as_bool).unwrap_or(true);
     let preserve = preserve_transform(params)?;
     let (object, mut curve) = topology_curve(&session.document, id, preserve)?;
-    let (subpath, index) = locate(&curve, PointId(point)).ok_or_else(CommandError::not_found)?;
+    let subpath = point_subpath(params)?;
+    let (subpath, index) = locate(&curve, PointId(point), subpath).ok_or_else(CommandError::not_found)?;
     let contour = contour_at(&curve, subpath).cloned().ok_or_else(CommandError::not_found)?;
     let count = contour.points.len();
     let duplicate_id = PointId(max_point_id(&curve) + 1);
@@ -491,8 +523,30 @@ fn path_break(session: &mut Session, command: &Command) -> CommandResult {
     }
     let result = place_topology(object, curve, preserve)?;
     let before = session.document.clone();
-    *session.document.find_object_mut(id.0).ok_or_else(CommandError::not_found)? = result;
-    let new_object = new_piece.map(|piece| session.document.create_object(piece).0);
+    let document = &mut session.document;
+    let index = document.objects.iter().position(|object| object.id == id)
+        .ok_or_else(CommandError::not_found)?;
+    let source_mask = document.layer_masks.iter().position(|mask| mask.object == id);
+    let tail_mask = source_mask.zip(new_piece.as_ref()).map(|(mask_index, piece)| {
+        reposition_mask(&document.layer_masks[mask_index], &document.objects[index], piece)
+    });
+    if let Some(mask_index) = source_mask {
+        document.layer_masks[mask_index] =
+            reposition_mask(&document.layer_masks[mask_index], &document.objects[index], &result);
+    }
+    document.objects[index] = result;
+    let new_object = new_piece.map(|piece| {
+        let new_id = document.create_object(piece);
+        document.objects[index + 1..].rotate_right(1);
+        if let Some(mut mask) = tail_mask {
+            mask.object = new_id;
+            document.layer_masks.push(mask);
+        }
+        if let Some(meta) = super::layer_meta::meta(document, id) {
+            document.layer_meta.push(super::layer_meta::LayerMeta { object: new_id, ..meta.clone() });
+        }
+        new_id.0
+    });
     if let Some(plan) = &plan {
         apply_plan(&mut session.document, plan)?;
     }
@@ -671,14 +725,8 @@ fn path_point_add(session: &mut Session, command: &Command) -> CommandResult {
     }
     let preserve = preserve_transform(params)?;
     let (object, mut curve) = topology_curve(&session.document, id, preserve)?;
-    let scope = match params.get("subpath") {
-        None | Some(Value::Null) => None,
-        Some(value) => Some(value.as_u64().and_then(|index| usize::try_from(index).ok()).ok_or_else(CommandError::invalid_params)?),
-    };
-    let locate_point = |id| match scope {
-        Some(index) => contour_at(&curve, index)?.points.iter().position(|point| point.id == PointId(id)).map(|point| (index, point)),
-        None => locate(&curve, PointId(id)),
-    };
+    let scope = point_subpath(params)?;
+    let locate_point = |id| locate(&curve, PointId(id), scope);
     let (subpath, from_index) = locate_point(from).ok_or_else(CommandError::not_found)?;
     let (to_subpath, to_index) = locate_point(to).ok_or_else(CommandError::not_found)?;
     if subpath != to_subpath {
@@ -784,8 +832,11 @@ fn path_close(session: &mut Session, command: &Command) -> CommandResult {
     contour.closed = true;
     let order: Vec<u64> = contour.points.iter().map(|p| p.id.0).collect();
     set_contour(&mut curve, subpath, contour);
-    let result = place_topology(object, curve, preserve)?;
+    let result = place_topology(object.clone(), curve, preserve)?;
     let before = session.document.clone();
+    if let Some(mask) = session.document.layer_masks.iter_mut().find(|mask| mask.object == id) {
+        *mask = reposition_mask(mask, &object, &result);
+    }
     *session.document.find_object_mut(id.0).ok_or_else(CommandError::not_found)? = result;
     let reply = json!({
         "id": id.0,

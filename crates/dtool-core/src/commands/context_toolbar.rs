@@ -91,6 +91,9 @@ fn set_option(session: &mut Session, command: &Command, record: bool) -> Command
         return Ok(json!({ "tool": tool, "id": spec.id, "command": target, "result": result }));
     }
     let value = command.params.get("value").cloned().unwrap_or(Value::Null);
+    if let Some(result) = super::pixel_brush::adjustment::edit(session, tool, id, spec, &value, record) {
+        return result;
+    }
     if spec.id == "zoom.level" {
         let value = spec.normalize(&value).and_then(|value| value.as_f64()).ok_or_else(CommandError::invalid_params)?;
         let result = set_zoom_percentage(session, value, command.params.get("params"))?;
@@ -154,7 +157,8 @@ fn set_bulk(session: &mut Session, command: &Command, record: bool) -> CommandRe
             }
             continue;
         }
-        if let Some(spec) = find_option(tool, key).filter(|spec| is_stroke_width(spec.id) || matches!(spec.id, SHAPE_CORNER_RADIUS | gradient::TYPE)) {
+        if let Some(spec) = find_option(tool, key).filter(|spec| is_stroke_width(spec.id) || matches!(spec.id, SHAPE_CORNER_RADIUS | gradient::TYPE)
+            || super::pixel_brush::adjustment::is_setting(tool, spec.id)) {
             let command = Command::with_params(OPTION_SET, json!({ "tool": tool, "id": spec.id, "value": value }));
             match set_option(session, &command, record) {
                 Ok(result) => { applied.insert(spec.id.to_string(), result["value"].clone()); }
@@ -200,7 +204,58 @@ pub fn query_with_state(session: &Session, tool: &str) -> Value {
         ToolSettings::read(session, page_index(session))
     });
     if let Some(options) = query.get_mut("options").and_then(Value::as_array_mut) {
+        use crate::context_toolbar::{FILTER_BRUSH_KIND, FILTER_BRUSH_TOOL, VECTOR_FLOOD, VECTOR_FLOOD_BITMAP, VECTOR_FLOOD_BITMAP_FIT, VECTOR_FLOOD_FIT, VECTOR_FLOOD_GRADIENT_FIT, VECTOR_FLOOD_VISIBLE};
+        if tool == FILTER_BRUSH_TOOL && session.tool_options.choice(tool, FILTER_BRUSH_KIND).as_deref() != Some("smudge") {
+            options.retain(|option| option["id"] != "brush.strength");
+        }
+        if super::pixel_brush::placed_photo(session).is_none() {
+            options.retain(|option| option["id"] != super::pixel_brush::PREPARE_PHOTO);
+        }
+        let area_fill = (tool == super::fill::TOOL).then(|| {
+            let tool = super::fill::TOOL;
+            (
+                session.tool_options.flag(tool, "fill.context_fill") == Some(true),
+                session.tool_options.choice(tool, "fill.fill_type").as_deref() == Some("transparent"),
+                super::pixel_brush::settings_for(session, tool, crate::brush::BrushOp::Paint).colour,
+            )
+        });
+        let resolved_boundary = tool == VECTOR_FLOOD
+            && session.tool_options.flag(tool, VECTOR_FLOOD_VISIBLE) == Some(true);
+        let bitmap_selected = tool == VECTOR_FLOOD
+            && session.tool_options.choice(tool, VECTOR_FLOOD_BITMAP).is_some_and(|path| !path.is_empty());
+        let gradient_selected = tool == VECTOR_FLOOD && !bitmap_selected
+            && matches!(super::defaults::for_document(&session.document).fill, Paint::Gradient { .. });
+        if tool == VECTOR_FLOOD {
+            options.retain(|option| match option["id"].as_str() {
+                Some(VECTOR_FLOOD_BITMAP_FIT) => bitmap_selected,
+                Some(VECTOR_FLOOD_GRADIENT_FIT) => gradient_selected,
+                _ => true,
+            });
+        }
         for option in options.iter_mut() {
+            let mut available = true;
+            if tool == VECTOR_FLOOD {
+                available = match option["id"].as_str() {
+                    Some(VECTOR_FLOOD_FIT) => !resolved_boundary,
+                    _ => true,
+                };
+            }
+            if let Some((context, transparent, [r, g, b, a])) = area_fill {
+                let id = option["id"].as_str().unwrap_or_default();
+                available = !match id {
+                    "fill.context_fill" => session.quick_mask.active,
+                    "fill.fill_type" => context || session.quick_mask.active,
+                    "brush.foreground" | "fill.pigment" => context || transparent || session.quick_mask.active,
+                    _ => false,
+                };
+                if id == "brush.foreground" {
+                    option["value"] = json!(format!("#{r:02X}{g:02X}{b:02X}{a:02X}"));
+                    option["key"] = json!("context.fill.colour");
+                }
+            }
+            if let Some(value) = option["id"].as_str().and_then(|id| super::pixel_brush::adjustment::shown(session, tool, id)) {
+                option["value"] = value;
+            }
             if let Some(id) = option["id"].as_str().filter(|id| is_stroke_width(id)) {
                 let mut widths = selected_strokes(session).map(|object| object.stroke.width);
                 if let Some(width) = widths.next() {
@@ -208,10 +263,11 @@ pub fn query_with_state(session: &Session, tool: &str) -> Value {
                     option["state"] = json!(if widths.all(|other| other == width) { "enabled" } else { "mixed" });
                     continue;
                 }
-                if id == SHAPE_STROKE_WIDTH && tool != "tool.shape.line" && session.tool_options.explicit_number(tool, id).is_none() {
-                    let defaults = super::defaults::current();
+                if session.tool_options.explicit_number(tool, id).is_none() {
+                    let defaults = super::defaults::for_document(&session.document);
                     let stroke = defaults.stroke_for_document(&session.document);
-                    option["value"] = json!(if stroke.paint == Paint::None { 0.0 } else { stroke.width / units_per_point(session) });
+                    let width = if stroke.paint == Paint::None { 0.0 } else { stroke.width / units_per_point(session) };
+                    option["value"] = json!(if tool == "tool.shape.spiral" && width <= 0.0 { super::curve_edit::DEFAULT_STROKE_WIDTH } else { width });
                 }
             } else if option["id"] == SHAPE_CORNER_RADIUS {
                 let mut radii = selected_rounded_rectangles(session).filter_map(|object| {
@@ -258,7 +314,7 @@ pub fn query_with_state(session: &Session, tool: &str) -> Value {
             {
                 option["value"] = json!(values[index]);
             }
-            let enabled = match option.get("kind").and_then(Value::as_str) {
+            let enabled = available && match option.get("kind").and_then(Value::as_str) {
                 Some("action") => option
                     .get("command")
                     .and_then(Value::as_str)

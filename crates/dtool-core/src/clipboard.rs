@@ -900,22 +900,30 @@ pub fn new_document_from_clipboard(workspace: &mut crate::workspace::Workspace) 
     Ok(id)
 }
 
-/// New document sized to the copied roots' bounds; objects keep their layout with the bounds' top-left at the page origin.
+/// New document sized to the copied geometry and any strokes that extend beyond it.
 fn new_document_from_bundle(workspace: &mut crate::workspace::Workspace, bundle: &ClipboardBundle) -> Result<crate::workspace::ContextId, dtool_protocol::CommandError> {
-    let roots: Vec<&Object> = bundle.objects.iter().filter(|o| bundle.roots.contains(&o.id)).collect();
-    let min = [roots.iter().map(|o| o.pos[0]).fold(f32::INFINITY, f32::min), roots.iter().map(|o| o.pos[1]).fold(f32::INFINITY, f32::min)];
-    let max = [roots.iter().map(|o| o.pos[0] + o.size[0].abs()).fold(f32::NEG_INFINITY, f32::max), roots.iter().map(|o| o.pos[1] + o.size[1].abs()).fold(f32::NEG_INFINITY, f32::max)];
-    if !(min[0].is_finite() && min[1].is_finite() && max[0].is_finite() && max[1].is_finite()) {
-        return Err(dtool_protocol::CommandError::invalid_params());
-    }
-    let size = [(max[0] - min[0]).max(1.0), (max[1] - min[1]).max(1.0)];
+    let roots: std::collections::HashSet<_> = bundle.roots.iter().copied().collect();
+    let bounds = bundle.objects.iter().filter(|object| roots.contains(&object.id))
+        .map(|object| bounds_rect(crate::geometry::object_world_bounds(object)))
+        .filter(|rect| rect.is_finite())
+        .reduce(|acc, rect| acc.union(rect))
+        .ok_or_else(dtool_protocol::CommandError::invalid_params)?;
     let (units, dpi) = bundle.source_dimensions.unwrap_or_else(|| {
         let default = crate::document::Document::default();
         (default.units, default.dpi)
     });
+    let size = [bounds.width().max(1.0) as f32, bounds.height().max(1.0) as f32];
     let mut doc = crate::document::Document::new(size, units, dpi, 1);
-    let offset = [-min[0], -min[1]];
-    let mapping = paste_bundle_mapped(&mut doc, bundle, None, offset);
+    let placed_at = [-bounds.x0 as f32, -bounds.y0 as f32];
+    let mapping = paste_bundle_mapped(&mut doc, bundle, None, placed_at);
+    let bounds = include_clipboard_strokes(&doc, bounds.with_origin(kurbo::Point::ORIGIN));
+    let adjustment = [-bounds.x0 as f32, -bounds.y0 as f32];
+    for object in &mut doc.objects {
+        object.pos[0] += adjustment[0];
+        object.pos[1] += adjustment[1];
+    }
+    doc.pages[0].size = [bounds.width().max(1.0) as f32, bounds.height().max(1.0) as f32];
+    let offset = [placed_at[0] + adjustment[0], placed_at[1] + adjustment[1]];
     symbol_clipboard::paste(&mut doc, bundle, &mapping, None, offset, 1.0)?;
     let ids: Vec<_> = bundle.roots.iter().filter_map(|id| mapping.get(id).copied()).collect();
     let id = workspace.insert_context("", None, doc, 0);
@@ -923,6 +931,39 @@ fn new_document_from_bundle(workspace: &mut crate::workspace::Workspace, bundle:
     session.selection.set(ids, crate::selection::SelectOp::Replace);
     session.undo = crate::undo::UndoStack::default();
     Ok(id)
+}
+
+fn bounds_rect([x, y, w, h]: [f32; 4]) -> kurbo::Rect {
+    kurbo::Rect::from_origin_size((f64::from(x), f64::from(y)), (f64::from(w), f64::from(h)))
+}
+
+fn include_clipboard_strokes(doc: &crate::Document, bounds: kurbo::Rect) -> kurbo::Rect {
+    use crate::commands::appearance::{self, Kind};
+    use crate::paint::Paint;
+    use kurbo::Shape;
+
+    doc.objects.iter().filter_map(|object| {
+        if !appearance::supports_multiple(object)
+            || !appearance::visible_strokes(object).any(|stroke| stroke.width > 0.0 && stroke.paint != Paint::None)
+            || crate::clip_mask::is_mask(doc, object)
+            || !crate::scene::is_drawn(doc, object.id)
+        {
+            return None;
+        }
+        let mut ink = appearance::vector_paths(doc, object, &Paint::None, false)?
+            .into_iter()
+            .filter(|path| path.slot.kind == Kind::Stroke && !path.blend.erases())
+            .map(|path| path.path.bounding_box())
+            .filter(|rect| rect.is_finite())
+            .reduce(|acc, rect| acc.union(rect))?;
+        if let Some(board) = crate::artboard::owner(doc, object.id) {
+            ink = ink.intersect(bounds_rect(crate::geometry::object_world_bounds(board)));
+        }
+        if let Some(clip) = crate::clip_mask::clip_region(doc, object.id) {
+            ink = ink.intersect(bounds_rect(crate::clip_mask::bounds(&clip)?));
+        }
+        (ink.width() > 0.0 && ink.height() > 0.0).then_some(ink)
+    }).fold(bounds, |acc, rect| acc.union(rect))
 }
 
 pub fn run_workspace(workspace: &mut crate::workspace::Workspace, scope: crate::workspace::Scope, command: &dtool_protocol::Command) -> Option<(Option<crate::workspace::ContextId>, dtool_protocol::CommandResult)> {

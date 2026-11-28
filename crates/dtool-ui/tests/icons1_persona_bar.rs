@@ -18,6 +18,13 @@ fn frame(ctx: &Context, mut add: impl FnMut(&mut egui::Ui)) -> (Vec<TextureId>, 
     (ids, texts)
 }
 
+fn selected_ink(ctx: &Context) -> egui::Color32 {
+    match ctx.theme() {
+        egui::Theme::Dark => dtool_design::theme::dark().text,
+        egui::Theme::Light => dtool_design::theme::light().text,
+    }
+}
+
 fn collect(shape: &Shape, ids: &mut Vec<TextureId>, texts: &mut Vec<String>) {
     match shape {
         Shape::Mesh(mesh) => ids.push(mesh.texture_id),
@@ -34,7 +41,7 @@ fn collect(shape: &Shape, ids: &mut Vec<TextureId>, texts: &mut Vec<String>) {
 
 fn texture(icons: &mut IconCache, ctx: &Context, id: &str, selected: bool) -> TextureId {
     let px = (dtool_design::size("icon.size.md") * ctx.pixels_per_point()).ceil() as u32;
-    let colour = if selected { ctx.style_of(ctx.theme()).visuals.selection.stroke.color } else { dtool_design::icons::current_icon_colour() };
+    let colour = selected.then(|| selected_ink(ctx)).unwrap_or_else(dtool_design::icons::current_icon_colour);
     icons.texture(ctx, id, colour, px).expect("icon texture").id()
 }
 
@@ -78,7 +85,7 @@ fn restored_tools_draw_icons_for_move_and_knife() {
     let (ids, texts) = frame(&ctx, |ui| {
         show_restored_controls_icons(ui, &s, &tools, &[], &mut icons);
     });
-    let colour = ctx.style_of(ctx.theme()).visuals.selection.stroke.color;
+    let colour = selected_ink(&ctx);
     let px = (dtool_design::size("icon.size.md") * ctx.pixels_per_point()).ceil() as u32;
     let move_id = icons.tool_texture(&ctx, "tool.move", colour, px).unwrap().id();
     assert!(ids.contains(&move_id), "{ids:?}");

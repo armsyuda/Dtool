@@ -6,6 +6,8 @@ use crate::{Command, CommandError, CommandResult, ObjectId, Session};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+pub const TOOL: &str = "tool.fill";
+pub const AREA: &str = "fill.area";
 pub const FLOOD: &str = "fill.flood";
 pub const ERASE: &str = "fill.flood_erase";
 pub const FILL_RESTORE: &str = "fill.restore";
@@ -37,6 +39,8 @@ struct Args {
     contiguous: Option<bool>,
     antialias: Option<bool>,
     #[serde(default)]
+    pigment: bool,
+    #[serde(default)]
     source: Source,
     #[serde(default)]
     blend: Blend,
@@ -45,11 +49,27 @@ struct Args {
 #[derive(Deserialize)]
 struct At { x: u32, y: u32 }
 
-pub fn canvas_command(session: &Session, erase: bool, point: [f32; 2]) -> Command {
+pub fn canvas_command(session: &Session, erase: bool, point: [f32; 2]) -> Option<Command> {
     let tools = &session.tool_options;
     let tool = &session.active_tool;
     let colour = super::pixel_brush::settings(session, BrushOp::Paint).colour;
-    Command::with_params(if erase { ERASE } else { FLOOD }, json!({
+    if tool == TOOL {
+        if !session.quick_mask.active && let Some(selection) = &session.document.pixel_selection {
+            let surface = crate::selection::PixelSurface::for_page(&session.document, selection.page_id)?;
+            if surface.coverage_at(selection, point) == 0 {
+                return None;
+            }
+        }
+        if !session.quick_mask.active && tools.flag(TOOL, "fill.context_fill") == Some(true) {
+            return Some(Command::new(super::inpaint::FILL_SELECTION));
+        }
+        return Some(Command::with_params(AREA, json!({
+            "point": point,
+            "color": if tools.choice(TOOL, "fill.fill_type").as_deref() == Some("transparent") { [0; 4] } else { colour },
+            "pigment": tools.flag(TOOL, "fill.pigment") == Some(true),
+        })));
+    }
+    Some(Command::with_params(if erase { ERASE } else { FLOOD }, json!({
         "point": point,
         "color": colour,
         "tolerance": tools.number(tool, "fill.tolerance").unwrap_or(32.0),
@@ -57,11 +77,11 @@ pub fn canvas_command(session: &Session, erase: bool, point: [f32; 2]) -> Comman
         "antialias": tools.flag(tool, "fill.antialias").unwrap_or(true),
         "source": tools.choice(tool, "fill.source").as_deref().unwrap_or("current_layer"),
         "blend": tools.choice(tool, "fill.blend").as_deref().unwrap_or("replace"),
-    }))
+    })))
 }
 
 pub fn can_execute(session: &Session, cmd: &Command) -> Option<bool> {
-    matches!(cmd.name.as_str(), FLOOD | ERASE).then_some(session.has_document)
+    matches!(cmd.name.as_str(), AREA | FLOOD | ERASE).then_some(session.has_document)
 }
 
 pub fn run(session: &mut Session, cmd: &Command) -> Option<CommandResult> {
@@ -87,6 +107,7 @@ fn execute(session: &mut Session, cmd: &Command, record: bool) -> CommandResult 
         return Err(CommandError::invalid_params());
     }
     let erase = cmd.name == ERASE;
+    let area = cmd.name == AREA;
     if session.quick_mask.active && args.target.is_none() {
         return fill_quick_mask(session, cmd, &args, erase, record);
     }
@@ -124,10 +145,20 @@ fn execute(session: &mut Session, cmd: &Command, record: bool) -> CommandResult 
         object.pos[0] + (x as f32 + 0.5) * width / w as f32,
         object.pos[1] + (y as f32 + 0.5) * height / h as f32,
     ]);
+    let selection_surface = doc.pixel_selection.as_ref().and_then(|selection| {
+        crate::selection::PixelSurface::for_page(doc, selection.page_id)
+    });
+    if area && let Some(selection) = &doc.pixel_selection {
+        let point = args.point.unwrap_or_else(|| to_world(seed[0], seed[1]));
+        if selection_surface.is_none_or(|surface| surface.coverage_at(selection, point) == 0) {
+            return Ok(json!({"changes": []}));
+        }
+    }
     let mut rgba = pixels.to_rgba();
-    let mut mask = match args.source {
-        Source::CurrentLayer => matches(&rgba, [w, h], seed, &args),
-        Source::AllLayers => {
+    let mut mask = match (area, args.source) {
+        (true, _) => PixelSelection::all(w, h),
+        (false, Source::CurrentLayer) => matches(&rgba, [w, h], seed, &args),
+        (false, Source::AllLayers) => {
             let [x, y, world_w, world_h] = crate::geometry::object_world_bounds(&object);
             let [source_w, source_h] = [world_w, world_h].map(|v| (v * scale).ceil().max(1.0) as u32);
             ensure_size(source_w, source_h)?;
@@ -147,9 +178,6 @@ fn execute(session: &mut Session, cmd: &Command, record: bool) -> CommandResult 
             matches(&sampled, [w, h], seed, &args)
         }
     };
-    let selection_surface = doc.pixel_selection.as_ref().and_then(|selection| {
-        crate::selection::PixelSurface::for_page(doc, selection.page_id)
-    });
     for (index, (pixel, strength)) in rgba.chunks_exact_mut(4).zip(&mut mask.coverage).enumerate() {
         let mut coverage = *strength;
         if coverage != 0 && let Some(selection) = &doc.pixel_selection {
@@ -158,7 +186,9 @@ fn execute(session: &mut Session, cmd: &Command, record: bool) -> CommandResult 
             coverage = ((u16::from(coverage) * u16::from(alpha) + 127) / 255) as u8;
         }
         let old = [pixel[0], pixel[1], pixel[2], pixel[3]];
-        let next = composite(old, colour, coverage, !erase && matches!(args.blend, Blend::Normal));
+        let pigment = area && args.pigment && colour[3] != 0;
+        let over = pigment || !erase && matches!(args.blend, Blend::Normal);
+        let next = composite(old, colour, coverage, over, pigment);
         if old == next { *strength = 0; } else { pixel.copy_from_slice(&next); }
     }
     let Some(bounds) = mask.bounds() else { return Ok(json!({"changes": []})); };
@@ -192,13 +222,17 @@ fn ensure_size(w: u32, h: u32) -> Result<(), CommandError> {
     Ok(())
 }
 
-fn composite(old: [u8; 4], fill: [u8; 4], coverage: u8, over: bool) -> [u8; 4] {
+fn composite(old: [u8; 4], fill: [u8; 4], coverage: u8, over: bool, pigment: bool) -> [u8; 4] {
     if coverage == 0 { return old; }
     let t = f32::from(coverage) / 255.0;
     let added = f32::from(fill[3]) * t;
     let remaining = f32::from(old[3]) * (1.0 - if over { added / 255.0 } else { t });
     let alpha = (added + remaining).round() as u8;
     if alpha == 0 { return [0; 4]; }
+    if pigment && added > 0.0 && remaining > 0.0 {
+        let [r, g, b, _] = crate::brush::mix_colour(old, fill, added / (remaining + added), true);
+        return [r, g, b, alpha];
+    }
     let channel = |i: usize| ((f32::from(old[i]) * remaining + f32::from(fill[i]) * added) / (remaining + added)).round() as u8;
     [channel(0), channel(1), channel(2), alpha]
 }
@@ -223,11 +257,17 @@ fn fill_quick_mask(session: &mut Session, cmd: &Command, args: &Args, erase: boo
             mask
         }
     };
-    let rgba = match args.source {
-        Source::CurrentLayer => edited.coverage.iter().flat_map(|&v| [v, v, v, 255]).collect(),
-        Source::AllLayers => super::selection_magic_wand::merged_or_layer(session, None, surface)?,
+    let mask = match (cmd.name == AREA, args.source) {
+        (true, _) => PixelSelection::all(w, h),
+        (false, Source::CurrentLayer) => {
+            let rgba: Vec<_> = edited.coverage.iter().flat_map(|&v| [v, v, v, 255]).collect();
+            matches(&rgba, [w, h], seed, args)
+        }
+        (false, Source::AllLayers) => {
+            let rgba = super::selection_magic_wand::merged_or_layer(session, None, surface)?;
+            matches(&rgba, [w, h], seed, args)
+        }
     };
-    let mask = matches(&rgba, [w, h], seed, args);
     let ink = if erase { 0 } else { u16::from(session.quick_mask.ink) };
     for (old, weight) in edited.coverage.iter_mut().zip(mask.coverage) {
         let weight = u16::from(weight);

@@ -49,7 +49,6 @@ impl ArtTextTool {
     pub fn click(&self, pos: [f32; 2]) -> Command {
         let mut command = Command::new("text.art.add");
         command.params["pos"] = pos.to_vec().into();
-        command.params["size_pt"] = 12.0_f64.into();
         command
     }
 

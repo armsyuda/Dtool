@@ -42,3 +42,50 @@ fn chrome_runs_headless() {
     chrome.reset();
     assert_eq!(chrome.frames(), 0);
 }
+
+#[test]
+fn title_drag_moves_dialog_when_release_arrives_in_same_frame() {
+    fn title_position(output: &egui::FullOutput) -> egui::Pos2 {
+        fn find(shape: &egui::Shape) -> Option<egui::Pos2> {
+            match shape {
+                egui::Shape::Text(text) if text.galley.text() == "Drag title" => {
+                    Some(text.pos + text.galley.rect.center().to_vec2())
+                }
+                egui::Shape::Vec(shapes) => shapes.iter().find_map(find),
+                _ => None,
+            }
+        }
+        output.shapes.iter().find_map(|shape| find(&shape.shape)).expect("dialog title")
+    }
+
+    let ctx = egui::Context::default();
+    let mut chrome = DialogChrome::default();
+    let mut show = |events, mode| {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(630.0, 440.0))),
+            events,
+            ..Default::default()
+        };
+        ctx.run_ui(input, |ui| {
+            let (result, ()) = chrome.show(ui.ctx(), "test.movable", "Drag title", mode, ClosePolicy::CancelOnly, false, |ui| {
+                ui.set_width(180.0);
+                ui.label("Options");
+            });
+            assert_eq!(result, DialogResult::Open);
+        })
+    };
+    let mode = DialogMode::Modal;
+    show(Vec::new(), mode);
+    let start = title_position(&show(Vec::new(), mode));
+    let delta = egui::vec2(90.0, -45.0);
+    let end = start + delta;
+    let pointer = |pos, pressed| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    show(vec![pointer(start, true), egui::Event::PointerMoved(end), pointer(end, false)], mode);
+    let moved = title_position(&show(Vec::new(), mode));
+    assert!((moved - start - delta).length() <= 1.0, "{start:?} -> {moved:?}");
+}

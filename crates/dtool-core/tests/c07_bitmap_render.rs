@@ -21,7 +21,7 @@ fn pixel(rgba: &[u8], width: usize, x: usize, y: usize) -> [u8; 4] {
 #[test]
 fn c07_red_bitmap_fill_paints_red_centre() {
     let doc = doc_with_texture([255, 0, 0, 255].repeat(4), (2, 2));
-    let bitmap = BitmapPaint { resource_id: "tex".into(), matrix: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0], seed: None };
+    let bitmap = BitmapPaint { resource_id: "tex".into(), matrix: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0], seed: None, single_image: false };
     let rgba = rasterize_bitmap(&doc, &bitmap, &square(10.0), [0.0, 0.0], [0.0, 0.0, 10.0, 10.0], [10, 10]).expect("bitmap raster");
     assert_eq!(pixel(&rgba, 10, 5, 5), [255, 0, 0, 255]);
 }
@@ -30,7 +30,7 @@ fn c07_red_bitmap_fill_paints_red_centre() {
 fn c07_bitmap_fill_uses_matrix_and_tiles() {
     let texels = [[255, 0, 0, 255], [0, 255, 0, 255], [0, 0, 255, 255], [255, 255, 255, 255]].concat();
     let doc = doc_with_texture(texels, (2, 2));
-    let bitmap = BitmapPaint { resource_id: "tex".into(), matrix: [5.0, 0.0, 0.0, 5.0, 0.0, 0.0], seed: None };
+    let bitmap = BitmapPaint { resource_id: "tex".into(), matrix: [5.0, 0.0, 0.0, 5.0, 0.0, 0.0], seed: None, single_image: false };
     let rgba = rasterize_bitmap(&doc, &bitmap, &square(20.0), [0.0, 0.0], [0.0, 0.0, 20.0, 20.0], [20, 20]).expect("bitmap raster");
     assert_eq!(pixel(&rgba, 20, 2, 2), [255, 0, 0, 255]);
     assert_eq!(pixel(&rgba, 20, 7, 2), [0, 255, 0, 255]);
@@ -47,7 +47,7 @@ fn c07_bitmap_fill_reaches_scene_raster_and_missing_resource_is_none() {
             object: ObjectId(99),
             contours: square(10.0),
             origin: [0.0, 0.0],
-            paint: Paint::Bitmap(BitmapPaint { resource_id: "tex".into(), matrix: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0], seed: None }),
+            paint: Paint::Bitmap(BitmapPaint { resource_id: "tex".into(), matrix: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0], seed: None, single_image: false }),
             opacity: 1.0,
         }],
         ..Scene::default()
@@ -55,6 +55,6 @@ fn c07_bitmap_fill_reaches_scene_raster_and_missing_resource_is_none() {
     let pixels = rasterize_scene(&doc, &scene, [0.0, 0.0, 10.0, 10.0], 10, 10, None);
     assert_eq!(pixel(&pixels, 10, 5, 5)[..3], [255, 0, 0]);
     assert!(bitmap_source(&doc, "missing").is_none());
-    let bitmap = BitmapPaint { resource_id: "missing".into(), matrix: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0], seed: None };
+    let bitmap = BitmapPaint { resource_id: "missing".into(), matrix: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0], seed: None, single_image: false };
     assert!(rasterize_bitmap(&doc, &bitmap, &square(10.0), [0.0, 0.0], [0.0, 0.0, 10.0, 10.0], [10, 10]).is_none());
 }

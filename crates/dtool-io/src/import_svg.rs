@@ -90,7 +90,7 @@ impl PatternTiles {
             self.pixels += pixels;
             resource
         };
-        let paint = BitmapPaint { resource_id: resource.0.to_string(), matrix: matrix.as_coeffs(), seed: None };
+        let paint = BitmapPaint { resource_id: resource.0.to_string(), matrix: matrix.as_coeffs(), seed: None, single_image: false };
         Some((paint, exact_png.is_none()))
     }
 }
@@ -933,7 +933,7 @@ fn process_group(group: &usvg::Group, state: &mut SvgImport, parent: Option<Obje
             ..Object::default()
         });
         if let Some((coverage, vector_outline)) = mask {
-            state.doc.layer_masks.push(LayerMask { object: owner, coverage, vector_outline });
+            state.doc.layer_masks.push(LayerMask { object: owner, coverage, vector_outline, frame: None });
         }
         Some(owner)
     } else {
@@ -963,7 +963,7 @@ fn process_group(group: &usvg::Group, state: &mut SvgImport, parent: Option<Obje
                 layer.pos = pos;
                 layer.size = size;
                 let vector_outline = vector_mask_outline(group.mask(), transform, pos, size, clip.as_slice());
-                state.doc.layer_masks.push(LayerMask { object: owner, coverage, vector_outline });
+                state.doc.layer_masks.push(LayerMask { object: owner, coverage, vector_outline, frame: None });
                 state.mask_pixels_remaining = budget;
                 return;
             }

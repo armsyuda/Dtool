@@ -172,6 +172,37 @@ fn pair(range: [f32; 2]) -> bool {
 }
 
 impl LayerEffect {
+    pub(crate) fn transform_paint(&mut self, matrix: [f64; 6]) {
+        match &mut self.params {
+            EffectParams::Outline { fill, .. } | EffectParams::Overlay { fill } => {
+                crate::paint::transform_paint_matrix(fill, matrix);
+            }
+            _ => {}
+        }
+    }
+
+    pub(crate) fn scale_lengths(&mut self, factor: f32) {
+        match &mut self.params {
+            EffectParams::Blur { radius, radius_y, .. } => {
+                *radius *= factor;
+                *radius_y = radius_y.map(|length| length * factor);
+            }
+            EffectParams::Shadow { radius, radius_y, offset, .. } => {
+                *radius *= factor;
+                *radius_y = radius_y.map(|length| length * factor);
+                *offset *= factor;
+            }
+            EffectParams::Glow { radius, .. } => *radius *= factor,
+            EffectParams::Outline { width, .. } => *width *= factor,
+            EffectParams::Light { radius, soften, .. } => {
+                *radius *= factor;
+                *soften *= factor;
+            }
+            EffectParams::Overlay { .. } => {}
+        }
+        self.transform_paint(kurbo::Affine::scale(f64::from(factor)).as_coeffs());
+    }
+
     pub fn is_valid(&self) -> bool {
         if !unit(self.opacity) || self.blend == BlendMode::PassThrough {
             return false;

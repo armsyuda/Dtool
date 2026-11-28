@@ -23,8 +23,9 @@ pub const MASK_VIEW_SET: &str = "view.mask_view.set";
 
 type Ring = Vec<[f64; 2]>;
 
-fn closed_rings(object: &Object) -> Vec<Ring> {
-    doc_contours(object, &object_matrix(object))
+fn closed_rings(doc: &Document, object: &Object) -> Vec<Ring> {
+    let matrix = object_matrix(object);
+    crate::scene::warped_contours(doc, object, &matrix).unwrap_or_else(|| doc_contours(object, &matrix))
         .into_iter()
         .filter(|(points, closed)| *closed && points.len() >= 3)
         .map(|(points, _)| points.into_iter().map(|p| [f64::from(p[0]), f64::from(p[1])]).collect())
@@ -35,10 +36,10 @@ fn mask_rings(doc: &Document, object: &Object) -> Vec<Ring> {
     if object.is_group() && object.expanded_stroke_effects {
         return doc.objects().iter()
             .filter(|child| child.parent_id == Some(object.id) && child.stroke_mask_outline)
-            .flat_map(closed_rings)
+            .flat_map(|child| closed_rings(doc, child))
             .collect();
     }
-    closed_rings(object)
+    closed_rings(doc, object)
 }
 
 fn world_rings(doc: &Document, object: &Object) -> Vec<Ring> {
@@ -67,7 +68,7 @@ fn to_contours(rings: &[Ring]) -> Vec<Vec<[f32; 2]>> {
     rings.iter().map(|ring| ring.iter().map(|p| [p[0] as f32, p[1] as f32]).collect()).collect()
 }
 
-fn bounds(rings: &[Ring]) -> Option<[f32; 4]> {
+pub(crate) fn bounds(rings: &[Ring]) -> Option<[f32; 4]> {
     let mut b = [f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY];
     for p in rings.iter().flatten() {
         b = [b[0].min(p[0]), b[1].min(p[1]), b[2].max(p[0]), b[3].max(p[1])];
@@ -80,9 +81,12 @@ fn parent_of<'a>(doc: &'a Document, object: &Object) -> Option<&'a Object> {
 }
 
 pub fn is_mask(doc: &Document, object: &Object) -> bool {
-    let mut current = object;
+    is_mask_or_descendant(object, |id| doc.get_object(id))
+}
+
+fn is_mask_or_descendant<'a>(mut current: &'a Object, find: impl Fn(ObjectId) -> Option<&'a Object>) -> bool {
     for _ in 0..64 {
-        let Some(parent) = parent_of(doc, current) else { break; };
+        let Some(parent) = current.parent_id.and_then(&find) else { break; };
         if current.clip_role == ClipRole::Mask {
             return true;
         }
@@ -100,8 +104,15 @@ pub fn has_roles(doc: &Document) -> bool {
 }
 
 pub fn clip_region(doc: &Document, id: ObjectId) -> Option<Vec<Ring>> {
-    let masks = layer_clip_region(doc, id);
-    let Some(quad) = doc.get_object(id).and_then(crate::scene::oriented_vector_crop) else { return masks };
+    clip_region_with_crop(doc, id, layer_clip_region(doc, id))
+}
+
+fn clip_region_with_crop(doc: &Document, id: ObjectId, masks: Option<Vec<Ring>>) -> Option<Vec<Ring>> {
+    intersect_crop(masks, doc.get_object(id).and_then(crate::scene::oriented_vector_crop))
+}
+
+fn intersect_crop(masks: Option<Vec<Ring>>, quad: Option<crate::scene::Quad>) -> Option<Vec<Ring>> {
+    let Some(quad) = quad else { return masks };
     let crop = vec![quad_ring(quad)];
     Some(match masks {
         Some(rings) => intersect(&rings, &crop, FillRule::EvenOdd),
@@ -111,11 +122,22 @@ pub fn clip_region(doc: &Document, id: ObjectId) -> Option<Vec<Ring>> {
 
 /// Clipping and mask layers, excluding the object's own crop.
 pub fn layer_clip_region(doc: &Document, id: ObjectId) -> Option<Vec<Ring>> {
+    collect_layer_clip_region(doc, doc.get_object(id)?, |target| vector_masks(doc, target).into_iter(), |id| doc.get_object(id))
+}
+
+fn collect_layer_clip_region<'a, I>(
+    doc: &'a Document,
+    mut current: &'a Object,
+    masks: impl Fn(ObjectId) -> I,
+    find: impl Fn(ObjectId) -> Option<&'a Object>,
+) -> Option<Vec<Ring>>
+where
+    I: Iterator<Item = &'a Object>,
+{
     let mut shapes: Vec<Vec<Ring>> = Vec::new();
-    let mut current = doc.get_object(id)?;
     for _ in 0..64 {
-        shapes.extend(vector_masks(doc, current.id).into_iter().map(|mask| world_rings(doc, mask)));
-        let Some(parent) = parent_of(doc, current) else { break };
+        shapes.extend(masks(current.id).map(|mask| world_rings(doc, mask)));
+        let Some(parent) = current.parent_id.and_then(&find) else { break };
         if current.clip_role == ClipRole::Clip {
             shapes.push(world_rings(doc, parent));
         }
@@ -131,6 +153,40 @@ pub fn layer_clip_region(doc: &Document, id: ObjectId) -> Option<Vec<Ring>> {
         region = intersect(&region, &next, FillRule::EvenOdd);
     }
     Some(region)
+}
+
+/// Index masks for callers that need to resolve the clip of many objects at once.
+pub(crate) struct ClipRegions<'a> {
+    doc: &'a Document,
+    layers: HashMap<ObjectId, &'a Object>,
+    masks: HashMap<ObjectId, Vec<&'a Object>>,
+}
+
+impl<'a> ClipRegions<'a> {
+    pub(crate) fn new(doc: &'a Document) -> Self {
+        let mut masks: HashMap<_, Vec<_>> = HashMap::new();
+        for object in &doc.objects {
+            if object.clip_role == ClipRole::Mask && let Some(parent) = object.parent_id {
+                masks.entry(parent).or_default().push(object);
+            }
+        }
+        let layers = doc.objects.iter().map(|object| (object.id, object)).collect();
+        Self { doc, layers, masks }
+    }
+
+    pub(crate) fn is_mask(&self, object: &Object) -> bool {
+        is_mask_or_descendant(object, |id| self.layers.get(&id).copied())
+    }
+
+    pub(crate) fn region(&self, object: &Object) -> Option<Vec<Ring>> {
+        let masks = collect_layer_clip_region(
+            self.doc,
+            object,
+            |target| self.masks.get(&target).into_iter().flatten().copied(),
+            |id| self.layers.get(&id).copied(),
+        );
+        intersect_crop(masks, crate::scene::vector_crop_quad(object))
+    }
 }
 
 fn prim_object(prim: &Prim) -> Option<ObjectId> {
@@ -374,8 +430,10 @@ fn mask_view_prims(doc: &Document, scene: &Scene, target: ObjectId) -> Option<Ve
                 let (preview, size) = average_mask_preview(&coverage.coverage, size);
                 (mask_preview_runs(&preview, size[0], usize::MAX).unwrap_or_default(), size)
             };
+            let [left, top, width, height] = mask.relative_frame().map(f64::from);
             let at = |u: usize, v: usize| {
-                let (u, v) = (u as f64 / w as f64, v as f64 / h as f64);
+                let u = left + width * u as f64 / w as f64;
+                let v = top + height * v as f64 / h as f64;
                 [
                     f64::from(quad[0][0]) + f64::from(quad[1][0] - quad[0][0]) * u + f64::from(quad[3][0] - quad[0][0]) * v,
                     f64::from(quad[0][1]) + f64::from(quad[1][1] - quad[0][1]) * u + f64::from(quad[3][1] - quad[0][1]) * v,
@@ -476,7 +534,7 @@ fn plan(session: &Session, command: &Command) -> Result<Plan, CommandError> {
         None => return Err(CommandError::invalid_params()),
     };
     let object = doc.get_object(id).ok_or_else(CommandError::not_found)?;
-    if object.locked {
+    if doc.is_object_locked(object) {
         return Err(CommandError::new("LOCKED"));
     }
     let role = match command.name.as_str() {
@@ -501,7 +559,7 @@ fn plan(session: &Session, command: &Command) -> Result<Plan, CommandError> {
     if parent == id || descends_from(doc, parent, id) {
         return Err(CommandError::invalid_params());
     }
-    if target.locked {
+    if doc.is_object_locked(target) {
         return Err(CommandError::new("LOCKED"));
     }
     if role == ClipRole::Mask && mask_rings(doc, object).is_empty() {

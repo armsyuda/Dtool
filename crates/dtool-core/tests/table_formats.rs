@@ -7,7 +7,7 @@ fn table(rows:u32,cols:u32)->TableNode {
     let mut alloc=CellIdAllocator{high_water:0};
     let mut cells=Vec::new();
     for row in 0..rows {for col in 0..cols{cells.push(TableCell{id:alloc.next(),row,col,row_span:1,col_span:1,merged_into:None,story:StoryId(u64::from(row*cols+col)),local:CellFormat::default(),mask:CellFormatMask::default()});}}
-    TableNode{alloc,col_widths_pt:vec![40.0;cols as usize],row_heights_pt:vec![20.0;rows as usize],cells,header_rows:0,footer_rows:0,format:None,frame_local:TableFrameFormat::default(),frame_mask:FrameFormatMask::default()}
+    TableNode{alloc,col_widths_pt:vec![40.0;cols as usize],row_heights_pt:vec![20.0;rows as usize],cells,header_rows:0,footer_rows:0,format:None,frame_local:TableFrameFormat::default(),frame_mask:FrameFormatMask::default(), text_defaults: None}
 }
 
 fn definition(id:u64,name:&str,minimum:f32)->TableFormatDef {

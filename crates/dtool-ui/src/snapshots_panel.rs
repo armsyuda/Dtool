@@ -38,12 +38,20 @@ impl SnapshotsPanel {
             create(session);
         }
         let rows = rows(session);
+        use dtool_core::history_store::BrushSource;
+        let source = session.history.brush_source.as_ref().map(|(source, _)| *source);
+        let mut set_source = None;
         let mut restore_id: Option<u64> = None;
         let mut layer_id: Option<u64> = None;
         egui::ScrollArea::vertical().id_salt("snapshot_rows").show(ui, |ui| {
             for row in &rows {
                 ui.horizontal(|ui| {
-                    ui.label(row.name.as_str());
+                    if crate::history_panel::brush_source_button(ui, source == Some(BrushSource::Snapshot(row.id))).clicked() {
+                        set_source = Some(row.id);
+                    }
+                    dtool_design::tooltip(ui.add(egui::Label::new(row.name.as_str()).truncate()), row.name.as_str());
+                });
+                ui.horizontal_wrapped(|ui| {
                     if dtool_design::button(ui, text("snapshot.restore")).clicked() {
                         restore_id = Some(row.id);
                     }
@@ -51,8 +59,12 @@ impl SnapshotsPanel {
                         layer_id = Some(row.id);
                     }
                 });
+                ui.separator();
             }
         });
+        if let Some(id) = set_source {
+            let _ = session.run_named(dtool_core::commands::history_menu::BRUSH_SOURCE_SET, json!({"snapshot": id}));
+        }
         if let Some(id) = restore_id {
             restore(session, id);
         }

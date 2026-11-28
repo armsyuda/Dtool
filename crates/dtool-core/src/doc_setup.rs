@@ -339,6 +339,9 @@ impl DocSetup {
             return self.apply_selected_spreads(doc);
         }
         self.validate()?;
+        let measure_changed = doc.units != self.units || doc.dpi != self.dpi
+            || doc.drawing_scale != self.drawing_scale || doc.measurement_unit != self.measurement_unit
+            || self.resize == ResizeMode::Rescale;
         let factor = unit_factor(doc.units, doc.dpi, self.units, self.dpi);
         if !factor.is_finite() || factor <= 0.0 {
             return Err(CommandError::invalid_params());
@@ -366,6 +369,12 @@ impl DocSetup {
         transform_object_dimensions(&mut doc.objects, factor, curve_scale, place)?;
         if factor != 1.0 {
             doc.symbols.convert_units(factor)?;
+            for setup in doc.master_pages.page_setup.values_mut() {
+                let margins = &mut setup.margins;
+                for distance in [&mut margins.left, &mut margins.right, &mut margins.top, &mut margins.bottom] {
+                    *distance *= factor;
+                }
+            }
             doc.rulers.origin = doc.rulers.origin.map(|value| value * factor);
             if let Some(settings) = &mut doc.grid.baseline {
                 settings.offset *= factor;
@@ -425,6 +434,9 @@ impl DocSetup {
             });
             crate::commands::masters::resize_layer_references(&before, doc, curve_scale);
             crate::commands::masters::lock_positions(doc);
+        }
+        if measure_changed {
+            crate::commands::measure::refresh_saved_dimensions(doc);
         }
         Ok(())
     }
@@ -488,7 +500,6 @@ pub(crate) fn transform_object_dimensions(
 }
 
 fn convert_object_lengths(object: &mut crate::Object, factor: f32) -> Result<(), CommandError> {
-    use crate::layer_style::EffectParams;
     use crate::object::ObjectKind;
     use crate::paint::{Transparency, transform_paint_matrix};
 
@@ -507,7 +518,7 @@ fn convert_object_lengths(object: &mut crate::Object, factor: f32) -> Result<(),
         }
     }
     match &mut object.transparency {
-        Transparency::Gradient { geom, .. } => *geom = geom.transform(transform.as_coeffs()),
+        Transparency::Gradient { kind, geom, .. } => *geom = geom.transform_for_kind(*kind, transform.as_coeffs()),
         Transparency::InverseBitmap(bitmap) => {
             bitmap.matrix = (transform * kurbo::Affine::new(bitmap.matrix)).as_coeffs();
         }
@@ -544,27 +555,7 @@ fn convert_object_lengths(object: &mut crate::Object, factor: f32) -> Result<(),
         _ => {}
     }
     for effect in &mut object.effects {
-        match &mut effect.params {
-            EffectParams::Blur { radius, radius_y, .. } => {
-                *radius *= factor;
-                *radius_y = radius_y.map(|length| length * factor);
-            }
-            EffectParams::Shadow { radius, radius_y, offset, .. } => {
-                *radius *= factor;
-                *radius_y = radius_y.map(|length| length * factor);
-                *offset *= factor;
-            }
-            EffectParams::Glow { radius, .. } => *radius *= factor,
-            EffectParams::Outline { width, fill, .. } => {
-                *width *= factor;
-                paint(fill);
-            }
-            EffectParams::Light { radius, soften, .. } => {
-                *radius *= factor;
-                *soften *= factor;
-            }
-            EffectParams::Overlay { fill } => paint(fill),
-        }
+        effect.scale_lengths(factor);
     }
     Ok(())
 }

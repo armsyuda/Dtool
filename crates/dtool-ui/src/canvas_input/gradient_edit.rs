@@ -83,7 +83,8 @@ impl Gradient {
         let (dx, dy) = (ex - x, ey - y);
         if self.kind == GradientKind::Conical {
             let (sin, cos) = (offset * std::f64::consts::TAU).sin_cos();
-            [x + dx * cos - dy * sin, y + dx * sin + dy * cos]
+            let [dx, dy, sx, sy, ..] = self.geom.gradient_matrix(self.kind);
+            [x + dx * cos + sx * sin, y + dy * cos + sy * sin]
         } else {
             [x + dx * offset, y + dy * offset]
         }

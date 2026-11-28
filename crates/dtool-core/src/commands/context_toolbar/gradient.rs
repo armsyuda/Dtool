@@ -12,11 +12,8 @@ pub(super) fn apply_bitmap(session: &mut Session, tool: &str, path: &Path, recor
     let (object, target) = Target::selected_bitmap_target(session, tool).ok_or_else(CommandError::invalid_params)?;
     let id = object.id;
     let decoded = crate::commands::image_place::decode_path(path)?;
-    let size = decoded.resource.pixel_size.map(|side| side as usize);
-    let mut image = crate::path_brush::encode_resource(size, &decoded.rgba, decoded.resource.dpi)
-        .ok_or_else(CommandError::invalid_params)?;
-    image.name = decoded.resource.name;
-    let [width, height] = decoded.resource.pixel_size.map(f64::from);
+    let image = crate::commands::image_place::embedded_bitmap(decoded)?;
+    let [width, height] = image.pixel_size.map(f64::from);
     let [w, h] = object.size.map(|value| f64::from(value.abs()));
     let scale = (w / width).max(h / height).max(0.01);
     let matrix = [scale, 0.0, 0.0, scale, (w - width * scale) * 0.5, (h - height * scale) * 0.5];
@@ -24,7 +21,7 @@ pub(super) fn apply_bitmap(session: &mut Session, tool: &str, path: &Path, recor
     let mut document = session.document.clone();
     let resource = crate::path_brush::import_snapshot(&mut document, &image);
     let object = document.objects.iter_mut().find(|object| object.id == id).ok_or_else(CommandError::not_found)?;
-    let paint = Paint::Bitmap(BitmapPaint { resource_id: resource.0.to_string(), matrix, seed: None });
+    let paint = Paint::Bitmap(BitmapPaint { resource_id: resource.0.to_string(), matrix, seed: None, single_image: false });
     match target {
         Target::Fill => object.fill = paint,
         Target::Stroke => object.stroke.paint = paint,

@@ -207,6 +207,14 @@ fn blend_gradient_geometry(a: GradientGeom, b: GradientGeom, t: f64) -> Gradient
         } else { None },
         focus_radius: a.focus_radius + t * (b.focus_radius - a.focus_radius),
         spread: if t < 0.5 { a.spread } else { b.spread },
+        sweep_basis: if a.sweep_basis.is_some() || b.sweep_basis.is_some() {
+            let [ax, ay] = a.sweep_basis.unwrap_or([0.0, 1.0]);
+            let [bx, by] = b.sweep_basis.unwrap_or([0.0, 1.0]);
+            let sign = if t < 0.5 { ay.signum() } else { by.signum() };
+            Some([ax + t * (bx - ax), sign * (ay.abs() + t * (by.abs() - ay.abs()))])
+        } else {
+            None
+        },
     }
 }
 

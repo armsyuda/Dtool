@@ -31,7 +31,7 @@ fn assert_unique_and_live(session: &Session, table: u64) {
 fn one_cell_table(story: StoryId) -> TableNode {
     let mut alloc = CellIdAllocator { high_water: 0 };
     let cell = TableCell { id: alloc.next(), row: 0, col: 0, row_span: 1, col_span: 1, merged_into: None, story, local: CellFormat::default(), mask: CellFormatMask::default() };
-    TableNode { alloc, col_widths_pt: vec![50.0], row_heights_pt: vec![20.0], cells: vec![cell], header_rows: 0, footer_rows: 0, format: None, frame_local: TableFrameFormat::default(), frame_mask: FrameFormatMask::default() }
+    TableNode { alloc, col_widths_pt: vec![50.0], row_heights_pt: vec![20.0], cells: vec![cell], header_rows: 0, footer_rows: 0, format: None, frame_local: TableFrameFormat::default(), frame_mask: FrameFormatMask::default(), text_defaults: None }
 }
 
 #[test]

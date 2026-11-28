@@ -147,10 +147,18 @@ pub fn stroke_targets(params: &serde_json::Value, selection: &[ObjectId]) -> Res
     Ok(selection.to_vec())
 }
 
+fn editable_stroke(doc: &Document, id: ObjectId) -> Result<&StrokeStyle, CommandError> {
+    let object = doc.get_object(id).ok_or_else(CommandError::not_found)?;
+    if doc.is_object_locked(object) {
+        return Err(CommandError::new("LOCKED"));
+    }
+    Ok(&object.stroke)
+}
+
 pub fn apply_stroke_patch(doc: &mut Document, ids: &[ObjectId], patch: &StrokePatch) -> CommandResult {
     let mut next = Vec::with_capacity(ids.len());
     for id in ids {
-        let current = &doc.get_object(*id).ok_or_else(CommandError::not_found)?.stroke;
+        let current = editable_stroke(doc, *id)?;
         next.push(patch.applied(current)?);
     }
     let mut out = Vec::with_capacity(ids.len());
@@ -171,6 +179,7 @@ pub fn apply_stroke_query(doc: &Document, object_id: ObjectId) -> CommandResult 
 }
 
 pub fn apply_stroke_arrows_swap(doc: &mut Document, object_id: ObjectId) -> CommandResult {
+    editable_stroke(doc, object_id)?;
     let obj = doc.find_object_mut(object_id.0).ok_or_else(CommandError::not_found)?;
     std::mem::swap(&mut obj.stroke.start_arrow, &mut obj.stroke.end_arrow);
     Ok(serde_json::json!({ "id": object_id.0, "stroke": obj.stroke }))
@@ -288,7 +297,7 @@ pub fn apply_stroke_arrows_list(_doc: &Document) -> CommandResult {
 }
 
 pub fn can_execute_stroke_set(doc: &Document, object_id: ObjectId) -> bool {
-    doc.get_object(object_id).is_some()
+    editable_stroke(doc, object_id).is_ok()
 }
 
 pub fn run_stroke_command(cmd_name: &str, doc: &mut Document, params: &serde_json::Value) -> CommandResult {
@@ -306,7 +315,7 @@ pub fn run_stroke_command(cmd_name: &str, doc: &mut Document, params: &serde_jso
 
 fn reset_profile(session: &Session) -> Option<Command> {
     let ids: Vec<_> = session.selection.ids.iter().filter_map(|id| session.document.get_object(*id))
-        .filter(|object| !object.locked && !object.stroke.pressure.is_empty())
+        .filter(|object| !session.document.is_object_locked(object) && !object.stroke.pressure.is_empty())
         .map(|object| object.id.0).collect();
     (!ids.is_empty()).then(|| Command::with_params(STROKE_SET, serde_json::json!({ "ids": ids, "pressure": [] })))
 }
@@ -329,7 +338,7 @@ pub fn can_execute(session: &Session, command: &Command) -> Option<bool> {
             ids.iter().all(|id| can_execute_stroke_set(&session.document, *id))
         }));
     }
-    Some(target(&command.params).map(|id| can_execute_stroke_set(&session.document, id)).unwrap_or(false))
+    Some(target(&command.params).is_ok_and(|id| session.document.get_object(id).is_some()))
 }
 
 pub fn run(session: &mut Session, command: &Command) -> Option<CommandResult> {
@@ -355,7 +364,7 @@ pub fn run(session: &mut Session, command: &Command) -> Option<CommandResult> {
             }
             let mut unchanged = true;
             for id in &ids {
-                let current = &session.document.get_object(*id).ok_or_else(CommandError::not_found)?.stroke;
+                let current = editable_stroke(&session.document, *id)?;
                 unchanged &= patch.applied(current)? == *current;
             }
             if unchanged {
@@ -403,7 +412,7 @@ pub fn run(session: &mut Session, command: &Command) -> Option<CommandResult> {
 
 fn arrow_swaps(doc: &Document, ids: &[ObjectId]) -> Result<Vec<(ObjectId, StrokeStyle, StrokeStyle)>, CommandError> {
     ids.iter().map(|id| {
-        let before = doc.get_object(*id).ok_or_else(CommandError::not_found)?.stroke.clone();
+        let before = editable_stroke(doc, *id)?.clone();
         let mut after = before.clone();
         std::mem::swap(&mut after.start_arrow, &mut after.end_arrow);
         Ok((*id, before, after))
@@ -448,6 +457,9 @@ pub fn apply(session: &mut Session, command: &Command) -> Option<Result<(), Comm
                 let old = session.snapshot_objects(&ids);
                 if old.len() != ids.len() {
                     return Err(CommandError::not_found());
+                }
+                for id in &ids {
+                    editable_stroke(&session.document, *id)?;
                 }
                 return symbols::update_strokes(&mut session.document, &linked_changes(&old, &patch)?,
                     session.symbol_sync, StrokeEdit::Patch(&patch)).map(|_| ());

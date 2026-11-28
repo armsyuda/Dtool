@@ -5,6 +5,7 @@ use crate::object::{Object, ObjectId, ObjectKind};
 use crate::paint::{Colour, Paint, StrokeStyle};
 use crate::selection::SelectOp;
 use dtool_protocol::{Command, CommandError, CommandResult};
+use serde::Deserialize;
 use serde_json::{json, Value};
 
 pub const CURVE_ADD: &str = "curve.add";
@@ -119,17 +120,13 @@ pub fn world_contour(object: &Object) -> Option<Contour> {
     Some(offset_contour(&curve.contour, [f64::from(object.pos[0]), f64::from(object.pos[1])]))
 }
 
-fn plan_add(params: &Value) -> Result<(Contour, Paint, StrokeStyle), CommandError> {
+fn plan_add(params: &Value) -> Result<(Contour, Option<Paint>, Option<StrokeStyle>), CommandError> {
     let closed = closed_flag(params.get("closed"))?;
     let contour = parse_contour(params.get("points").ok_or_else(CommandError::invalid_params)?, closed)?;
-    let fill = match params.get("fill") {
-        Some(v) => serde_json::from_value(v.clone()).map_err(|_| CommandError::invalid_params())?,
-        None => Paint::None,
-    };
-    let stroke = match params.get("stroke") {
-        Some(v) => serde_json::from_value(v.clone()).map_err(|_| CommandError::invalid_params())?,
-        None => default_stroke(),
-    };
+    let fill = params.get("fill").map(Paint::deserialize).transpose()
+        .map_err(|_| CommandError::invalid_params())?;
+    let stroke = params.get("stroke").map(StrokeStyle::deserialize).transpose()
+        .map_err(|_| CommandError::invalid_params())?;
     Ok((contour, fill, stroke))
 }
 
@@ -139,8 +136,12 @@ fn add(session: &mut Session, params: &Value) -> CommandResult {
     }
     let (contour, fill, stroke) = plan_add(params)?;
     let (pos, size, local) = placement(&contour)?;
+    let defaults = super::defaults::for_document(&session.document);
+    let stroke = stroke.unwrap_or_else(|| defaults.stroke_for_document(&session.document));
+    let fill = fill.unwrap_or_else(|| if contour.closed { defaults.fill } else { Paint::None });
     let before = snapshot(session);
     let mut object = Object { pos, size, fill, stroke, kind: ObjectKind::Curve(Curve::from_contour_and_holes(local, Vec::new())), ..Object::default() };
+    object.effects = super::defaults::effects_for_creation(&session.document, size, params)?;
     let start = contour.points[0].pos.map(|coordinate| coordinate as f32);
     crate::artboard::edit::assign_new_object(&session.document, &mut object, start);
     let id = session.document.create_object(object);
@@ -157,7 +158,7 @@ pub(super) fn editable_curve_impl(session: &Session, id: ObjectId, preserve_tran
         return Err(CommandError::no_document());
     }
     let object = session.document.get_object(id).ok_or_else(CommandError::not_found)?;
-    if object.locked {
+    if session.document.is_object_locked(object) {
         return Err(CommandError::new("LOCKED"));
     }
     if object.curve().is_none() || (!preserve_transform && (object.rotation_deg != 0.0 || object.shear_deg != 0.0)) {

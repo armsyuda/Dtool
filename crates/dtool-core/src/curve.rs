@@ -110,7 +110,7 @@ pub fn effective_radius(contour: &Contour, index: usize) -> f64 {
     stored_radius(&contour.points[index]).min(max_corner_radius(contour, index, &[]))
 }
 
-pub fn corner_handle_position(contour: &Contour, index: usize) -> Option<[f64; 2]> {
+pub fn corner_axis(contour: &Contour, index: usize) -> Option<[f64; 2]> {
     if !corner_eligible(contour, index) {
         return None;
     }
@@ -122,9 +122,15 @@ pub fn corner_handle_position(contour: &Contour, index: usize) -> Option<[f64; 2
     ];
     let length = dir[0].hypot(dir[1]);
     if length <= CORNER_SEGMENT_EPSILON {
-        return Some(pos);
+        return Some([0.0, 0.0]);
     }
     dir = [dir[0] / length, dir[1] / length];
+    Some(dir)
+}
+
+pub fn corner_handle_position(contour: &Contour, index: usize) -> Option<[f64; 2]> {
+    let dir = corner_axis(contour, index)?;
+    let pos = contour.points[index].pos;
     let radius = effective_radius(contour, index);
     Some([pos[0] + dir[0] * radius, pos[1] + dir[1] * radius])
 }

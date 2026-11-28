@@ -59,8 +59,9 @@ impl PointTransform {
         if self
             .ids
             .iter()
-            .any(|id| session.document.get_object(*id).is_none_or(|o| o.locked))
+            .any(|id| session.document.get_object(*id).is_none_or(|o| session.document.is_object_locked(o)))
         {
+            self.cancel();
             return (None, None);
         }
         let to_doc = |point| {
@@ -83,10 +84,19 @@ impl PointTransform {
             ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
         }
         let (press, release) = primary_button_positions(ui);
+        let lost_pointer = ui.input(|input| {
+            !input.focused || (release.is_none() && input.events.iter().any(|event| matches!(event, egui::Event::PointerGone)))
+        });
+        if lost_pointer {
+            self.cancel();
+            ui.ctx().request_repaint();
+            return (None, None);
+        }
         if let Some(at) = press
             .filter(|p| {
-                response.interact_rect.contains(*p)
-                    && (response.contains_pointer() || response.is_pointer_button_down_on())
+                response.enabled() && response.interact_rect.contains(*p)
+                    && ui.ctx().layer_id_at(*p) == Some(response.layer_id)
+                    && !egui::Popup::is_any_open(ui.ctx())
             })
             .map(to_doc)
         {

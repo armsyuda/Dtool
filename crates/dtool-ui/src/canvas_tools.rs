@@ -4,7 +4,7 @@ use dtool_core::paint::{Colour, GradientGeom, GradientKind, GradientStop, Paint}
 use dtool_tools::vector_crop::VectorCropTool;
 use dtool_core::snap_candidates::{snap_candidates, CandidateKind, SnapDocument};
 use dtool_core::scene::Scene;
-use dtool_core::scene_hit::selection_box;
+use dtool_core::scene_hit::SelectionQuads;
 use dtool_protocol::{Command, CommandError};
 use dtool_core::prefs::Prefs;
 use dtool_tools::move_tool::{MoveTool, NudgeDirection};
@@ -269,29 +269,43 @@ pub(crate) fn guides_enabled(prefs: &dtool_core::snap_prefs::SnapPrefs) -> bool 
     prefs.enabled && prefs.dynamic_guides && prefs.object_snapping && prefs.snap_to_object_bounds
 }
 
-fn under(session: &Session, id: ObjectId, exclude: &[ObjectId]) -> bool {
+fn under(parents: &std::collections::HashMap<ObjectId, ObjectId>, id: ObjectId, exclude: &[ObjectId]) -> bool {
     let mut current = Some(id);
     for _ in 0..64 {
         let Some(c) = current else { return false };
         if exclude.contains(&c) {
             return true;
         }
-        current = session.document.get_object(c).and_then(|o| o.parent_id);
+        current = parents.get(&c).copied();
     }
     false
 }
 
 pub fn object_boxes(session: &Session, scene: &Scene, exclude: &[ObjectId]) -> Vec<[f32; 4]> {
     let prefs = &session.snap_prefs.query();
-    session
-        .document
-        .objects
+    let doc = &session.document;
+    let quads = SelectionQuads::new(scene, doc);
+    let mut parents = std::collections::HashMap::new();
+    if !exclude.is_empty() {
+        for object in doc.objects() {
+            if let Some(parent) = object.parent_id {
+                parents.entry(object.id).or_insert(parent);
+            }
+        }
+    }
+    doc.objects()
         .iter()
         .filter(|o| o.pickable && o.kind != dtool_core::ObjectKind::Artboard && !o.is_layer_folder()
-            && !(prefs.only_visible_objects && o.opacity <= 0.0) && !under(session, o.id, exclude))
-        .filter_map(|o| match scene.quad(o.id) {
-            Some(_) if o.rotation_deg == 0.0 && o.shear_deg == 0.0 => selection_box(scene, &session.document, &[o.id]),
-            _ => quad_box(&dtool_core::geometry::object_world_quad(o)),
+            && !(prefs.only_visible_objects && o.opacity <= 0.0) && !under(&parents, o.id, exclude))
+        .filter_map(|o| {
+            if o.rotation_deg == 0.0 && o.shear_deg == 0.0
+                && let Some(quad) = quads.visible_quad(o)
+            {
+                let [x0, y0, x1, y1] = dtool_core::scene::contours_bounds(&[quad.to_vec()])?;
+                Some([x0, y0, x1 - x0, y1 - y0])
+            } else {
+                quad_box(&dtool_core::geometry::object_world_quad(o))
+            }
         })
         .collect()
 }
@@ -556,11 +570,12 @@ mod tests {
         let mods = crate::canvas_input::Mods { shift: false, ctrl: false, alt: false };
         let mut input = crate::canvas_input::CanvasInput::new();
         input.press_move(&scene, &mut s, [210.0, 210.0], mods);
-        let p = input.snap_drag(&s, &scene, [72.0, 210.0], mods);
+        let targets = crate::canvas_input::DragSnapTargets::new(&s, &scene);
+        let p = input.snap_drag(&targets, [72.0, 210.0], mods);
         assert_eq!(p, [70.0, 210.0]);
         assert!(input.snap_mark.is_some());
         input.drag_move(p, mods);
-        input.update_guides(&s, &scene, p);
+        input.update_guides(&targets, p);
         assert_eq!(input.guide_lines, vec![GuideLine { from: [60.0, 10.0], to: [60.0, 240.0] }]);
         assert!(alignment_guides(&s, &scene, [61.0, 200.0, 40.0, 40.0], &[b]).is_empty());
         let centred = alignment_guides(&s, &scene, [10.0, 200.0, 50.0, 40.0], &[b]);
@@ -610,7 +625,8 @@ mod tests {
         let mut input = crate::canvas_input::CanvasInput::new();
         input.press_move(&scene, &mut s, [200.0, 220.0], mods);
         assert_eq!(input.move_tool.gesture, Some(dtool_tools::move_tool::GestureKind::Scale(dtool_tools::move_tool::Handle::Left)));
-        assert_eq!(input.snap_drag(&s, &scene, [62.0, 223.0], mods), [60.0, 223.0]);
+        let targets = crate::canvas_input::DragSnapTargets::new(&s, &scene);
+        assert_eq!(input.snap_drag(&targets, [62.0, 223.0], mods), [60.0, 223.0]);
         input.cancel();
         let origin = [100.0, 100.0];
         let snapped = snap_rotation(origin, [110.0, 100.0], [110.0, 102.5]).unwrap();
@@ -625,9 +641,10 @@ mod tests {
         assert_eq!(input.move_tool.gesture, Some(dtool_tools::move_tool::GestureKind::Rotate));
         let press = input.press_at.unwrap();
         let raw = [press[0] + 10.0, press[1]];
-        let p = input.snap_drag(&s, &scene, raw, mods);
+        let targets = crate::canvas_input::DragSnapTargets::new(&s, &scene);
+        let p = input.snap_drag(&targets, raw, mods);
         assert!(input.snap_mark.is_some() && p != raw, "{p:?}");
-        assert_eq!(input.snap_drag(&s, &scene, raw, crate::canvas_input::Mods { shift: true, ..mods }), raw);
+        assert_eq!(input.snap_drag(&targets, raw, crate::canvas_input::Mods { shift: true, ..mods }), raw);
     }
 
     #[test]

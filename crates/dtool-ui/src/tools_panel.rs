@@ -119,6 +119,10 @@ fn base_flyouts() -> Vec<ToolFlyout> {
             children: vec![],
         },
         ToolFlyout {
+            parent: ToolId(dtool_core::commands::curve_nodes::corner::TOOL),
+            children: vec![],
+        },
+        ToolFlyout {
             parent: ToolId("tool.transform"),
             children: vec![
                 ToolId("tool.transform.rotate"),
@@ -157,8 +161,8 @@ fn base_flyouts() -> Vec<ToolFlyout> {
             children: vec![],
         },
         ToolFlyout {
-            parent: ToolId("tool.flood_fill"),
-            children: vec![],
+            parent: ToolId(dtool_core::commands::fill::TOOL),
+            children: vec![ToolId("tool.flood_fill")],
         },
         ToolFlyout {
             parent: ToolId("tool.gradient"),
@@ -203,6 +207,14 @@ fn base_flyouts() -> Vec<ToolFlyout> {
             children: vec![],
         },
         ToolFlyout {
+            parent: ToolId(dtool_core::context_toolbar::BLOB_BRUSH),
+            children: vec![ToolId(dtool_core::context_toolbar::BLOB_ERASE)],
+        },
+        ToolFlyout {
+            parent: ToolId(dtool_core::context_toolbar::VECTOR_FLOOD),
+            children: vec![],
+        },
+        ToolFlyout {
             parent: ToolId("tool.eraser"),
             children: vec![
                 ToolId("tool.eraser.erase"),
@@ -235,6 +247,26 @@ fn base_flyouts() -> Vec<ToolFlyout> {
         },
         ToolFlyout {
             parent: ToolId(dtool_core::context_toolbar::CLONE_TOOL),
+            children: vec![],
+        },
+        ToolFlyout {
+            parent: ToolId(dtool_core::context_toolbar::HEAL_TOOL),
+            children: vec![],
+        },
+        ToolFlyout {
+            parent: ToolId(dtool_core::context_toolbar::UNDO_BRUSH_TOOL),
+            children: vec![],
+        },
+        ToolFlyout {
+            parent: ToolId(dtool_core::commands::patch::TOOL),
+            children: vec![],
+        },
+        ToolFlyout {
+            parent: ToolId(dtool_core::commands::inpaint::TOOL),
+            children: vec![],
+        },
+        ToolFlyout {
+            parent: ToolId(dtool_core::commands::blemish::TOOL),
             children: vec![],
         },
         ToolFlyout {
@@ -422,7 +454,10 @@ fn column(ui: &mut egui::Ui, active: &str, mut icons: Option<&mut crate::icon_ca
                     });
                     return;
                 }
-                let selectable_parent = (id == "tool.select.object").then_some(id);
+                let selectable_parent = matches!(id, "tool.select.object"
+                    | dtool_core::context_toolbar::ADJUSTMENT_TOOL | dtool_core::context_toolbar::FILTER_BRUSH_TOOL
+                    | dtool_core::context_toolbar::BLOB_BRUSH | dtool_core::commands::fill::TOOL)
+                    .then_some(id);
                 for child in selectable_parent.into_iter().chain(children) {
                     if tool_button(ui, &mut icons, child, child == active, true, false).clicked() {
                         picked = Some(child);
@@ -489,8 +524,20 @@ fn tool_button(ui: &mut egui::Ui, icons: &mut Option<&mut crate::icon_cache::Ico
 }
 
 pub(crate) fn palette_button(ui: &mut egui::Ui, icons: &mut crate::icon_cache::IconCache, id: &str, placed: bool) -> egui::Response {
-    let response = tool_button(ui, &mut Some(icons), id, false, true, placed);
-    if placed { response.on_disabled_hover_text(text("tools.customise.placed")) } else { response }
+    let button = if let Some(texture) = icons.tool_texture(ui.ctx(), id, dtool_design::icons::current_icon_colour(), dtool_design::icon_texture_px(ui)) {
+        egui::Button::image_and_text(
+            egui::Image::new(&texture).fit_to_exact_size(egui::Vec2::splat(17.0)), text(id))
+    } else {
+        egui::Button::new(text(id))
+    };
+    let response = ui.add_enabled(!placed && !is_held_shape_tool(id), button.truncate()
+        .min_size(egui::vec2(ui.available_width(), dtool_design::size("control.hit_size"))));
+    let tooltip = crate::tooltips::tool_tooltip(id);
+    if placed {
+        response.on_disabled_hover_text(format!("{tooltip}\n{}", text("tools.customise.placed")))
+    } else {
+        dtool_design::tooltip(response, tooltip)
+    }
 }
 
 pub fn render_tools_panel(ctx: &egui::Context, session: &Session) {

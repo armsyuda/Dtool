@@ -58,7 +58,7 @@ fn plan(session: &Session, params: &Value) -> Result<(ObjectId, Option<VectorCro
     }
     let id = target(session, params).ok_or_else(|| CommandError::new("NOTHING_SELECTED"))?;
     let object = session.document.get_object(id).ok_or_else(CommandError::not_found)?;
-    if object.locked {
+    if session.document.is_object_locked(object) {
         return Err(CommandError::new("LOCKED"));
     }
     let crop = parse_rect(params.get("rect").ok_or_else(CommandError::invalid_params)?)?;

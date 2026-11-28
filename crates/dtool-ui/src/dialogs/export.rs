@@ -1628,7 +1628,8 @@ impl ExportDialog {
             Err(mpsc::TryRecvError::Empty) => {
                 egui::Window::new(text("dialog.export.title"))
                     .id(egui::Id::unique("dtool.export.saving"))
-                    .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                    .pivot(egui::Align2::CENTER_CENTER)
+                    .default_pos(ui.ctx().content_rect().center())
                     .collapsible(false)
                     .resizable(false)
                     .show(ui.ctx(), |ui| {

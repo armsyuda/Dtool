@@ -556,7 +556,7 @@ impl SvgLayers<'_> {
                 * kurbo::Affine::translate((f64::from(object.pos[0]), f64::from(object.pos[1])));
             let transform = world * kurbo::Affine::new(bitmap.matrix);
             let fill_id = format!("dtool-transparency-tile-{id}");
-            let defs = bitmap_pattern_data(&fill_id, width as usize, height as usize, transform, &data);
+            let defs = bitmap_pattern_data(&fill_id, width as usize, height as usize, transform, &data, [f64::from(width), f64::from(height)]);
             let ink = format!("<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" fill=\"url(#{fill_id})\"/>", f(x), f(y), f(w), f(h));
             (defs, ink)
         } else if matches!(&object.transparency, Transparency::Gradient { kind: GradientKind::Conical, .. }) {
@@ -617,10 +617,10 @@ fn blend_style(mode: BlendMode) -> &'static str {
 }
 
 fn write_pixel_mask(content: &mut String, doc: &Document, group: &Object, opts: &SvgOptions) -> Result<bool, CommandError> {
-    let Some(mask) = dtool_core::raster_source::compositing_mask(doc, group) else {
+    let Some(mask) = dtool_core::raster_source::compositing_layer_mask(doc, group) else {
         return Ok(false);
     };
-    let [w, h] = group.size.map(f32::abs);
+    let [local_x, local_y, w, h] = mask.local_rect(group);
     let matrix = dtool_core::geometry::object_matrix(group);
     if ![w, h].iter().all(|size| size.is_finite() && *size > 0.0)
         || dtool_core::geometry::invert_matrix(&matrix).is_none()
@@ -628,11 +628,19 @@ fn write_pixel_mask(content: &mut String, doc: &Document, group: &Object, opts: 
     {
         return Ok(false);
     }
-    let data = png_data(&mask.coverage, mask.width, mask.height, image::ExtendedColorType::L8)?;
+    let coverage = &mask.coverage;
+    let data = png_data(&coverage.coverage, coverage.width, coverage.height, image::ExtendedColorType::L8)?;
     let id = group.id.0;
     let f = |value| format_float(value, opts.precision.max(6));
-    let [x, y] = group.pos.map(f);
-    let [left, top, width, height] = dtool_core::geometry::object_world_bounds(group).map(f);
+    let [x, y] = [group.pos[0] + local_x, group.pos[1] + local_y];
+    let corners = [[x, y], [x + w, y], [x + w, y + h], [x, y + h]]
+        .map(|point| dtool_core::geometry::apply_matrix(&matrix, point));
+    let [left, top, right, bottom] = corners.iter().fold(
+        [f32::INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY],
+        |[left, top, right, bottom], &[x, y]| [left.min(x), top.min(y), right.max(x), bottom.max(y)],
+    );
+    let [left, top, width, height] = [left, top, right - left, bottom - top].map(f);
+    let [x, y] = [x, y].map(f);
     let [a, b, c, d, e, g] = matrix.map(f);
     let [w, h] = [f(w), f(h)];
     let _ = writeln!(content,
@@ -1089,7 +1097,10 @@ fn write_appearance_path(
     use dtool_core::commands::appearance::RowBlend;
     let gradient_id = format!("dtool-appearance-{}-{index}", object.0);
     let gradient = gradient_def(&path.paint, &gradient_id, opts)
-        .or_else(|| bitmap_pattern_def(doc, &path.paint, kurbo::Affine::IDENTITY, &gradient_id))
+        .or_else(|| {
+            let bounds = kurbo::Shape::bounding_box(&path.path);
+            bitmap_pattern_def(doc, &path.paint, kurbo::Affine::IDENTITY, &gradient_id, Some(bounds))
+        })
         .or_else(|| conical_pattern_def(doc, path, &gradient_id, opts));
     if let Some(defs) = gradient.as_deref() {
         content.push_str(defs);
@@ -1120,6 +1131,7 @@ fn write_object(content: &mut String, doc: &Document, object: &dtool_core::Objec
             || object.paint_order == PaintOrder::StrokeUnder);
     if (dtool_core::commands::appearance::has_layers(object) || object.stroke.cap == dtool_core::paint::Cap::RoundInset
         || styled_stroke
+        || matches!(&object.fill, Paint::Bitmap(bitmap) if bitmap.single_image)
         || conical
         || matches!(object.stroke.paint, dtool_core::paint::Paint::Bitmap(_)
             | dtool_core::paint::Paint::Gradient { kind: dtool_core::paint::GradientKind::Linear
@@ -1164,10 +1176,10 @@ fn write_object(content: &mut String, doc: &Document, object: &dtool_core::Objec
     let transform = kurbo::Affine::new(dtool_core::geometry::object_matrix(object).map(f64::from))
         * kurbo::Affine::translate((x, y));
     let gradient = if let dtool_core::paint::Paint::Gradient { kind, stops, geom } = &object.fill {
-        let paint = dtool_core::paint::Paint::Gradient { kind: *kind, stops: stops.clone(), geom: geom.transform(transform.as_coeffs()) };
+        let paint = dtool_core::paint::Paint::Gradient { kind: *kind, stops: stops.clone(), geom: geom.transform_for_kind(*kind, transform.as_coeffs()) };
         gradient_def(&paint, &gradient_id, opts)
     } else {
-        bitmap_pattern_def(doc, &object.fill, transform, &gradient_id)
+        bitmap_pattern_def(doc, &object.fill, transform, &gradient_id, None)
     };
     let fill_ref = gradient.as_ref().map(|_| gradient_id.as_str());
     if gradient.is_none() && paint_is_flattened(&object.fill) {
@@ -1178,7 +1190,7 @@ fn write_object(content: &mut String, doc: &Document, object: &dtool_core::Objec
     }
     
     let open_spiral = object.shape.as_ref().is_some_and(|shape| shape.kind == dtool_core::shape::ShapeKind::Spiral);
-    let uses_path = matches!(object.kind, dtool_core::ObjectKind::Curve(_) | dtool_core::ObjectKind::Compound(_)) || open_spiral;
+    let uses_path = matches!(object.kind, dtool_core::ObjectKind::Curve(_) | dtool_core::ObjectKind::Compound(_)) || open_spiral || object.has_live_contour();
     let path = (uses_path || object.parent_id.is_some())
         .then(|| dtool_core::outline::object_outline_world_with_tolerance(object, tolerance)).flatten();
     let warped = path.as_ref().and_then(|path| {
@@ -1455,12 +1467,14 @@ fn gradient_def(fill: &dtool_core::paint::Paint, gradient_id: &str, opts: &SvgOp
     Some(out)
 }
 
-fn bitmap_pattern_def(doc: &Document, paint: &dtool_core::paint::Paint, transform: kurbo::Affine, id: &str) -> Option<String> {
+fn bitmap_pattern_def(doc: &Document, paint: &dtool_core::paint::Paint, transform: kurbo::Affine, id: &str, bounds: Option<kurbo::Rect>) -> Option<String> {
     let dtool_core::paint::Paint::Bitmap(bitmap) = paint else { return None };
     let ([width, height], pixels) = dtool_core::scene::bitmap_source(doc, &bitmap.resource_id)?;
     let data = png_data(&pixels, width as u32, height as u32, image::ExtendedColorType::Rgba8).ok()?;
     let transform = transform * kurbo::Affine::new(bitmap.matrix);
-    Some(bitmap_pattern_data(id, width, height, transform, &data))
+    let size = [width as f64, height as f64];
+    let period = bounds.map_or(size, |bounds| bitmap.tile_period(size, transform, bounds));
+    Some(bitmap_pattern_data(id, width, height, transform, &data, period))
 }
 
 fn conical_pattern_def(
@@ -1496,13 +1510,13 @@ fn conical_pattern_def(
     }
     let data = png_data(&pixels, width as u32, height as u32, image::ExtendedColorType::Rgba8).ok()?;
     let transform = kurbo::Affine::translate((bounds.x0, bounds.y0)) * kurbo::Affine::scale_non_uniform(step_x, step_y);
-    Some(bitmap_pattern_data(id, width, height, transform, &data))
+    Some(bitmap_pattern_data(id, width, height, transform, &data, [width as f64, height as f64]))
 }
 
-fn bitmap_pattern_data(id: &str, width: usize, height: usize, transform: kurbo::Affine, data: &str) -> String {
+fn bitmap_pattern_data(id: &str, width: usize, height: usize, transform: kurbo::Affine, data: &str, [tile_w, tile_h]: [f64; 2]) -> String {
     let [a, b, c, d, e, f] = transform.as_coeffs();
     format!(
-        "<defs><pattern id=\"{id}\" patternUnits=\"userSpaceOnUse\" width=\"{width}\" height=\"{height}\" patternTransform=\"matrix({a} {b} {c} {d} {e} {f})\"><image width=\"{width}\" height=\"{height}\" xlink:href=\"data:image/png;base64,{data}\"/></pattern></defs>\n"
+        "<defs><pattern id=\"{id}\" patternUnits=\"userSpaceOnUse\" width=\"{tile_w}\" height=\"{tile_h}\" patternTransform=\"matrix({a} {b} {c} {d} {e} {f})\"><image width=\"{width}\" height=\"{height}\" xlink:href=\"data:image/png;base64,{data}\"/></pattern></defs>\n"
     )
 }
 

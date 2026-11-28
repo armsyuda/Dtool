@@ -226,9 +226,9 @@ fn param_pos(params: &Value) -> Result<[f32; 2], CommandError> {
     Ok([x, y])
 }
 
-fn param_size_pt(params: &Value) -> Result<f32, CommandError> {
+fn param_size_pt(params: &Value, fallback: f32) -> Result<f32, CommandError> {
     match params.get("size_pt") {
-        None | Some(Value::Null) => Ok(DEFAULT_SIZE_PT),
+        None | Some(Value::Null) => Ok(fallback),
         Some(value) => {
             let size = value
                 .as_f64()
@@ -432,6 +432,62 @@ pub fn set_size_range(story: &mut Story, size_pt: f32) {
     })];
 }
 
+pub(crate) fn remember_story_defaults(cmd: &mut Command, doc: &Document) {
+    let defaults = crate::commands::defaults::for_document(doc);
+    if cmd.params.get("text_defaults").is_none() {
+        cmd.params["text_defaults"] = json!(defaults.text);
+    }
+    if cmd.params.get("effect_defaults").is_none() && cmd.params.get("effects").is_none() {
+        cmd.params["effect_defaults"] = json!(defaults.effects);
+    }
+}
+
+pub(crate) fn style_new_story(story: &mut Story, params: &Value, doc: &Document) -> Result<(), CommandError> {
+    use crate::defaults::{TextAlign, TextDefaults};
+
+    let defaults: TextDefaults = match params.get("text_defaults") {
+        Some(value) => serde_json::from_value(value.clone()).map_err(|_| CommandError::invalid_params())?,
+        None => crate::commands::defaults::for_document(doc).text,
+    };
+    let size = defaults.font_size as f32;
+    let fallback = if size.is_finite() && size > 0.0 { size } else { DEFAULT_SIZE_PT };
+    let size = param_size_pt(params, fallback)?;
+    set_size_range(story, size);
+    let character = &mut story.ranges[0];
+    let name = |key| -> Result<Option<&str>, CommandError> {
+        params.get(key).filter(|value| !value.is_null())
+            .map(|value| value.as_str().ok_or_else(CommandError::invalid_params)).transpose()
+    };
+    let family = name("family")?.filter(|name| !name.trim().is_empty());
+    if let Some(family) = family.or_else(|| (defaults.font_family != "sans-serif").then_some(defaults.font_family.as_str())) {
+        character["family"] = family.into();
+    }
+    if let Some(style) = name("style")?.or(defaults.font_style.as_deref().filter(|_| family.is_none())) {
+        character["style"] = style.into();
+    }
+    if family.is_none() && params.get("style").is_none() {
+        if let Some(weight) = defaults.font_weight {
+            character["weight"] = weight.into();
+        }
+        if let Some(italic) = defaults.italic {
+            character["italic"] = italic.into();
+        }
+    }
+
+    let mut paragraph = json!({"start": 0, "end": scalar_len(&story.text)});
+    if defaults.alignment != TextAlign::Left {
+        paragraph["align"] = defaults.alignment.story_value();
+    }
+    let leading = defaults.line_height as f32;
+    if defaults.explicit_leading && leading.is_finite() && leading > 0.0 {
+        paragraph["leading"] = leading.into();
+    }
+    if paragraph.get("align").is_some() || paragraph.get("leading").is_some() {
+        story.paras = vec![paragraph];
+    }
+    Ok(())
+}
+
 pub fn next_story_id(doc: &Document) -> u64 {
     doc.peek_story_id().0
 }
@@ -553,6 +609,7 @@ fn run_art_add(cmd: &Command, session: &mut Session) -> CommandResult {
     if optional_u64(&redo.params, "story")?.is_none() {
         redo.params["story"] = next_story_id(&session.document).into();
     }
+    remember_story_defaults(&mut redo, &session.document);
     apply_art_add(&redo, &mut session.document)?;
     let id = param_u64(&redo.params, "id")?;
     let story = param_u64(&redo.params, "story")?;
@@ -585,7 +642,7 @@ fn run_art_vertical(cmd: &Command, session: &mut Session) -> CommandResult {
 
 fn apply_art_add(cmd: &Command, doc: &mut Document) -> Result<(), CommandError> {
     let pos = param_pos(&cmd.params)?;
-    let size_pt = param_size_pt(&cmd.params)?;
+
     let text = param_text(&cmd.params);
     let object_id = ObjectId(param_u64(&cmd.params, "id")?);
     let story_id = StoryId(param_u64(&cmd.params, "story")?);
@@ -597,19 +654,22 @@ fn apply_art_add(cmd: &Command, doc: &mut Document) -> Result<(), CommandError> 
         text,
         ranges: Vec::new(), specials: Vec::new(), paras: Vec::new(),
     };
-    set_size_range(&mut story, size_pt);
+    style_new_story(&mut story, &cmd.params, doc)?;
     let vertical_art_text = cmd.params.get("vertical").map(|value| value.as_bool().ok_or_else(CommandError::invalid_params)).transpose()?.unwrap_or(false);
     let mut size = estimated_art_size(doc, &story);
     if vertical_art_text { size.swap(0, 1); }
+    let at_insertion = cmd.params.get("at_insertion").map(|value| value.as_bool().ok_or_else(CommandError::invalid_params)).transpose()?.unwrap_or(false);
+    let origin = if vertical_art_text && at_insertion { [pos[0] - size[0], pos[1]] } else { pos };
     let mut object = Object {
         id: object_id,
-        pos,
+        pos: origin,
         size,
         kind: ObjectKind::ArtText { story: story_id },
         vertical_art_text,
         name: story.text.clone(),
         ..Object::default()
     };
+    object.effects = crate::commands::defaults::effects_for_creation(doc, size, &cmd.params)?;
     crate::artboard::edit::assign_new_object(doc, &mut object, pos);
     doc.stories.push(story);
     let id = doc.create_object(object);
@@ -658,6 +718,8 @@ fn apply_insert(cmd: &Command, doc: &mut Document) -> Result<(), CommandError> {
     let story_id = StoryId(param_u64(&cmd.params, "story")?);
     let at = param_at(&cmd.params)?;
     let text = param_text(&cmd.params);
+    let inherit_cell_style = find_story(doc, story_id)?.ranges.is_empty()
+        && crate::table::resolve::story_cell(doc, story_id).is_some();
     let size_pt = {
         let story = find_story_mut(doc, story_id)?;
         let mut chars = story.text.chars();
@@ -672,7 +734,7 @@ fn apply_insert(cmd: &Command, doc: &mut Document) -> Result<(), CommandError> {
         let size_pt = size_pt_of(story, DEFAULT_SIZE_PT);
         shift_ranges_insert(&mut story.ranges, at, count);
         shift_specials_insert(&mut story.specials, at, count);
-        if story.ranges.is_empty() {
+        if story.ranges.is_empty() && !inherit_cell_style {
             set_size_range(story, size_pt);
         }
         size_pt
@@ -730,6 +792,7 @@ fn run_delete(cmd: &Command, session: &mut Session) -> CommandResult {
 fn apply_delete(cmd: &Command, doc: &mut Document) -> Result<(), CommandError> {
     let story_id = StoryId(param_u64(&cmd.params, "story")?);
     let (start, end) = param_range(&cmd.params)?;
+    let inherit_cell_style = crate::table::resolve::story_cell(doc, story_id).is_some();
     {
         let story = find_story_mut(doc, story_id)?;
         let size_pt = size_pt_of(story, DEFAULT_SIZE_PT);
@@ -738,7 +801,7 @@ fn apply_delete(cmd: &Command, doc: &mut Document) -> Result<(), CommandError> {
         shift_runs_delete(&mut story.paras, start, end, empty_paragraph);
         shift_runs_delete(&mut story.ranges, start, end, None);
         shift_specials_delete(&mut story.specials, start, end);
-        if story.ranges.is_empty() {
+        if story.ranges.is_empty() && !inherit_cell_style {
             set_size_range(story, size_pt);
         }
     }
@@ -1920,6 +1983,7 @@ fn apply_text_style(cmd: &Command, doc: &mut Document) -> Result<(), CommandErro
     let patch = cmd.params.get("patch").cloned().unwrap_or(Value::Null);
     let patch = patch.as_object().cloned().unwrap_or_default();
     let store = doc.text_styles.clone();
+    let inherit_cell_style = start == 0 && end == 0 && crate::table::resolve::story_cell(doc, story_id).is_some();
     let story = find_story_mut(doc, story_id)?;
     let apply_patch = |run: &mut Value| {
         let style_name = run.get("char_style").and_then(Value::as_str).map(str::to_string);
@@ -1982,7 +2046,8 @@ fn apply_text_style(cmd: &Command, doc: &mut Document) -> Result<(), CommandErro
     };
     if start == 0 && end == 0 && story.text.is_empty() {
         let mut initial = story.ranges.iter().rev().find(|run| is_char_style_run(run)).cloned()
-            .unwrap_or_else(|| json!({ "start": 0, "end": 0, "size_pt": DEFAULT_SIZE_PT }));
+            .unwrap_or_else(|| if inherit_cell_style { json!({ "start": 0, "end": 0 }) }
+                else { json!({ "start": 0, "end": 0, "size_pt": DEFAULT_SIZE_PT }) });
         apply_patch(&mut initial);
         story.ranges.retain(|run| !is_char_style_run(run));
         story.ranges.push(initial);
@@ -2073,6 +2138,7 @@ fn run_text_style_query(cmd: &Command, session: &mut Session) -> CommandResult {
     let story_id = StoryId(param_u64(&cmd.params, "story")?);
     let (start, end) = param_range(&cmd.params)?;
     let story = find_story(&session.document, story_id)?;
+    let story = crate::table::resolve::effective_story(&session.document, story);
 
     let mut family = StyleMix::Empty;
     let mut style = StyleMix::Empty;
@@ -2823,6 +2889,7 @@ fn run_para_set(cmd: &Command, session: &mut Session) -> CommandResult {
 fn run_para_query(cmd: &Command, session: &mut Session) -> CommandResult {
     let story_id = StoryId(param_u64(&cmd.params, "story")?);
     let story = find_story(&session.document, story_id)?;
+    let story = crate::table::resolve::effective_story(&session.document, story);
     let (start, end) = param_para_range(&cmd.params, scalar_len(&story.text))?;
     let style = query_para_style(&story.paras, start, end);
     Ok(json!({

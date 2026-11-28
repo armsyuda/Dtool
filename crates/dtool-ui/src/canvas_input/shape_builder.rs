@@ -2,6 +2,7 @@ use dtool_core::boolean::{shape_builder_regions, SHAPE_BUILDER_APPLY};
 use dtool_core::object::ObjectId;
 use dtool_core::scene::Scene;
 use dtool_core::scene_hit::{hit_test_in_view, HIT_TOLERANCE_PX};
+use dtool_core::selection::{selection_marquee_projected, MarqueeArgs, MarqueeMode, SelectOp};
 use dtool_core::Session;
 use dtool_protocol::Command;
 use egui::{pos2, Event, PointerButton, Pos2, Rect, Response, Stroke, Ui};
@@ -68,21 +69,19 @@ impl Region {
             .or_else(|| self.contains(end).then_some(1.0))
     }
 
-    fn intersects(&self, rect: Rect) -> bool {
-        if !self.bounds.intersects(rect) {
+    fn intersects(&self, corners: &[Pos2; 4]) -> bool {
+        if !self.bounds.intersects(Rect::from_points(corners)) {
             return false;
         }
-        let corners = [
-            rect.left_top(),
-            rect.right_top(),
-            rect.right_bottom(),
-            rect.left_bottom(),
-        ];
-        corners
-            .iter()
-            .enumerate()
-            .any(|(index, p)| self.crossing(*p, corners[(index + 1) % 4]).is_some())
-            || self.rings.iter().flatten().any(|p| rect.contains(*p))
+        let edges = || corners.iter().copied().zip(corners.iter().copied().cycle().skip(1)).take(4);
+        edges().any(|(a, b)| self.crossing(a, b).is_some())
+            || ((corners[0] - corners[1]).length_sq() > 0.0
+                && (corners[0] - corners[3]).length_sq() > 0.0
+                && self.rings.iter().flatten().any(|p| edges().all(|(a, b)| {
+                    let edge = b - a;
+                    let offset = *p - a;
+                    edge.x * offset.y >= edge.y * offset.x
+                })))
     }
 }
 
@@ -157,9 +156,14 @@ impl ShapeBuilder {
         self.sync(session, stamp);
         let selecting = self.regions.is_empty();
         if selecting {
+            let hint = if self.targets.len() < 2 {
+                "tool.shape_builder.select_hint"
+            } else {
+                "tool.shape_builder.eligible_hint"
+            };
             response
                 .clone()
-                .on_hover_text(dtool_strings::text("tool.shape_builder.select_hint"));
+                .on_hover_text(dtool_strings::text(hint));
         }
         let doc_point = |p| {
             let [x, y] = to_doc(p);
@@ -195,19 +199,18 @@ impl ShapeBuilder {
                             (_, Some("line")) => DragMethod::Line,
                             _ => DragMethod::Freehand,
                         };
-                        let start = doc_point(pos);
                         let mut gesture = Gesture {
                             method,
-                            start,
-                            end: start,
+                            start: pos,
+                            end: pos,
                             picked: Vec::new(),
                         };
-                        gesture.track(start, &self.regions);
+                        gesture.track(pos, &self.regions, &doc_point);
                         self.gesture = Some(gesture);
                     }
                     Event::PointerMoved(p) => {
                         if let Some(gesture) = &mut self.gesture {
-                            gesture.track(doc_point(p), &self.regions);
+                            gesture.track(p, &self.regions, &doc_point);
                         }
                     }
                     Event::PointerButton {
@@ -217,11 +220,12 @@ impl ShapeBuilder {
                         modifiers,
                     } => {
                         if let Some(mut gesture) = self.gesture.take() {
-                            gesture.track(doc_point(pos), &self.regions);
+                            gesture.track(pos, &self.regions, &doc_point);
                             if selecting {
-                                return select_objects(session, scene, &gesture, modifiers.shift);
+                                return select_objects(session, scene, response.rect, &gesture, doc_point(pos), modifiers.shift);
                             }
-                            return self.command(session, gesture, modifiers.alt);
+                            let start = doc_point(gesture.start);
+                            return self.command(session, gesture, start, modifiers.alt);
                         }
                     }
                     _ => {}
@@ -238,7 +242,7 @@ impl ShapeBuilder {
         command
     }
 
-    fn command(&self, session: &Session, gesture: Gesture, alt: bool) -> Option<Command> {
+    fn command(&self, session: &Session, gesture: Gesture, start: Pos2, alt: bool) -> Option<Command> {
         let mut areas = gesture.picked;
         if areas.is_empty() {
             return None;
@@ -250,7 +254,7 @@ impl ShapeBuilder {
             choice("shape_builder.action").unwrap_or_else(|| "add".into())
         };
         let cleanup = choice("shape_builder.cleanup").unwrap_or_else(|| "none".into());
-        let first_area = areas.iter().position(|&index| self.regions[index].contains(gesture.start));
+        let first_area = areas.iter().position(|&index| self.regions[index].contains(start));
         let first_style = first_area.is_some()
             && session.tool_options.flag(TOOL, "shape_builder.first_style").unwrap_or(true);
         if let Some(start) = first_area.filter(|_| first_style) {
@@ -286,8 +290,7 @@ impl ShapeBuilder {
             }
         }
         if let Some(gesture) = &self.gesture {
-            let start = to_screen(gesture.start);
-            let end = to_screen(gesture.end);
+            let (start, end) = (gesture.start, gesture.end);
             match gesture.method {
                 DragMethod::Line => {
                     painter.line_segment([start, end], stroke);
@@ -309,44 +312,48 @@ impl ShapeBuilder {
 fn select_objects(
     session: &Session,
     scene: &Scene,
+    canvas: Rect,
     gesture: &Gesture,
+    point: Pos2,
     shift: bool,
 ) -> Option<Command> {
     let tolerance = HIT_TOLERANCE_PX / session.view.zoom.max(1e-4);
-    if gesture.start.distance(gesture.end) < tolerance {
+    if gesture.start.distance(gesture.end) < HIT_TOLERANCE_PX {
         let hit = hit_test_in_view(
             scene,
             session,
-            [gesture.end.x, gesture.end.y],
+            [point.x, point.y],
             tolerance,
             None,
         );
         return click_select_command(hit, &session.selection.ids, shift);
     }
     let area = Rect::from_two_pos(gesture.start, gesture.end);
-    let mode = if gesture.end.x >= gesture.start.x {
-        "Enclosed"
-    } else {
-        "Touch"
-    };
-    let op = if shift { "Add" } else { "Replace" };
-    Some(Command::with_params(
-        "selection.marquee",
-        json!({
-            "rect": [area.min.x, area.min.y, area.width(), area.height()], "mode": mode, "op": op,
-        }),
-    ))
+    let mode = if gesture.end.x >= gesture.start.x { MarqueeMode::Enclosed } else { MarqueeMode::Touch };
+    let op = if shift { SelectOp::Add } else { SelectOp::Replace };
+    let selection = selection_marquee_projected(
+        &session.document,
+        MarqueeArgs { rect: [area.min.x, area.min.y, area.width(), area.height()], mode, op },
+        &session.selection,
+        &session.view.canvas_flags,
+        |point| {
+            let p = screen(canvas, &session.view, point);
+            [p.x, p.y]
+        },
+    );
+    (selection.ids != session.selection.ids).then(|| Command::with_params("selection.set", json!({ "ids": selection.ids })))
 }
 
 impl Gesture {
-    fn track(&mut self, point: Pos2, regions: &[Region]) {
+    fn track(&mut self, point: Pos2, regions: &[Region], to_doc: impl Fn(Pos2) -> Pos2) {
         match self.method {
             DragMethod::Marquee => {
                 let rect = Rect::from_two_pos(self.start, point);
+                let corners = [rect.left_top(), rect.right_top(), rect.right_bottom(), rect.left_bottom()].map(&to_doc);
                 self.picked = regions
                     .iter()
                     .enumerate()
-                    .filter(|(_, region)| region.intersects(rect))
+                    .filter(|(_, region)| region.intersects(&corners))
                     .map(|(index, _)| index)
                     .collect();
             }
@@ -362,7 +369,7 @@ impl Gesture {
                     .iter()
                     .enumerate()
                     .filter(|(index, _)| !self.picked.contains(index))
-                    .filter_map(|(index, region)| region.crossing(start, point).map(|t| (index, t)))
+                    .filter_map(|(index, region)| region.crossing(to_doc(start), to_doc(point)).map(|t| (index, t)))
                     .collect();
                 crossed.sort_by(|a, b| a.1.total_cmp(&b.1));
                 self.picked

@@ -57,7 +57,7 @@ fn shape_captions_number_figures_below_and_undo_redo() {
 #[test]
 fn image_caption_uses_the_file_name_and_rejects_non_images() {
     let mut ws = live();
-    let image = add(&mut ws, Object { pos: [0.0, 0.0], size: [64.0, 48.0], fill: Paint::Bitmap(BitmapPaint { resource_id: "photos/cat.png".into(), matrix: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0], seed: None }), ..Object::default() });
+    let image = add(&mut ws, Object { pos: [0.0, 0.0], size: [64.0, 48.0], fill: Paint::Bitmap(BitmapPaint { resource_id: "photos/cat.png".into(), matrix: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0], seed: None, single_image: false }), ..Object::default() });
     let shape = add(&mut ws, Object { pos: [0.0, 100.0], size: [10.0, 10.0], ..Object::default() });
     let value = run(&mut ws, "caption.add", json!({ "owner": image, "settings": { "from_name": true } }));
     assert_eq!(text(&node(&ws, &value)), "cat.png");

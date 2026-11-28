@@ -98,19 +98,26 @@ impl Options {
     }
 
     pub(super) fn show_kind(&mut self, ui: &mut Ui, icons: &mut crate::icon_cache::IconCache) -> bool {
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             let previous = self.kind;
             let choices = [
                 (DocumentKind::VectorArtboard, "tool-artboard", "dialog.new_document.kind.vector_artboard"),
                 (DocumentKind::LayoutPages, "persona-layout", "dialog.new_document.kind.layout_pages"),
             ];
             for (kind, icon, label) in choices {
-                if icons.studio_button(ui, icon, text(label), self.kind == Some(kind)).clicked() {
-                    self.kind = Some(kind);
-                }
-            }
-            if let Some((_, _, label)) = choices.into_iter().find(|(kind, _, _)| self.kind == Some(*kind)) {
-                ui.label(text(label));
+                let selected = self.kind == Some(kind);
+                let title = text(label);
+                let icon = icons.themed_texture(ui.ctx(), icon, dtool_design::icon_texture_px(ui));
+                let button = if let Some(texture) = icon.as_ref() {
+                    egui::Button::image_and_text(egui::Image::new(texture).fit_to_exact_size(egui::Vec2::splat(16.0)), title)
+                } else {
+                    egui::Button::new(title)
+                };
+                let response = dtool_design::with_dialog_choice(ui, |ui| {
+                    ui.add(button.selected(selected).min_size(egui::vec2(0.0, dtool_design::size("control.hit_size"))))
+                });
+                response.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, ui.is_enabled(), selected, title));
+                if response.clicked() { self.kind = Some(kind); }
             }
             self.kind != previous
         }).inner

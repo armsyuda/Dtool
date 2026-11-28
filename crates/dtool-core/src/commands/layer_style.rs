@@ -4,6 +4,7 @@ use crate::layer_style::{default_effect_for, BlendRanges, EffectKind, LayerEffec
 use crate::object::{Object, ObjectKind};
 use crate::ObjectId;
 use dtool_protocol::{Command, CommandError, CommandResult};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::sync::{Mutex, MutexGuard};
 
@@ -15,6 +16,7 @@ pub const EFFECT_REMOVE: &str = "effect.remove";
 pub const EFFECT_LIST: &str = "effect.list";
 pub const EFFECT_PREVIEW: &str = "effect.preview";
 pub const EFFECT_CANCEL: &str = "effect.cancel";
+const RESTORE_STYLE: &str = "layer.style.history.restore";
 
 pub const NAMES: [&str; 8] = [BLEND_SET, BLEND_RANGES_SET, EFFECT_ADD, EFFECT_UPDATE, EFFECT_REMOVE, EFFECT_LIST, EFFECT_PREVIEW, EFFECT_CANCEL];
 
@@ -96,7 +98,7 @@ fn target<'a>(session: &'a Session, command: &Command) -> Result<&'a Object, Com
 
 fn writable<'a>(session: &'a Session, command: &Command) -> Result<&'a Object, CommandError> {
     let object = target(session, command)?;
-    if object.locked {
+    if session.document.is_object_locked(object) {
         return Err(CommandError::new("LOCKED"));
     }
     Ok(object)
@@ -164,16 +166,38 @@ fn preview_effect(object: &Object, params: &Value) -> Result<(Option<usize>, Lay
     Ok((slot, effect))
 }
 
-fn next_object(object: &Object, command: &Command) -> Result<(Object, Value), CommandError> {
+#[derive(PartialEq, Serialize, Deserialize)]
+struct LayerStyle {
+    blend_mode: BlendMode,
+    blend_ranges: Option<BlendRanges>,
+    effects: Vec<LayerEffect>,
+}
+
+impl LayerStyle {
+    fn from_object(object: &Object) -> Self {
+        Self {
+            blend_mode: object.blend_mode,
+            blend_ranges: object.blend_ranges.clone(),
+            effects: object.effects.clone(),
+        }
+    }
+
+    fn install(self, object: &mut Object) {
+        object.blend_mode = self.blend_mode;
+        object.blend_ranges = self.blend_ranges;
+        object.effects = self.effects;
+    }
+}
+
+fn change_style(style: &mut LayerStyle, object: &Object, command: &Command) -> Result<Value, CommandError> {
     let params = &command.params;
-    let mut next = object.clone();
     let extra = match command.name.as_str() {
         BLEND_SET => {
-            next.blend_mode = parse_mode(object, params)?;
+            style.blend_mode = parse_mode(object, params)?;
             json!({"id": object.id.0})
         }
         BLEND_RANGES_SET => {
-            next.blend_ranges = parse_ranges(params)?;
+            style.blend_ranges = parse_ranges(params)?;
             json!({"id": object.id.0})
         }
         EFFECT_ADD => {
@@ -184,28 +208,29 @@ fn next_object(object: &Object, command: &Command) -> Result<(Object, Value), Co
             if params.get("kind").is_some() && parse_kind(params)? != effect.kind {
                 return Err(CommandError::invalid_params());
             }
-            next.effects.push(effect);
-            json!({"id": object.id.0, "index": next.effects.len() - 1})
+            style.effects.push(effect);
+            json!({"id": object.id.0, "index": style.effects.len() - 1})
         }
         EFFECT_UPDATE => {
             let slot = index(params)?;
-            let current = object.effects.get(slot).ok_or_else(CommandError::invalid_params)?;
-            next.effects[slot] = updated(current, params)?;
+            let current = style.effects.get_mut(slot).ok_or_else(CommandError::invalid_params)?;
+            *current = updated(current, params)?;
             json!({"id": object.id.0, "index": slot})
         }
         EFFECT_REMOVE => {
             let slot = index(params)?;
-            if slot >= next.effects.len() {
+            if slot >= style.effects.len() {
                 return Err(CommandError::invalid_params());
             }
-            next.effects.remove(slot);
+            style.effects.remove(slot);
             json!({"id": object.id.0, "index": slot})
         }
         _ => return Err(CommandError::invalid_params()),
     };
-    Ok((next, extra))
+    Ok(extra)
 }
 
+#[cfg(test)]
 fn same_style(a: &Object, b: &Object) -> bool {
     a.blend_mode == b.blend_mode && a.blend_ranges == b.blend_ranges && a.effects == b.effects
 }
@@ -218,7 +243,10 @@ fn plan(session: &Session, command: &Command) -> Result<(), CommandError> {
             let object = writable(session, command)?;
             match preview_set(&command.params)? { Some(_) => Ok(()), None => preview_effect(object, &command.params).map(|_| ()) }
         },
-        _ => next_object(writable(session, command)?, command).map(|_| ()),
+        _ => {
+            let object = writable(session, command)?;
+            change_style(&mut LayerStyle::from_object(object), object, command).map(|_| ())
+        }
     }
 }
 
@@ -227,19 +255,77 @@ pub fn can_execute(session: &Session, command: &Command) -> Option<bool> {
 }
 
 fn commit(session: &mut Session, command: &Command) -> CommandResult {
-    let object = writable(session, command)?.clone();
-    let (next, extra) = next_object(&object, command)?;
-    if same_style(&object, &next) {
-        return Ok(json!({"id": object.id.0, "doc_version": session.generation, "changes": []}));
+    let object = writable(session, command)?;
+    let id = object.id;
+    let before = LayerStyle::from_object(object);
+    let mut after = LayerStyle::from_object(object);
+    let mut result = change_style(&mut after, object, command)?;
+    if before == after {
+        return Ok(json!({"id": id.0, "doc_version": session.generation, "changes": []}));
     }
-    clear_staged(session, object.id);
-    let mut document = session.document.clone();
-    if let Some(slot) = document.objects.iter_mut().find(|item| item.id == object.id) {
-        *slot = next;
+    commit_style(session, &command.name, id, before, after)?;
+    result["doc_version"] = json!(session.generation);
+    result["changes"] = json!([{"name": command.name}]);
+    Ok(result)
+}
+
+fn is_style_edit(command: &Command) -> bool {
+    matches!(command.name.as_str(), BLEND_SET | BLEND_RANGES_SET | EFFECT_ADD | EFFECT_UPDATE | EFFECT_REMOVE)
+}
+
+fn install_style(session: &mut Session, id: ObjectId, style: LayerStyle) -> Result<(), CommandError> {
+    let object = session.document.objects.iter_mut().find(|object| object.id == id)
+        .ok_or_else(CommandError::not_found)?;
+    style.install(object);
+    clear_staged(session, id);
+    Ok(())
+}
+
+fn commit_style(session: &mut Session, name: &str, id: ObjectId, before: LayerStyle, after: LayerStyle) -> Result<(), CommandError> {
+    let restore = |style: &LayerStyle| Command::with_params(RESTORE_STYLE, json!({
+        "id": id, "style": style, "selection": session.selection.ids,
+    }));
+    let undo = restore(&before);
+    let redo = restore(&after);
+    install_style(session, id, after)?;
+    session.undo.push(crate::undo::Change { name: name.to_owned(), redo, undo });
+    session.generation += 1;
+    session.document.version += 1;
+    Ok(())
+}
+
+/// Stage a batch of edits to one layer without cloning the document for rollback.
+pub(crate) fn commit_batch(session: &mut Session, commands: &[Command]) -> Option<Result<(), CommandError>> {
+    let first = commands.first()?;
+    let id = object_id(&first.params).ok()?;
+    if !commands.iter().all(|cmd| is_style_edit(cmd) && object_id(&cmd.params).ok() == Some(id)) {
+        return None;
     }
-    let selection = session.selection.ids.clone();
-    let name = command.name.clone();
-    super::document_change::commit(session, &name, document, selection, extra)
+    Some((|| {
+        let object = writable(session, first)?;
+        let before = LayerStyle::from_object(object);
+        let mut after = LayerStyle::from_object(object);
+        for command in commands {
+            change_style(&mut after, object, command)?;
+        }
+        commit_style(session, "edit.batch", id, before, after)
+    })())
+}
+
+fn restore_style(session: &mut Session, command: &Command) -> Result<(), CommandError> {
+    #[derive(Deserialize)]
+    struct Restore {
+        id: ObjectId,
+        style: LayerStyle,
+        selection: Vec<ObjectId>,
+    }
+    let restore: Restore = serde_json::from_value(command.params.clone())
+        .map_err(|_| CommandError::invalid_params())?;
+    install_style(session, restore.id, restore.style)?;
+    session.selection.ids = restore.selection.into_iter()
+        .filter(|id| session.document.get_object(*id).is_some()).collect();
+    session.document.version += 1;
+    Ok(())
 }
 
 fn run_inner(session: &mut Session, command: &Command) -> CommandResult {
@@ -290,17 +376,17 @@ pub fn run(session: &mut Session, command: &Command) -> Option<CommandResult> {
 /// Blend/effect changes as edit.batch steps: mutate the document only; the batch owns the single undo entry
 /// (effects dialog OK = add + updates = one undo group). List/preview/cancel are not batch steps.
 pub fn apply(session: &mut Session, command: &Command) -> Option<Result<(), CommandError>> {
-    if !matches!(command.name.as_str(), BLEND_SET | BLEND_RANGES_SET | EFFECT_ADD | EFFECT_UPDATE | EFFECT_REMOVE) {
+    if command.name == RESTORE_STYLE {
+        return Some(restore_style(session, command));
+    }
+    if !is_style_edit(command) {
         return None;
     }
     Some((|| {
-        let object = writable(session, command)?.clone();
-        let (next, _) = next_object(&object, command)?;
-        clear_staged(session, object.id);
-        if let Some(slot) = session.document.objects.iter_mut().find(|item| item.id == object.id) {
-            *slot = next;
-        }
-        Ok(())
+        let object = writable(session, command)?;
+        let mut style = LayerStyle::from_object(object);
+        change_style(&mut style, object, command)?;
+        install_style(session, object.id, style)
     })())
 }
 

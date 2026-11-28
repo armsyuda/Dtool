@@ -40,19 +40,39 @@ pub fn jump(session: &mut Session, index: u64) -> bool {
     session.run_named("history.jump", json!({"index": index})).is_ok()
 }
 
+pub(crate) fn brush_source_button(ui: &mut egui::Ui, selected: bool) -> egui::Response {
+    let label = text("history.brush.source.set");
+    let state = dtool_design::ControlState::default().tooltip(label);
+    let icon = if selected { "◉" } else { "◎" };
+    let response = dtool_design::small_icon_button_with(ui, icon, &state);
+    response.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, ui.is_enabled(), selected, label));
+    response
+}
+
 impl HistoryPanel {
     pub fn show(&mut self, ui: &mut egui::Ui, session: &mut Session) {
         let rows = rows(session);
+        use dtool_core::history_store::BrushSource;
+        let source = session.history.brush_source.as_ref().map(|(source, _)| *source);
+        let mut set_source = None;
         let mut jump_to: Option<u64> = None;
         egui::ScrollArea::vertical().id_salt("history_rows").show(ui, |ui| {
             for row in &rows {
-                if row.current {
-                    ui.add_enabled_ui(false, |ui| { dtool_design::button(ui, row.label.clone()); });
-                } else if dtool_design::button(ui, row.label.clone()).clicked() {
-                    jump_to = Some(row.index);
-                }
+                ui.horizontal(|ui| {
+                    let selected = session.undo.history_step_id(row.index)
+                        .is_some_and(|id| source == Some(BrushSource::History(id)));
+                    if brush_source_button(ui, selected).clicked() { set_source = Some(row.index); }
+                    if row.current {
+                        ui.add_enabled_ui(false, |ui| { dtool_design::button(ui, row.label.clone()); });
+                    } else if dtool_design::button(ui, row.label.clone()).clicked() {
+                        jump_to = Some(row.index);
+                    }
+                });
             }
         });
+        if let Some(index) = set_source {
+            let _ = session.run_named(dtool_core::commands::history_menu::BRUSH_SOURCE_SET, json!({"index": index}));
+        }
         if let Some(index) = jump_to {
             jump(session, index);
         }

@@ -207,30 +207,35 @@ pub fn selectable_panels() -> Vec<PanelId> {
 }
 
 fn toolbar_editor(ui: &mut egui::Ui, items: &mut Vec<String>, mut icons: Option<&mut IconCache>) {
-    use crate::persona::TOOLBAR_ACTIONS;
+    use crate::{persona::TOOLBAR_ACTIONS, toolbar_catalog as catalog};
 
-    ui.label(text("studio.toolbar.current"));
+    ui.strong(text("studio.toolbar.current"));
     let (mut moved, mut removed) = (None, None);
     let mut added = None;
     let mut drag_rects = Vec::with_capacity(items.len());
-    for (index, item) in items.iter().enumerate() {
+    let multi_column = catalog::columns(ui, 194.0) > 1;
+    catalog::grid(ui, items.len(), 194.0, |ui, index| {
+        let item = &items[index];
         let spec = TOOLBAR_ACTIONS.iter().find(|(id, _, _)| *id == item);
         let label = spec.map_or(item.as_str(), |(_, _, key)| text(key));
         ui.horizontal(|ui| {
+            let title_width = (ui.available_width() - 88.0).max(1.0);
             let row = ui.horizontal(|ui| {
+                ui.set_width(title_width);
                 if let Some((_, icon, _)) = spec
                     && let Some(texture) = icons.as_deref_mut().and_then(|cache| cache.themed_texture(ui.ctx(), icon, dtool_design::icon_texture_px(ui))) {
                     ui.add(egui::Image::new(&texture).fit_to_exact_size(egui::Vec2::splat(16.0)));
                 }
-                ui.set_min_width(130.0);
-                ui.label(label);
+                let response = ui.add(egui::Label::new(label).truncate());
+                dtool_design::tooltip(response, label);
             });
             drag_rects.push(row.response.rect.intersect(ui.clip_rect()));
             if row.response.dnd_hover_payload::<ToolbarCatalogItem>().is_some() {
                 let rect = row.response.rect;
-                let after = ui.input(|input| input.pointer.hover_pos().is_some_and(|pos| pos.y >= rect.center().y));
-                let line_y = if after { rect.bottom() } else { rect.top() };
-                ui.painter().hline(rect.x_range(), line_y, egui::Stroke::new(2.0, ui.visuals().selection.bg_fill));
+                let after = ui.input(|input| input.pointer.hover_pos().is_some_and(|pos| {
+                    if multi_column { pos.x >= rect.center().x } else { pos.y >= rect.center().y }
+                }));
+                toolbar_insertion_line(ui, rect, after, multi_column);
                 if let Some(command) = row.response.dnd_release_payload::<ToolbarCatalogItem>() {
                     added = Some((index + usize::from(after), command.id));
                 }
@@ -246,7 +251,7 @@ fn toolbar_editor(ui: &mut egui::Ui, items: &mut Vec<String>, mut icons: Option<
                 removed = Some(index);
             }
         });
-    }
+    });
     let drag_key = ui.scope_id().with("toolbar.drag_start");
     let mut drag_start = ui.data(|data| data.get_temp::<usize>(drag_key));
     let (pointer, down, button_events) = ui.input(|input| {
@@ -273,8 +278,7 @@ fn toolbar_editor(ui: &mut egui::Ui, items: &mut Vec<String>, mut icons: Option<
     if let (Some(from), Some(to)) = (drag_start.filter(|_| down), pointer.and_then(row_at))
         && from != to {
         let row = drag_rects[to];
-        let y = if from < to { row.bottom() } else { row.top() };
-        ui.painter().hline(row.x_range(), y, egui::Stroke::new(2.0, ui.visuals().selection.bg_fill));
+        toolbar_insertion_line(ui, row, from < to, multi_column);
     }
     ui.data_mut(|data| {
         data.remove::<usize>(drag_key);
@@ -302,35 +306,80 @@ fn toolbar_editor(ui: &mut egui::Ui, items: &mut Vec<String>, mut icons: Option<
     }
 
     ui.separator();
-    ui.label(text("studio.toolbar.available"));
-    let search_id = ui.scope_id().with("toolbar.catalog.search");
-    let mut search = ui.data_mut(|data| data.get_temp_mut_or_default::<String>(search_id).clone());
-    ui.add(egui::TextEdit::singleline(&mut search).hint_text(text("pref.search")));
-    let filter = search.trim().to_lowercase();
-    ui.data_mut(|data| data.insert_temp(search_id, search));
-    for &(id, icon, key) in TOOLBAR_ACTIONS {
-        let label = text(key);
-        if !label.to_lowercase().contains(&filter) && !id.contains(&filter) { continue; }
-        let available = !items.iter().any(|item| item == id);
-        let texture = icons.as_deref_mut().and_then(|cache| cache.themed_texture(ui.ctx(), icon, dtool_design::icon_texture_px(ui)));
-        let button = match &texture {
-            Some(texture) => egui::Button::image_and_text(
-                egui::Image::new(texture).fit_to_exact_size(egui::Vec2::splat(17.0)), label),
-            None => egui::Button::new(label),
-        };
-        let response = ui.add_enabled(available, button.sense(egui::Sense::click_and_drag()));
-        let press_origin = ui.input(|input| {
-            input.pointer.primary_pressed().then(|| input.pointer.press_origin()).flatten()
-        });
-        if available && press_origin.is_some_and(|pos| {
-            response.interact_rect.contains(pos) && ui.ctx().layer_id_at(pos) == Some(ui.layer_id())
-        }) {
-            egui::DragAndDrop::set_payload(ui.ctx(), ToolbarCatalogItem { id, placed: false });
+    ui.strong(text("studio.toolbar.available"));
+    let (category, filter, changed) = catalog::filters(ui, "top.toolbar");
+    let mut scroll = egui::ScrollArea::vertical().id_salt("available.commands")
+        .max_height(ui.available_height().min(450.0).max(72.0))
+        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
+        .scroll_source(egui::scroll_area::ScrollSource::SCROLL_BAR | egui::scroll_area::ScrollSource::MOUSE_WHEEL);
+    if changed { scroll = scroll.vertical_scroll_offset(0.0); }
+    scroll.show(ui, |ui| {
+        let mut any_match = false;
+        for section in catalog::Category::SECTIONS.into_iter().filter(|&section| category.includes(section)) {
+            let (groups, singles): (Vec<_>, Vec<_>) = TOOLBAR_ACTIONS.iter().copied()
+                .filter(|&(id, _, key)| catalog::action_category(id) == section && catalog::matches(id, text(key), &filter))
+                .partition(|&(id, _, _)| crate::persona::toolbar_group(id).is_some());
+            if groups.is_empty() && singles.is_empty() { continue; }
+            if any_match {
+                ui.add_space(dtool_design::space("sm"));
+                ui.separator();
+            }
+            any_match = true;
+            ui.strong(section.label());
+            if !groups.is_empty() {
+                ui.label(text("toolbar.catalog.groups"));
+                catalog::grid(ui, groups.len(), 145.0, |ui, index| {
+                    toolbar_catalog_button(ui, items, &mut icons, groups[index]);
+                });
+                ui.add_space(dtool_design::space("sm"));
+            }
+            catalog::grid(ui, singles.len(), 145.0, |ui, index| {
+                toolbar_catalog_button(ui, items, &mut icons, singles[index]);
+            });
         }
-        if response.clicked() {
-            items.push(id.to_owned());
-        }
+        if !any_match { ui.label(text("toolbar.catalog.empty")); }
+    });
+}
+
+fn toolbar_insertion_line(ui: &egui::Ui, rect: egui::Rect, after: bool, horizontal: bool) {
+    let stroke = egui::Stroke::new(2.0, ui.visuals().selection.bg_fill);
+    if horizontal {
+        ui.painter().vline(if after { rect.right() } else { rect.left() }, rect.y_range(), stroke);
+    } else {
+        ui.painter().hline(rect.x_range(), if after { rect.bottom() } else { rect.top() }, stroke);
     }
+}
+
+fn toolbar_catalog_button(ui: &mut egui::Ui, items: &mut Vec<String>, icons: &mut Option<&mut IconCache>,
+    (id, icon, key): (&'static str, &'static str, &'static str),
+) {
+    let label = text(key);
+    let available = !items.iter().any(|item| item == id);
+    let texture = icons.as_deref_mut().and_then(|cache| cache.themed_texture(ui.ctx(), icon, dtool_design::icon_texture_px(ui)));
+    let button = match &texture {
+        Some(texture) => egui::Button::image_and_text(
+            egui::Image::new(texture).fit_to_exact_size(egui::Vec2::splat(17.0)), label),
+        None => egui::Button::new(label),
+    };
+    let response = ui.add_enabled(available, button.truncate().sense(egui::Sense::click_and_drag())
+        .min_size(egui::vec2(ui.available_width(), dtool_design::size("control.hit_size"))));
+    let press_origin = ui.input(|input| input.pointer.primary_pressed().then(|| input.pointer.press_origin()).flatten());
+    if available && press_origin.is_some_and(|pos| {
+        response.interact_rect.contains(pos) && ui.ctx().layer_id_at(pos) == Some(ui.layer_id())
+    }) {
+        egui::DragAndDrop::set_payload(ui.ctx(), ToolbarCatalogItem { id, placed: false });
+    }
+    if response.clicked() {
+        items.push(id.to_owned());
+    }
+    let tooltip = crate::persona::toolbar_group(id).map_or_else(|| label.to_owned(), |members| {
+        let names: Vec<_> = members.iter().filter_map(|member| {
+            crate::persona::TOOLBAR_ACTIONS.iter().find(|(id, _, _)| id == member)
+                .map(|(_, _, key)| text(key))
+        }).collect();
+        format!("{label}\n{}", names.join(" · "))
+    });
+    dtool_design::tooltip(response, tooltip.as_str()).on_disabled_hover_text(tooltip);
 }
 
 pub(crate) struct ToolbarCatalogItem {
@@ -612,14 +661,18 @@ impl StudioWindows {
             let mut open = true;
             let mut cancel = false;
             let viewport = ctx.content_rect();
-            let width = (viewport.width() - 32.0).clamp(1.0, 560.0);
-            let body_height = (viewport.height() - 180.0).clamp(64.0, 460.0);
+            let limit = (viewport.width() - 32.0).clamp(1.0, 900.0);
+            let width_id = egui::Id::new("studio.toolbar.catalog.width");
+            let width = crate::toolbar_catalog::window_width(ctx, width_id, limit, 760.0);
+            let body_height = (viewport.height() - 150.0).clamp(44.0, 560.0);
             let save = egui::Window::new(text("studio.toolbar.customise"))
-                .id(egui::Id::unique("studio.toolbar.window"))
-                .default_pos(egui::pos2(160.0, 125.0))
+                .id(egui::Id::new("studio.toolbar.catalog.window"))
+                .default_pos(viewport.min + egui::vec2(130.0, 88.0))
+                .default_width(width).min_width(width).max_width(width)
+                .resizable([false, true]).constrain_to(viewport).collapsible(false)
                 .open(&mut open)
                 .show(ctx, |ui| {
-                    ui.set_width(width);
+                    ui.spacing_mut().scroll.floating = false;
                     ui.label(text("studio.toolbar.drag_hint"));
                     use egui::scroll_area::ScrollSource;
                     egui::ScrollArea::vertical()
@@ -630,7 +683,7 @@ impl StudioWindows {
                         ui.colored_label(ui.visuals().error_fg_color, text(error));
                     }
                     ui.separator();
-                    ui.horizontal(|ui| {
+                    let buttons = ui.horizontal(|ui| {
                         if dtool_design::button(ui, text("pref.reset")).clicked() {
                             draft.items = crate::persona::DEFAULT_TOOLBAR.map(String::from).into();
                         }
@@ -639,7 +692,9 @@ impl StudioWindows {
                             cancel = dtool_design::button(ui, text("studio.editor.cancel")).clicked();
                             save
                         }).inner
-                    }).inner
+                    }).inner;
+                    crate::toolbar_catalog::resize_grip(ui, width_id, width, limit);
+                    buttons
                 }).and_then(|window| window.inner).unwrap_or(false);
             if save {
                 match crate::persona::save_toolbar(&draft.workspace, &draft.items) {

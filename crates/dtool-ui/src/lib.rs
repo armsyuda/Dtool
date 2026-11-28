@@ -11,6 +11,7 @@ mod pdf_import_dialog;
 pub mod picture_frame_bar;
 pub mod canvas_input;
 mod brush_editor;
+mod brush_quick_settings;
 mod compound_canvas;
 pub mod canvas_tools;
 pub mod canvas_curves;
@@ -24,6 +25,8 @@ pub mod context {
     pub mod text_bar;
 }
 pub mod context_bar;
+mod contour_tool;
+mod corner_tool;
 mod rounded_corners;
 mod qr_editor;
 mod artboard_bar;
@@ -55,6 +58,7 @@ pub mod presets;
 pub mod print;
 pub mod print_dialog;
 pub mod settings;
+mod pie_menu;
 pub mod shortcut_commands;
 pub mod shortcuts;
 pub mod shortcuts_page;
@@ -252,6 +256,7 @@ pub mod shell;
 
 pub mod shape_flyout;
 pub mod tools_panel;
+mod toolbar_catalog;
 
 pub mod persona;
 pub mod batch_dialog;

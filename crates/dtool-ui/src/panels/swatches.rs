@@ -325,7 +325,7 @@ impl SwatchesPanel {
         colour_panel.sync(workspace);
         let editable = workspace.session().is_some_and(|session| {
             session.has_document && session.selection.ids.iter().all(|id| {
-                session.document.get_object(*id).is_some_and(|object| !object.locked)
+                session.document.get_object(*id).is_some_and(|object| !session.document.is_object_locked(object))
             })
         });
         let mut quick_paint = None;

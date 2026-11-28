@@ -45,6 +45,8 @@ pub(crate) struct Editor {
     preset: Option<String>,
     activate_tool: bool,
     tip: BrushTip,
+    initial: BrushTip,
+    save_as: Option<String>,
     tab: Tab,
     channel: usize,
     sub_index: usize,
@@ -67,9 +69,10 @@ impl Editor {
         let mut params = json!({"tool": tool});
         if let Some(id) = &preset { params["id"] = json!(id); }
         let reply = workspace.run(Scope::active(), Command::with_params(EDITOR_QUERY, params)).1?;
-        let tip = serde_json::from_value(reply["tip"].clone()).map_err(|_| CommandError::invalid_params())?;
+        let tip: BrushTip = serde_json::from_value(reply["tip"].clone()).map_err(|_| CommandError::invalid_params())?;
         Ok(Self {
-            owner, tool, tip, activate_tool, preset: preset.filter(|id| !pixel_presets::builtin(id)),
+            owner, tool, initial: tip.clone(), tip, save_as: None,
+            activate_tool, preset: preset.filter(|id| !pixel_presets::builtin(id)),
             tab: Tab::General, channel: 0, dragged: None, inherited_wet_edges, inactive_wet_curve: None,
             sub_index: 0, sub_search: String::new(), preview: None, error: None,
         })
@@ -79,13 +82,13 @@ impl Editor {
         if workspace.active() != Some(self.owner) {
             return true;
         }
-        let (close, buttons) = show_modal(ctx, "dtool.pixel_brush_editor", text("brush_editor.title"), ClosePolicy::CancelOnly, false, |ui| {
-            let width = 420.0_f32.min((ui.ctx().content_rect().width() - 44.0).max(180.0));
+        let title = format!("{} · {}", text("brush_editor.title"), crate::panels::pixel_brushes::tip_label(&self.tip));
+        let (close, buttons) = show_modal(ctx, "dtool.pixel_brush_editor", &title, ClosePolicy::CancelOnly, false, |ui| {
+            let width = (ui.ctx().content_rect().width() - 46.0).clamp(160.0, 640.0);
             ui.set_width(width);
-            ui.label(crate::panels::pixel_brushes::tip_label(&self.tip));
             self.show_preview(ui);
             let tab_before = self.tab;
-            ui.horizontal_wrapped(|ui| {
+            dtool_design::with_icon_selection(ui, |ui| ui.horizontal_wrapped(|ui| {
                 ui.selectable_value(&mut self.tab, Tab::General, text("brush_editor.general"));
                 ui.selectable_value(&mut self.tab, Tab::Dynamics, text("brush_editor.dynamics"));
                 if self.tip.texture.is_some() {
@@ -97,11 +100,15 @@ impl Editor {
                 if dtool_core::commands::pixel_brush::operation(&self.tool) == Some(BrushOp::Paint) {
                     ui.selectable_value(&mut self.tab, Tab::WetEdges, text("brush.wet_edges"));
                 }
-            });
+            }));
             if self.tab != tab_before { self.dragged = None; }
             ui.separator();
-            let height = (ui.ctx().content_rect().height() - 230.0).clamp(120.0, 250.0);
-            egui::ScrollArea::vertical().max_height(height).show(ui, |ui| {
+            let max_options = match self.tab {
+                Tab::General if width >= 350.0 => 238.0,
+                _ => 390.0,
+            };
+            let height = (ui.ctx().content_rect().height() * 0.67 - 155.0).clamp(45.0, max_options);
+            crate::dialog_chrome::options_scroll(ui, "pixel_brush_editor.options", height, |ui| {
                 match self.tab {
                     Tab::General => self.show_general(ui),
                     Tab::Dynamics => self.show_dynamics(ui),
@@ -114,11 +121,24 @@ impl Editor {
                 ui.colored_label(ui.visuals().error_fg_color, text(error));
             }
             ui.separator();
-            ui.horizontal(|ui| {
-                let apply = ui.button(text("button.apply")).clicked();
-                let cancel = ui.button(text("dialog.cancel")).clicked();
-                (apply, cancel)
-            }).inner
+            ui.horizontal_wrapped(|ui| {
+                let reset = dtool_design::button_with(ui, text("brush_editor.reset"),
+                    &dtool_design::ControlState::enabled(self.tip != self.initial));
+                if reset.clicked() {
+                    self.tip.clone_from(&self.initial);
+                    self.inactive_wet_curve = None;
+                }
+                if self.save_as.is_none() && dtool_design::button(ui, text("brush_editor.save_as")).clicked() {
+                    self.save_as = Some(String::new());
+                }
+            });
+            if let Some(name) = &mut self.save_as {
+                ui.add(egui::TextEdit::singleline(name).hint_text(text("brush_editor.preset_name")).desired_width(ui.available_width()));
+            }
+            crate::dialog_chrome::confirm_cancel_buttons(
+                ui, text(if self.save_as.is_some() { "menu.file.save" } else { "button.apply" }),
+                self.save_as.as_ref().is_none_or(|name| !name.trim().is_empty()),
+            )
         });
         if buttons.1 || close == DialogResult::Cancel {
             return true;
@@ -127,7 +147,11 @@ impl Editor {
             return false;
         }
         let mut params = json!({"tool": self.tool, "tip": self.tip});
-        if let Some(id) = &self.preset { params["id"] = Value::String(id.clone()); }
+        if let Some(name) = &self.save_as {
+            params["save_as"] = json!(name.trim());
+        } else if let Some(id) = &self.preset {
+            params["id"] = Value::String(id.clone());
+        }
         match workspace.run(Scope::active(), Command::with_params(EDITOR_SET, params)).1 {
             Ok(_) => {
                 if self.activate_tool && let Some(session) = workspace.session_mut() {
@@ -140,51 +164,39 @@ impl Editor {
     }
 
     fn show_general(&mut self, ui: &mut Ui) {
-        ui.spacing_mut().slider_width = (ui.available_width() - 160.0).max(70.0);
         let textured = self.tip.image.is_some();
-        egui::Grid::new("brush_editor.general").num_columns(2).spacing([14.0, 6.0]).show(ui, |ui| {
-            let label = ui.label(text("brush_editor.accumulation"));
-            let mut accumulation = self.tip.accumulation.unwrap_or(1.0) * 100.0;
-            if ui.add(egui::Slider::new(&mut accumulation, 0.0..=100.0).suffix("%").max_decimals(1))
-                .labelled_by(label.id).changed()
-            {
-                self.tip.accumulation = Some(accumulation / 100.0);
+        let mut accumulation = self.tip.accumulation.unwrap_or(1.0) * 100.0;
+        let controls = [
+            ("context.brush.width", &mut self.tip.size_px, 1.0..=2048.0, 1.0, " px"),
+            ("brush_editor.accumulation", &mut accumulation, 0.0..=100.0, 1.0, "%"),
+            ("context.brush.opacity", &mut self.tip.opacity, 0.0..=100.0, 100.0, "%"),
+            ("context.brush.hardness", &mut self.tip.hardness, 0.0..=100.0, 100.0, "%"),
+            ("brush_editor.spacing", &mut self.tip.spacing, 1.0..=999.0, 100.0, "%"),
+            ("context.brush.flow", &mut self.tip.flow, 0.0..=100.0, 100.0, "%"),
+            ("brush_editor.roundness", &mut self.tip.roundness, 1.0..=100.0, 100.0, "%"),
+            ("brush_editor.rotation", &mut self.tip.rotation, -180.0..=180.0, 1.0, "°"),
+        ];
+        let mut accumulation_changed = false;
+        for (key, value, range, scale, suffix) in controls {
+            let mut display = *value * scale;
+            let enabled = key != "context.brush.hardness" || !textured;
+            if brush_control(ui, key, &mut display, range, 0.1, suffix, enabled, None, false) {
+                *value = display / scale;
+                accumulation_changed |= key == "brush_editor.accumulation";
             }
-            ui.end_row();
-            let round_tip = self.tip.kind == TipKind::Round;
-            let controls = [
-                ("context.brush.width", &mut self.tip.size_px, 1.0..=2048.0, 1.0, " px"),
-                ("context.brush.opacity", &mut self.tip.opacity, 0.0..=100.0, 100.0, "%"),
-                ("context.brush.flow", &mut self.tip.flow, 0.0..=100.0, 100.0, "%"),
-                ("context.brush.hardness", &mut self.tip.hardness, 0.0..=100.0, 100.0, "%"),
-                ("brush_editor.spacing", &mut self.tip.spacing, 1.0..=999.0, 100.0, "%"),
-                ("brush_editor.roundness", &mut self.tip.roundness, 1.0..=100.0, 100.0, "%"),
-                ("brush_editor.rotation", &mut self.tip.rotation, -180.0..=180.0, 1.0, "°"),
-            ];
-            for (key, value, range, scale, suffix) in controls {
-                let label = ui.label(text(key));
-                let mut display = *value * scale;
-                let enabled = (key != "context.brush.hardness" || !textured)
-                    && (key != "brush_editor.roundness" || round_tip);
-                let changed = ui.add_enabled(enabled,
-                    egui::Slider::new(&mut display, range).suffix(suffix).max_decimals(1)
-                        .logarithmic(matches!(key, "context.brush.width" | "brush_editor.spacing")))
-                    .labelled_by(label.id).changed();
-                if changed { *value = display / scale; }
-                ui.end_row();
-            }
+        }
+        if accumulation_changed { self.tip.accumulation = Some(accumulation / 100.0); }
+        crate::dialog_chrome::options_divider(ui);
+        ui.horizontal_wrapped(|ui| {
             let shape = ui.label(text("brush_editor.shape"));
-            ui.horizontal(|ui| {
-                let choices = if textured {
-                    [(TipKind::Image, "brush_editor.image"), (TipKind::Intensity, "brush_editor.intensity")]
-                } else {
-                    [(TipKind::Round, "brush_editor.round"), (TipKind::Square, "brush_editor.square")]
-                };
-                for (kind, key) in choices {
-                    ui.selectable_value(&mut self.tip.kind, kind, text(key)).labelled_by(shape.id);
-                }
-            });
-            ui.end_row();
+            let choices = if textured {
+                [(TipKind::Image, "brush_editor.image"), (TipKind::Intensity, "brush_editor.intensity")]
+            } else {
+                [(TipKind::Round, "brush_editor.round"), (TipKind::Square, "brush_editor.square")]
+            };
+            for (kind, key) in choices {
+                ui.selectable_value(&mut self.tip.kind, kind, text(key)).labelled_by(shape.id);
+            }
         });
     }
 
@@ -465,7 +477,8 @@ impl Editor {
             }
         }
         if let Some((_, texture)) = &self.preview {
-            let size = Vec2::new(ui.available_width(), 60.0);
+            let height = (ui.ctx().content_rect().height() * 0.14).clamp(28.0, 116.0);
+            let size = Vec2::new(ui.available_width(), height);
             let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
             ui.painter().rect_filled(rect, 3.0, ui.visuals().extreme_bg_color);
             ui.painter().image(texture.id(), rect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
@@ -541,6 +554,50 @@ fn sub_brush_button(ui: &mut Ui, enabled: bool, icon: &str, key: &str) -> bool {
     let response = ui.add_enabled(enabled, egui::Button::new(icon).small()).on_hover_text(label);
     response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, label));
     response.clicked()
+}
+
+pub(crate) fn brush_control(
+    ui: &mut Ui, key: &str, value: &mut f32, range: std::ops::RangeInclusive<f32>, step: f64,
+    suffix: &str, enabled: bool, default: Option<f64>, stacked: bool,
+) -> bool {
+    use dtool_design::{NumericEvent, NumericSpec, NumericValue};
+    let label = text(key);
+    let before = *value;
+    let stacked = stacked || ui.available_width() < 348.0;
+    let mut row = |ui: &mut Ui| {
+        let input_width = 76.0;
+        let width = (ui.available_width() - input_width - ui.spacing().item_spacing.x - 1.0).max(20.0);
+        let slider = ui.scope(|ui| {
+            ui.visuals_mut().selection.bg_fill = dtool_design::color("selection.ants");
+            if matches!(key, "context.brush.width" | "brush_editor.spacing") {
+                dtool_design::logarithmic_slider_rail(ui, value, range.clone(), width, label, enabled, 1.0)
+            } else {
+                dtool_design::slider_rail(ui, value, range.clone(), width, label, enabled)
+            }
+        }).inner;
+        let id = ui.make_persistent_id(key);
+        let mut spec = NumericSpec::new("").range(f64::from(*range.start())..=f64::from(*range.end()))
+            .suffix(suffix).width(input_width).step(step).decimals(1).enabled(enabled);
+        if let Some(default) = default { spec = spec.reset_to(default); }
+        let start = dtool_design::numeric_state(ui.ctx(), id).start;
+        let (field, event) = dtool_design::numeric_field(ui, id, NumericValue::Value((*value).into()), &spec);
+        field.labelled_by(slider.id);
+        match event {
+            NumericEvent::Preview(next) | NumericEvent::Commit(next) => *value = next as f32,
+            NumericEvent::Cancel => { if let Some(start) = start { *value = start as f32; } }
+            NumericEvent::None => {}
+        }
+    };
+    if stacked {
+        ui.label(label);
+        ui.horizontal(row);
+    } else {
+        ui.horizontal(|ui| {
+            ui.add_sized([118.0, ui.spacing().interact_size.y], egui::Label::new(label).truncate());
+            row(ui);
+        });
+    }
+    before != *value
 }
 
 fn sub_brush_percent(ui: &mut Ui, value: &mut f32, range: std::ops::RangeInclusive<f32>, key: &str) {

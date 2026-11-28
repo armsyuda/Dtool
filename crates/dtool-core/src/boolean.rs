@@ -3,10 +3,13 @@ use crate::paint::{Cap, Join, StrokeAlign, StrokeStyle};
 use dtool_protocol::CommandError;
 use i_overlay::core::fill_rule::FillRule as OverlayFillRule;
 use i_overlay::core::overlay_rule::OverlayRule;
+use i_overlay::float::clip::FloatClip;
 use i_overlay::float::overlay::FloatOverlay;
 use i_overlay::float::slice::FloatSlice;
+use i_overlay::mesh::float::outline::offset::OutlineOffset;
 use i_overlay::mesh::float::stroke::offset::StrokeOffset;
-use i_overlay::mesh::float::style::{LineCap, LineJoin, StrokeStyle as OverlayStroke};
+use i_overlay::mesh::float::style::{LineCap, LineJoin, OutlineStyle, StrokeStyle as OverlayStroke};
+use i_overlay::string::clip::ClipRule;
 use kurbo::{BezPath, PathEl};
 use crate::command::Session;
 use crate::commands::arrange::{commit_snapshot, snapshot};
@@ -19,6 +22,7 @@ use serde::{Deserialize, Serialize};
 
 mod bezier_edges;
 mod builder_cleanup;
+mod flood_colour;
 mod key_cut;
 mod knife_open;
 use builder_cleanup::BuilderCleanup;
@@ -438,6 +442,55 @@ pub fn expand_stroke(path: &BezPath, style: &StrokeStyle, tolerance: f64) -> Res
     Ok(shapes_to_curve(&merged).into_iter().collect())
 }
 
+pub(crate) fn contour_path(
+    path: &BezPath, fill: FillRule, spec: crate::commands::contour::ContourSpec, tolerance: f64,
+) -> Result<BezPath, CommandError> {
+    use crate::commands::contour::{ContourCap, ContourJoin};
+
+    if !path_is_finite(path) { return Err(CommandError::invalid_params()); }
+    check_tolerance(tolerance)?;
+    let join = match spec.join {
+        ContourJoin::Round => LineJoin::Round(ROUND_STEP),
+        ContourJoin::Miter => LineJoin::Miter(2.0 * (1.0 / spec.miter).asin()),
+        ContourJoin::Bevel => LineJoin::Bevel,
+    };
+    let cap = match spec.cap {
+        ContourCap::None => LineCap::Butt,
+        ContourCap::Round => LineCap::Round(ROUND_STEP),
+        ContourCap::Square => LineCap::Square,
+    };
+    let open_stroke = OverlayStroke::new(spec.radius * 2.0)
+        .line_join(join.clone()).start_cap(cap.clone()).end_cap(cap);
+    let mut rings = Vec::new();
+    let mut open_areas = Vec::new();
+    let mut retained = BezPath::new();
+    let mut budget = 0;
+    for (points, closed) in crate::outline::flatten_subpaths(path, tolerance) {
+        let ring = clean_points(points);
+        budget += ring.len();
+        if budget > MAX_BOOLEAN_POINTS { return Err(request_too_large()); }
+        if closed && ring.len() >= 3 {
+            rings.push(ring);
+        } else if !closed && ring.len() >= 2 {
+            if spec.radius > 0.0 {
+                open_areas.extend(ring.stroke(open_stroke.clone(), false));
+            } else if let Some((first, rest)) = ring.split_first() {
+                retained.move_to((first[0], first[1]));
+                for point in rest { retained.line_to((point[0], point[1])); }
+            }
+        }
+    }
+    let closed = normalize(&rings, fill);
+    let inset = if closed.is_empty() { Vec::new() } else { closed.outline(&OutlineStyle::new(spec.radius).line_join(join)) };
+    let open_areas = if open_areas.is_empty() { open_areas } else {
+        FloatOverlay::with_subj(&open_areas).overlay(OverlayRule::Subject, OverlayFillRule::NonZero)
+    };
+    let result = combine(&inset, &open_areas, OverlayRule::Union);
+    let mut result = shapes_to_curve(&result).map(|curve| curve.to_kurbo()).unwrap_or_default();
+    result.extend(retained.elements().iter().copied());
+    Ok(result)
+}
+
 pub(crate) fn stroke_outline_contours(path: &BezPath, tolerance: f64) -> Option<Vec<Vec<[f32; 2]>>> {
     if path.elements().is_empty() { return Some(Vec::new()); }
     let rings = flatten_closed(std::slice::from_ref(path), tolerance, &mut 0).ok()?;
@@ -620,7 +673,7 @@ fn plan_operands(session: &Session, params: &Value) -> Result<OperandPlan, Comma
     let mut fill_rules = Vec::new();
     for index in &indexed {
         let object = &doc.objects[*index];
-        if object.locked {
+        if session.document.is_object_locked(object) {
             return Err(CommandError::new("LOCKED"));
         }
         if object.parent_id != parent || crate::data_merge::layout::object_page_index(doc, object.id) != page {
@@ -697,6 +750,7 @@ fn styled(base: &Object, kind: ObjectKind, bounds: [f64; 4], parent: Option<Obje
     object.raster_size = None;
     object.frame = None;
     object.vector_crop = None;
+    object.contour = None;
     object.fill_rule = FillRule::EvenOdd;
     object
 }
@@ -749,14 +803,14 @@ fn compound_target(session: &Session, params: &Value) -> Result<(usize, Object, 
     let ids = targets(session, params);
     let [id] = ids.as_slice() else { return Err(CommandError::invalid_params()) };
     let index = session.document.objects.iter().position(|object| object.id == *id).ok_or_else(CommandError::not_found)?;
-    let object = session.document.objects[index].clone();
-    if object.locked {
+    let object = &session.document.objects[index];
+    if session.document.is_object_locked(object) {
         return Err(CommandError::new("LOCKED"));
     }
     match &object.kind {
         ObjectKind::Compound(spec) => {
             let spec = spec.clone();
-            Ok((index, object, spec))
+            Ok((index, object.clone(), spec))
         }
         _ => Err(CommandError::invalid_params()),
     }
@@ -975,8 +1029,8 @@ fn reshape_compound(mut compound: Object, mut spec: CompoundSpec) -> Result<Obje
         for stroke in std::iter::once(&mut compound.stroke).chain(&mut compound.additional_strokes) {
             crate::paint::transform_stroke_style_matrix(stroke, translate);
         }
-        if let crate::paint::Transparency::Gradient { geom, .. } = &mut compound.transparency {
-            *geom = geom.transform(translate);
+        if let crate::paint::Transparency::Gradient { kind, geom, .. } = &mut compound.transparency {
+            *geom = geom.transform_for_kind(*kind, translate);
         }
         if let Some(crop) = &mut compound.vector_crop {
             crop.rect[0] -= offset[0];
@@ -1022,7 +1076,7 @@ fn stroke_targets<'a>(session: &'a Session, params: &Value) -> Result<Vec<&'a Ob
     }
     ids.into_iter().map(|id| {
         let object = session.document.get_object(id).ok_or_else(CommandError::not_found)?;
-        if object.locked {
+        if session.document.is_object_locked(object) {
             return Err(CommandError::new("LOCKED"));
         }
         if !matches!(object.kind, ObjectKind::Shape | ObjectKind::Curve(_) | ObjectKind::Compound(_)) {
@@ -1140,7 +1194,7 @@ fn expand_appearance(doc: &crate::Document, source: &Object, tolerance: f64) -> 
                                 for stop in &mut stops {
                                     stop.colour = crate::paint::Colour::new(255, 255, 255, 255 - stop.colour.a);
                                 }
-                                let geom = geom.transform(Affine::translate((-f64::from(pos[0]), -f64::from(pos[1]))).as_coeffs());
+                                let geom = geom.transform_for_kind(kind, Affine::translate((-f64::from(pos[0]), -f64::from(pos[1]))).as_coeffs());
                                 (1.0, Transparency::Gradient { kind, stops, geom })
                             }
                         }
@@ -1384,9 +1438,9 @@ fn run_stroke(session: &mut Session, params: &Value) -> CommandResult {
                     crop.rect[0] += object.pos[0] - origin[0];
                     crop.rect[1] += object.pos[1] - origin[1];
                 }
-                if let crate::paint::Transparency::Gradient { geom, .. } = &mut object.transparency {
+                if let crate::paint::Transparency::Gradient { kind, geom, .. } = &mut object.transparency {
                     let offset = Affine::translate((-f64::from(origin[0]), -f64::from(origin[1])));
-                    *geom = geom.transform((offset * local_to_world).as_coeffs());
+                    *geom = geom.transform_for_kind(*kind, (offset * local_to_world).as_coeffs());
                 }
                 object.pos = origin;
                 object.size = size;
@@ -1406,8 +1460,8 @@ fn run_stroke(session: &mut Session, params: &Value) -> CommandResult {
                 shift_curve(&mut curve, [b[0], b[1]]);
                 let translate = kurbo::Affine::translate((-b[0], -b[1])).as_coeffs();
                 crate::paint::transform_paint_matrix(&mut object.fill, translate);
-                if let crate::paint::Transparency::Gradient { geom, .. } = &mut object.transparency {
-                    *geom = geom.transform(translate);
+                if let crate::paint::Transparency::Gradient { kind, geom, .. } = &mut object.transparency {
+                    *geom = geom.transform_for_kind(*kind, translate);
                 }
                 if let Some(crop) = &mut object.vector_crop {
                     crop.rect[0] -= b[0] as f32;
@@ -1518,9 +1572,9 @@ fn shape_area(shape: &Shape) -> f64 {
     outer - rings.map(|ring| signed_area(ring).abs()).sum::<f64>()
 }
 
-pub(crate) fn closed_outline_metrics(paths: &[BezPath], tolerance: f64) -> Result<(f64, f64, f64), CommandError> {
+pub(crate) fn closed_outline_metrics(paths: &[BezPath], fill: FillRule, tolerance: f64) -> Result<(f64, f64, f64), CommandError> {
     let rings = flatten_closed(paths, tolerance, &mut 0)?;
-    let shapes = normalize(&rings, FillRule::EvenOdd);
+    let shapes = normalize(&rings, fill);
     let mut metrics = (0.0, 0.0, 0.0);
     for shape in &shapes {
         metrics.0 += shape_area(shape);
@@ -1549,6 +1603,350 @@ fn shape_contains(shape: &Shape, p: [f64; 2]) -> bool {
     shape.iter().filter(|ring| ring_contains(ring, p)).count() % 2 == 1
 }
 
+pub(crate) fn flood_container(session: &Session, at: [f64; 2]) -> Option<&Object> {
+    flood_container_where(session, at, |_| true)
+}
+
+pub(crate) fn flood_replace_container(session: &Session, at: [f64; 2]) -> Option<&Object> {
+    flood_container_where(session, at, |object| {
+        if object.stroke_mask_outline {
+            return false;
+        }
+        let filled = crate::commands::appearance::visible_fills(object, &object.fill).any(flood_colour::visibly_filled);
+        let outlined = crate::commands::appearance::visible_strokes(object)
+            .any(|stroke| stroke.width > 0.0 && flood_colour::visibly_filled(&stroke.paint));
+        let split_outline = object.parent_id.and_then(|id| session.document.get_object(id))
+            .is_some_and(|parent| parent.expanded_stroke_effects);
+        filled || (outlined && !split_outline)
+    })
+}
+
+fn flood_container_where(session: &Session, at: [f64; 2], include: impl Fn(&Object) -> bool) -> Option<&Object> {
+    let doc = &session.document;
+    let order: std::collections::HashMap<_, _> = doc.objects.iter().enumerate()
+        .map(|(index, object)| (object.id, (index, object))).collect();
+    let clips = crate::clip_mask::ClipRegions::new(doc);
+    doc.objects.iter().filter(|object| {
+        if !include(object)
+            || !matches!(object.kind, ObjectKind::Curve(_) | ObjectKind::Shape | ObjectKind::Compound(_))
+            || !crate::scene::is_drawn_in_view(doc, &session.view, object.id)
+            || crate::scene::effective_opacity(doc, object.id) <= 0.0
+            || clips.is_mask(object)
+            || clips.region(object).is_some_and(|clip| !shape_contains(&clip, at))
+        {
+            return false;
+        }
+        let matrix = crate::geometry::object_matrix(object);
+        let rings = crate::scene::warped_contours(doc, object, &matrix)
+            .unwrap_or_else(|| crate::scene::doc_contours(object, &matrix));
+        let winding: i32 = rings.into_iter().filter(|(points, closed)| *closed && points.len() >= 3)
+            .map(|(points, _)| {
+                points.iter().zip(points.iter().cycle().skip(1)).map(|(a, b)| {
+                    let ([ax, ay], [bx, by]) = (a.map(f64::from), b.map(f64::from));
+                    let cross = (bx - ax) * (at[1] - ay) - (by - ay) * (at[0] - ax);
+                    if ay <= at[1] && by > at[1] && cross > 0.0 { 1 }
+                    else if ay > at[1] && by <= at[1] && cross < 0.0 { -1 }
+                    else { 0 }
+                }).sum::<i32>()
+            }).sum();
+        match object.fill_rule {
+            FillRule::EvenOdd => winding % 2 != 0,
+            FillRule::NonZero => winding != 0,
+        }
+    }).max_by_key(|object| {
+        let mut stack = Vec::new();
+        let mut cursor = Some(object.id);
+        while let Some((index, entry)) = cursor.and_then(|id| order.get(&id)) {
+            stack.push(*index);
+            cursor = entry.parent_id;
+        }
+        stack.reverse();
+        stack
+    })
+}
+
+fn flood_object_shapes(doc: &crate::Document, clips: &crate::clip_mask::ClipRegions<'_>, object: &Object) -> Vec<Shape> {
+    let matrix = crate::geometry::object_matrix(object);
+    let contours = crate::scene::warped_contours(doc, object, &matrix)
+        .unwrap_or_else(|| crate::scene::doc_contours(object, &matrix));
+    let rings = contours.into_iter()
+        .filter(|(points, closed)| *closed && points.len() >= 3
+            && points.iter().flatten().all(|coordinate| coordinate.is_finite()))
+        .map(|(points, _)| points.into_iter().map(|point| point.map(f64::from)).collect())
+        .collect::<Vec<Ring>>();
+    let shapes = normalize(&rings, object.fill_rule);
+    match clips.region(object) {
+        Some(clip) => combine(&shapes, &normalize(&clip, FillRule::EvenOdd), OverlayRule::Intersect),
+        None => shapes,
+    }
+}
+
+pub(crate) fn closed_flood_region(session: &Session, at: [f64; 2], largest: bool) -> Option<(ObjectId, Curve)> {
+    let doc = &session.document;
+    let clips = crate::clip_mask::ClipRegions::new(doc);
+    let (id, shape) = doc.objects.iter().filter(|object| {
+        matches!(object.kind, ObjectKind::Shape | ObjectKind::Curve(_) | ObjectKind::Compound(_))
+            && crate::scene::is_drawn_in_view(doc, &session.view, object.id)
+            && crate::scene::effective_opacity(doc, object.id) > 0.0
+            && !clips.is_mask(object)
+    }).filter_map(|object| {
+        flood_object_shapes(doc, &clips, object).into_iter().find(|shape| shape_contains(shape, at))
+            .map(|shape| (object.id, shape))
+    }).max_by(|(_, a), (_, b)| {
+        let order = shape_area(a).total_cmp(&shape_area(b));
+        if largest { order } else { order.reverse() }
+    })?;
+    Some((id, shapes_to_curve(&[shape])?))
+}
+
+pub(crate) fn flood_region_matches(doc: &crate::Document, object: &Object, region: &Curve) -> bool {
+    let clips = crate::clip_mask::ClipRegions::new(doc);
+    let source = flood_object_shapes(doc, &clips, object);
+    let target = flood_curve_shapes(region);
+    let area = target.iter().map(shape_area).sum::<f64>();
+    let tolerance = area * 1e-6 + 1e-8;
+    if (source.iter().map(shape_area).sum::<f64>() - area).abs() > tolerance {
+        return false;
+    }
+    combine(&source, &target, OverlayRule::Xor).iter().map(shape_area).sum::<f64>() <= tolerance
+}
+
+fn flood_curve_shapes(region: &Curve) -> Vec<Shape> {
+    let rings = region.contours()
+        .map(|contour| contour.points.iter().map(|point| point.pos).collect::<Ring>())
+        .collect::<Vec<Ring>>();
+    normalize(&rings, FillRule::EvenOdd)
+}
+
+/// Keep the source curves intact by clipping only their fill to the complement.
+pub(crate) fn flood_remainder_mask(doc: &crate::Document, object: &Object, region: &Curve) -> Result<Option<Curve>, CommandError> {
+    let target = flood_curve_shapes(region);
+    let clips = crate::clip_mask::ClipRegions::new(doc);
+    let source = flood_object_shapes(doc, &clips, object);
+    let area = target.iter().map(shape_area).sum::<f64>();
+    if area == 0.0 || combine(&target, &source, OverlayRule::Difference).iter().map(shape_area).sum::<f64>() > area * 1e-6 + 1e-8 {
+        return Ok(None);
+    }
+    remainder_mask(doc, object, &target).map(Some).ok_or_else(|| CommandError::new("CANNOT_EXECUTE"))
+}
+
+fn remainder_mask(doc: &crate::Document, object: &Object, target: &[Shape]) -> Option<Curve> {
+    let matrix = crate::geometry::object_matrix(object);
+    let local_target;
+    let target = if let Some(warp) = crate::commands::warp::LiveWarp::for_object(doc, object.id) {
+        local_target = inverse_flood_shapes(&warp, target)?;
+        local_target.as_slice()
+    } else { target };
+    let mut bounds = [f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY];
+    for point in crate::scene::doc_contours(object, &matrix).iter().flat_map(|(points, _)| points) {
+        let [x, y] = point.map(f64::from);
+        bounds = [bounds[0].min(x), bounds[1].min(y), bounds[2].max(x), bounds[3].max(y)];
+    }
+    let [left, top, right, bottom] = bounds;
+    if !bounds.iter().all(|value| value.is_finite()) {
+        return None;
+    }
+    // Extend the mask past the actual silhouette so its outer edge cannot clip
+    // the source's antialiasing or a curve between tessellation samples.
+    let frame = vec![vec![vec![[left - 1.0, top - 1.0], [right + 1.0, top - 1.0],
+        [right + 1.0, bottom + 1.0], [left - 1.0, bottom + 1.0]]]];
+    shapes_to_curve(&combine(&frame, target, OverlayRule::Difference))
+}
+
+pub(crate) fn flood_source_curve(doc: &crate::Document, source: ObjectId, curve: Curve) -> Option<Curve> {
+    let Some(warp) = crate::commands::warp::LiveWarp::for_object(doc, source) else { return Some(curve) };
+    shapes_to_curve(&inverse_flood_shapes(&warp, &flood_curve_shapes(&curve))?)
+}
+
+fn inverse_flood_shapes(warp: &crate::commands::warp::LiveWarp, shapes: &[Shape]) -> Option<Vec<Shape>> {
+    let mut budget = MAX_BOOLEAN_POINTS;
+    shapes.iter().map(|shape| {
+        shape.iter().map(|ring| {
+            let points = ring.iter().map(|&point| Some((point, warp.inverse_point(point)?)))
+                .collect::<Option<Vec<_>>>()?;
+            let mut mapped = Vec::new();
+            for (&start, &end) in points.iter().zip(points.iter().cycle().skip(1)) {
+                let mut segments = vec![(start, end, 0)];
+                while let Some(((a, u), (b, v), depth)) = segments.pop() {
+                    budget = budget.checked_sub(1)?;
+                    let interpolate = |left: [f64; 2], right: [f64; 2], t| {
+                        [left[0] + (right[0] - left[0]) * t, left[1] + (right[1] - left[1]) * t]
+                    };
+                    // A straight screen edge can be curved in the source mesh.
+                    let follows_edge = [0.25, 0.5, 0.75].into_iter().all(|t| {
+                        let [x, y] = warp.point(interpolate(u, v, t));
+                        let [target_x, target_y] = interpolate(a, b, t);
+                        (x - target_x).hypot(y - target_y) <= DEFAULT_TOLERANCE
+                    });
+                    if follows_edge {
+                        mapped.push(u);
+                    } else {
+                        if depth >= 12 { return None; }
+                        let middle = interpolate(a, b, 0.5);
+                        let mid = (middle, warp.inverse_point(middle)?);
+                        segments.push((mid, (b, v), depth + 1));
+                        segments.push(((a, u), mid, depth + 1));
+                    }
+                }
+            }
+            Some(mapped)
+        }).collect()
+    }).collect()
+}
+
+pub(crate) struct FloodReplacement {
+    pub source: ObjectId,
+    pub whole: bool,
+    pub mask: Option<Curve>,
+    pub removed_region: Curve,
+    pub paint_region: Option<Curve>,
+}
+
+/// Split the original appearance into disjoint regions so each instance can
+/// composite its own erase rows, including against the replacement paint.
+pub(crate) fn flood_appearance_masks(
+    doc: &crate::Document, object: &Object, removed: Curve, replacement: Option<&Object>,
+) -> Option<[Option<Curve>; 3]> {
+    let cut = flood_curve_shapes(&flood_source_curve(doc, object.id, removed)?);
+    let paint = if let Some(layer) = replacement {
+        let mut curve = layer.curve()?.clone();
+        let [x, y] = layer.pos.map(f64::from);
+        transform_curve(&mut curve, kurbo::Affine::translate((x, y)));
+        flood_curve_shapes(&curve)
+    } else {
+        Vec::new()
+    };
+    let frame_bounds = crate::commands::appearance::unwarped_vector_ink_bounds(object)?.inflate(1.0, 1.0);
+    let frame = vec![vec![vec![[frame_bounds.x0, frame_bounds.y0], [frame_bounds.x1, frame_bounds.y0],
+        [frame_bounds.x1, frame_bounds.y1], [frame_bounds.x0, frame_bounds.y1]]]];
+    // Use the paint mask for both the new ink and its complement. This keeps
+    // the two pieces disjoint even when inverse-warping introduced rounding.
+    let excluded = combine(&cut, &paint, OverlayRule::Union);
+    Some([
+        shapes_to_curve(&combine(&frame, &excluded, OverlayRule::Difference)),
+        shapes_to_curve(&combine(&cut, &paint, OverlayRule::Difference)),
+        shapes_to_curve(&paint),
+    ])
+}
+
+pub(crate) struct VisibleFloodRegion {
+    pub curve: Curve,
+    pub replacements: Vec<FloodReplacement>,
+}
+
+pub(crate) fn visible_boundary_region(
+    session: &Session, at: [f64; 2], replace: bool,
+) -> Result<Option<VisibleFloodRegion>, CommandError> {
+    let doc = &session.document;
+    let clips = crate::clip_mask::ClipRegions::new(doc);
+    let mut strings = Vec::new();
+    let mut barriers = Vec::new();
+    let mut surfaces = Vec::new();
+    let mut point_count = 0;
+    let mut bounds = [at[0], at[1], at[0], at[1]];
+    for object in &doc.objects {
+        if !matches!(object.kind, ObjectKind::Curve(_) | ObjectKind::Shape | ObjectKind::Compound(_))
+            || !crate::scene::is_drawn_in_view(doc, &session.view, object.id)
+            || crate::scene::effective_opacity(doc, object.id) <= 0.0
+            || clips.is_mask(object)
+        {
+            continue;
+        }
+        let stroke = crate::commands::appearance::visible_strokes(object)
+            .any(|style| style.width > 0.0 && style.paint != crate::paint::Paint::None);
+        let fill = crate::commands::appearance::visible_fills(object, &object.fill).any(flood_colour::visibly_filled);
+        if !stroke && !fill { continue; }
+        let clip = clips.region(object);
+        if clip.as_ref().is_some_and(Vec::is_empty) {
+            continue;
+        }
+        let matrix = crate::geometry::object_matrix(object);
+        let outlines = crate::scene::warped_contours(doc, object, &matrix)
+            .unwrap_or_else(|| crate::scene::doc_contours(object, &matrix));
+        let paths = outlines.into_iter()
+            .filter(|(points, closed)| points.len() >= 2 && (*closed || stroke))
+            .filter_map(|(points, closed)| {
+                let ring: Ring = points.into_iter().map(|point| point.map(f64::from)).collect();
+                ring.iter().flatten().all(|value| value.is_finite()).then_some((ring, closed))
+            })
+            .collect::<Vec<_>>();
+        let remaining = MAX_BOOLEAN_POINTS - point_count;
+        if paths.iter().map(|(ring, _)| ring.len()).sum::<usize>() > remaining
+            || clip.as_ref().is_some_and(|rings| rings.iter().map(Vec::len).sum::<usize>() > MAX_BOOLEAN_POINTS)
+        {
+            return Err(request_too_large());
+        }
+        let visible_paths = match clip {
+            Some(clip) => clipped_flood_paths(paths, &clip, fill, stroke, object.fill_rule),
+            None => paths.into_iter()
+                .map(|(ring, closed)| (closed_flood_path(ring, closed), !closed || !fill))
+                .collect(),
+        };
+        let mut surface_bounds = kurbo::Rect::ZERO;
+        let mut has_surface = false;
+        for (path, barrier) in visible_paths {
+            if barrier {
+                barriers.push(strings.len());
+            } else if let Some(path_bounds) = flood_colour::ring_bounds(&path) {
+                surface_bounds = if has_surface { surface_bounds.union(path_bounds) } else { path_bounds };
+                has_surface = true;
+            }
+            point_count += path.len();
+            if point_count > MAX_BOOLEAN_POINTS { return Err(request_too_large()); }
+            for &[x, y] in &path {
+                bounds = [bounds[0].min(x), bounds[1].min(y), bounds[2].max(x), bounds[3].max(y)];
+            }
+            strings.push(path);
+        }
+        if has_surface {
+            surfaces.push(flood_colour::Surface::new(object, surface_bounds));
+        }
+    }
+    if strings.is_empty() { return Ok(None); }
+    let [left, top, right, bottom] = bounds;
+    let pad = (right - left).max(bottom - top).max(1.0) * 0.01;
+    let envelope = vec![[left - pad, top - pad], [right + pad, top - pad], [right + pad, bottom + pad], [left - pad, bottom + pad]];
+    let region = envelope.slice_by_as::<i64>(&strings, OverlayFillRule::EvenOdd)
+        .into_iter().find(|shape| {
+            shape.first().is_some_and(|ring| ring.iter().all(|&[x, y]| {
+                x >= left - pad * 0.5 && x <= right + pad * 0.5 && y >= top - pad * 0.5 && y <= bottom + pad * 0.5
+            })) && shape_area(shape) > MIN_AREA && shape_contains(shape, at)
+        });
+    let Some(region) = region else { return Ok(None) };
+    if let Some(connected) = flood_colour::connected_region(doc, &clips, &mut surfaces, &strings, &barriers, at, replace)? {
+        return Ok(Some(connected));
+    }
+    Ok(shapes_to_curve(&[region]).map(|curve| VisibleFloodRegion { curve, replacements: Vec::new() }))
+}
+
+fn closed_flood_path(mut path: Ring, closed: bool) -> Ring {
+    if closed && path.first() != path.last() {
+        path.push(path[0]);
+    }
+    path
+}
+
+fn clipped_flood_paths(paths: Vec<(Ring, bool)>, clip: &Shape, fill: bool, stroke: bool, rule: FillRule) -> Vec<(Ring, bool)> {
+    // A filled shape contributes its clipped perimeter. A stroke only contributes
+    // the pieces of its centreline that survive the clip.
+    let (filled, strokes): (Vec<_>, Vec<_>) = paths.into_iter().partition(|(_, closed)| fill && *closed);
+    let subject = parity_rings(filled.into_iter().map(|(ring, _)| ring).collect(), rule);
+    let mut visible = Vec::new();
+    if !subject.is_empty() {
+        let clipped = FloatOverlay::with_subj_and_clip(&subject, clip)
+            .overlay(OverlayRule::Intersect, OverlayFillRule::EvenOdd);
+        visible.extend(clipped.into_iter().flatten().map(|ring| (closed_flood_path(ring, true), false)));
+    }
+    if stroke && !strokes.is_empty() {
+        let paths: Vec<_> = strokes.into_iter().map(|(ring, closed)| closed_flood_path(ring, closed)).collect();
+        visible.extend(paths.clip_by_as::<i64>(clip, OverlayFillRule::EvenOdd, ClipRule {
+            invert: false,
+            boundary_included: true,
+        }).into_iter().map(|path| (path, true)));
+    }
+    visible
+}
+
 fn interior_point(shape: &Shape) -> Option<[f64; 2]> {
     let outer = shape.first()?;
     let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
@@ -1571,23 +1969,25 @@ fn interior_point(shape: &Shape) -> Option<[f64; 2]> {
     None
 }
 
-fn piece_object(style: &Object, shapes: &[Shape], parent: Option<ObjectId>) -> Option<Object> {
-    let mut curve = shapes_to_curve(shapes)?;
-    let bounds = curve_bounds(std::slice::from_ref(&curve))?;
-    shift_curve(&mut curve, [bounds[0], bounds[1]]);
-    Some(styled(style, ObjectKind::Curve(curve), bounds, parent))
+fn builder_piece(source: &Object, path: &BezPath, fill_rule: FillRule) -> Result<Object, CommandError> {
+    let mut piece = cut_piece(source, path, fill_rule)?;
+    piece.id = ObjectId(0);
+    Ok(piece)
 }
 
-fn curve_piece(source: &Object, path: &BezPath, parent: Option<ObjectId>) -> Result<Object, CommandError> {
-    let mut curve = Curve::from_kurbo(path);
-    let [x, y, right, bottom] = crate::geometry::bez_path_bounds(path).map(f64::from);
-    if curve.is_empty() || ![x, y, right, bottom].into_iter().all(f64::is_finite) {
-        return Err(CommandError::invalid_params());
+fn piece_object(
+    source_style: Option<&Object>,
+    default_style: &Object,
+    shapes: &[Shape],
+    parent: Option<ObjectId>,
+) -> Result<Object, CommandError> {
+    let mut curve = shapes_to_curve(shapes).ok_or_else(|| CommandError::new("BOOLEAN_DEGENERATE"))?;
+    if let Some(source) = source_style {
+        return builder_piece(source, &curve.to_kurbo(), FillRule::EvenOdd);
     }
-    shift_curve(&mut curve, [x, y]);
-    let extent = if curve.contour.closed { 0.0 } else { f64::from(crate::commands::curve_edit::MIN_CURVE_EXTENT) };
-    let bounds = [x, y, right.max(x + extent), bottom.max(y + extent)];
-    Ok(styled(source, ObjectKind::Curve(curve), bounds, parent))
+    let bounds = curve_bounds(std::slice::from_ref(&curve)).ok_or_else(|| CommandError::new("BOOLEAN_DEGENERATE"))?;
+    shift_curve(&mut curve, [bounds[0], bounds[1]]);
+    Ok(styled(default_style, ObjectKind::Curve(curve), bounds, parent))
 }
 
 fn curve_from_world(source: &Object, path: &BezPath) -> Result<Curve, CommandError> {
@@ -1607,6 +2007,7 @@ fn cut_piece(source: &Object, path: &BezPath, fill_rule: FillRule) -> Result<Obj
     }
     let mut piece = source.clone();
     piece.shape = None;
+    piece.contour = None;
     piece.fill_rule = fill_rule;
     crate::commands::path_nodes::reframe(&mut piece, curve)?;
     Ok(piece)
@@ -1616,6 +2017,7 @@ fn curve_in_original_frame(source: &Object, path: BezPath) -> Result<Object, Com
     let mut replacement = source.clone();
     replacement.kind = ObjectKind::Curve(curve_from_world(source, &path)?);
     replacement.shape = None;
+    replacement.contour = None;
     Ok(replacement)
 }
 
@@ -1638,9 +2040,17 @@ fn builder_areas(source_shapes: &[Vec<Shape>]) -> Vec<Shape> {
 }
 
 pub fn shape_builder_regions(session: &Session) -> Result<Vec<Shape>, CommandError> {
-    let operands = plan_operands(session, &Value::Null)?;
+    let operands = plan_builder_operands(session, &Value::Null)?;
     let (shapes, _) = builder_geometry(&operands, &Value::Null)?;
     Ok(builder_areas(&shapes))
+}
+
+fn plan_builder_operands(session: &Session, params: &Value) -> Result<OperandPlan, CommandError> {
+    let plan = plan_boolean(session, params)?;
+    if plan.ids.iter().any(|id| crate::commands::symbols::object_link(&session.document, *id).is_some()) {
+        return Err(CommandError::invalid_params());
+    }
+    Ok(plan)
 }
 
 fn builder_geometry(operands: &OperandPlan, params: &Value) -> Result<(Vec<Vec<Shape>>, Vec<Vec<BezPath>>), CommandError> {
@@ -1679,7 +2089,7 @@ fn builder_geometry(operands: &OperandPlan, params: &Value) -> Result<(Vec<Vec<S
 }
 
 fn plan_builder(session: &Session, params: &Value) -> Result<BuilderPlan, CommandError> {
-    let operands = plan_operands(session, params)?;
+    let operands = plan_builder_operands(session, params)?;
     let sources: Vec<Object> = operands.ids.iter().filter_map(|id| session.document.get_object(*id).cloned()).collect();
     let (source_shapes, open_paths) = builder_geometry(&operands, params)?;
     let areas = builder_areas(&source_shapes);
@@ -1724,9 +2134,9 @@ fn run_shape_builder(session: &mut Session, params: &Value) -> CommandResult {
     let parent = plan.operands.parent;
     let mut default_style = Object::default();
     if !first_style {
-        crate::commands::defaults::current().apply_in_document(&mut default_style, session.document.dpi);
+        crate::commands::defaults::for_document(&session.document).apply_in_document(&mut default_style, session.document.dpi);
     }
-    let merged_style = if first_style { covering_source(&plan, &plan.areas[plan.picked[0]]).unwrap_or(&default_style).clone() } else { default_style.clone() };
+    let merged_style = first_style.then(|| covering_source(&plan, &plan.areas[plan.picked[0]])).flatten();
     let mut merged: Vec<Shape> = Vec::new();
     for index in &plan.picked {
         merged = combine(&merged, std::slice::from_ref(&plan.areas[*index]), OverlayRule::Union);
@@ -1737,13 +2147,12 @@ fn run_shape_builder(session: &mut Session, params: &Value) -> CommandResult {
             if plan.picked.contains(&index) {
                 continue;
             }
-            let style = covering_source(&plan, area).unwrap_or(&plan.sources[0]).clone();
-            outputs.extend(piece_object(&style, std::slice::from_ref(area), parent));
+            let style = covering_source(&plan, area).unwrap_or(&plan.sources[0]);
+            outputs.push(piece_object(Some(style), &default_style, std::slice::from_ref(area), parent)?);
         }
     }
     if op != "delete" {
-        let object = piece_object(&merged_style, &merged, parent).ok_or_else(|| CommandError::new("BOOLEAN_DEGENERATE"))?;
-        outputs.push(object);
+        outputs.push(piece_object(merged_style, &default_style, &merged, parent)?);
     }
     let mut deleted: Vec<ObjectId> = Vec::new();
     if op != "create" {
@@ -1760,7 +2169,7 @@ fn run_shape_builder(session: &mut Session, params: &Value) -> CommandResult {
             if !closed.is_empty() || changed {
                 deleted.push(source.id);
                 for path in &remaining {
-                    outputs.push(curve_piece(source, path, parent)?);
+                    outputs.push(builder_piece(source, path, FillRule::EvenOdd)?);
                 }
             }
         }
@@ -1805,7 +2214,7 @@ fn plan_knife(session: &Session, mut cut: Vec<[f64; 2]>, params: &Value) -> Resu
     let mut out = Vec::new();
     for id in targets(session, params) {
         let object = session.document.get_object(id).ok_or_else(CommandError::not_found)?;
-        if object.locked {
+        if session.document.is_object_locked(object) {
             return Err(CommandError::new("LOCKED"));
         }
         let vector_mask = is_vector_mask_layer(object);
@@ -1903,7 +2312,7 @@ fn plan_knife_request(session: &Session, params: &Value) -> Result<Vec<(ObjectId
         let mut nearest = None;
         for id in targets(session, params) {
             let source = session.document.get_object(id).ok_or_else(CommandError::not_found)?;
-            if source.locked { continue; }
+            if session.document.is_object_locked(source) { continue; }
             let Some(path) = object_outline_world(source).filter(path_is_finite) else { continue };
             if path.elements().len() > MAX_BOOLEAN_POINTS { return Err(request_too_large()); }
             if let Some((distance, result)) = knife_open::nearest_scissor(&path, kurbo::Point::new(x, y), radius) {

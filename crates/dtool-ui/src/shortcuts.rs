@@ -3,7 +3,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::path::PathBuf;
 
-pub const DEFAULT_KEYMAP_JSON: &str = include_str!("../assets/default_shortcuts.json");
+pub const DEFAULT_KEYMAP_JSON: &str = include_str!("../assets/affinity_default_shortcuts.json");
 pub const CMD_LIST: &str = "ui.shortcuts.list";
 pub const CMD_SET: &str = "ui.shortcut.set";
 pub const CMD_RESET: &str = "ui.shortcuts.reset";
@@ -178,7 +178,7 @@ impl ShortcutMap {
             fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
         let json = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
-        fs::write(&path, json).map_err(|e| e.to_string())
+        dtool_export::write_atomic(&path, json.as_bytes()).map_err(|e| e.to_string())
     }
 
     pub fn reset(&mut self) {
@@ -251,6 +251,18 @@ impl ShortcutMap {
             .collect();
         found.sort_by(|a, b| a.key.cmp(&b.key));
         found
+    }
+
+    pub(crate) fn remove_chord(&mut self, key: &str, modifiers: Modifiers) -> bool {
+        let key = key.to_ascii_lowercase();
+        let Some(bindings) = self.bindings.get_mut(&key) else { return false; };
+        let before = bindings.len();
+        bindings.retain(|shortcut| shortcut.modifiers != modifiers);
+        let changed = before != bindings.len();
+        if bindings.is_empty() {
+            self.bindings.remove(&key);
+        }
+        changed
     }
 
     pub fn clear_command(&mut self, command: &str) {

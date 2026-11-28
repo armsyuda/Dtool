@@ -94,13 +94,17 @@ pub(crate) fn display_to_document(angle: f32) -> Option<[f32; 6]> {
 
 impl<'a> PixelMask<'a> {
     pub(super) fn new(doc: &'a Document, group: &Object) -> Option<Self> {
-        let coverage = crate::raster_source::compositing_mask(doc, group)?;
-        let size = group.size.map(f32::abs);
+        let mask = crate::raster_source::compositing_layer_mask(doc, group)?;
+        let [x, y, width, height] = mask.local_rect(group);
+        let size = [width, height];
         if !size.iter().all(|extent| extent.is_finite() && *extent > 0.0) {
             return None;
         }
         Some(Self {
-            coverage, inverse: invert_matrix(&object_matrix(group))?, position: group.pos, size,
+            coverage: &mask.coverage,
+            inverse: invert_matrix(&object_matrix(group))?,
+            position: [group.pos[0] + x, group.pos[1] + y],
+            size,
         })
     }
 

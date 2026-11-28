@@ -406,17 +406,18 @@ mod tests {
         Paint::Solid { colour: Colour::new(255, 0, 0, 255) }
     }
 
-    fn sample_doc() -> Document {
+    fn sample_doc() -> (Document, ObjectId, ObjectId) {
+        assert!(dtool_text::canvas_text::install());
         let mut doc = Document::new([400.0, 300.0], Units::Px, 72.0, 2);
         doc.create_object(Object { pos: [10.0, 10.0], size: [50.0, 40.0], fill: red(), ..Object::default() });
         let ellipse = serde_json::from_value(json!({ "kind": "ellipse", "size": [60.0, 30.0] })).unwrap();
         let mut stroke = dtool_core::paint::StrokeStyle::default();
         stroke.width = 2.0;
         stroke.paint = red();
-        doc.create_object(Object { pos: [100.0, 10.0], size: [60.0, 30.0], fill: red(), stroke, shape: Some(ellipse), ..Object::default() });
+        let ellipse = doc.create_object(Object { pos: [100.0, 10.0], size: [60.0, 30.0], fill: red(), stroke, shape: Some(ellipse), ..Object::default() });
         let story = StoryId(1);
         doc.stories.push(Story { id: story, text: "hello\nworld".into(), ranges: Vec::new(), specials: Vec::new(), paras: Vec::new() });
-        doc.create_object(Object {
+        let text = doc.create_object(Object {
             pos: [10.0, 100.0],
             size: [200.0, 80.0],
             kind: ObjectKind::FrameText { story },
@@ -424,37 +425,54 @@ mod tests {
             ..Object::default()
         });
         doc.create_object(Object { pos: [250.0, 10.0], size: [40.0, 40.0], raster_data: Some(vec![255; 2 * 2 * 4]), raster_size: Some((2, 2)), ..Object::default() });
-        doc
+        (doc, ellipse, text)
     }
 
     #[test]
     fn scene_maps_display_list_to_prims() {
-        let doc = sample_doc();
+        let (doc, ellipse, text) = sample_doc();
         let scene = build_scene(&doc, &CanvasFlags::default());
         let c = scene.counts();
         assert_eq!(c.pages, 2);
-        assert_eq!(c.fills, 2);
-        assert_eq!(c.strokes, 1);
+        assert_eq!(c.strokes, 0);
         assert_eq!(c.images, 1);
         assert_eq!(c.texts, 1);
         assert_eq!(scene.quads.len(), 4);
-        let Some(Prim::Text { lines, .. }) = scene.prims.iter().find(|p| matches!(p, Prim::Text { .. })) else { panic!("no text") };
-        assert_eq!(lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>(), vec!["hello", "world"]);
-        let ellipse = scene.prims.iter().find_map(|p| match p {
-            Prim::Fill { contours, .. } if contours[0].len() > 8 => Some(contours[0].clone()),
+
+        let lines = scene.prims.iter().find_map(|prim| match prim {
+            Prim::Text { object, lines, .. } if *object == text => Some(lines),
             _ => None,
-        });
-        assert!(ellipse.is_some_and(|c| is_convex(&c)));
+        }).expect("frame text");
+        assert_eq!(lines.iter().map(|line| line.text.as_str()).collect::<Vec<_>>(), vec!["hello", "world"]);
+
+        let ellipse_ink = scene.prims.iter().filter_map(|prim| match prim {
+            Prim::Fill { object, contours, .. } if *object == ellipse => Some(contours),
+            _ => None,
+        }).collect::<Vec<_>>();
+        assert_eq!(ellipse_ink.len(), 2, "ellipse fill and stroke outline");
+        assert!(ellipse_ink.iter().any(|contours| contours.len() == 1 && is_convex(&contours[0])));
+        assert!(ellipse_ink.iter().any(|contours| contours.len() == 2), "stroke must retain its hollow center");
     }
 
     #[test]
     fn outline_mode_strokes_without_fills() {
-        let doc = sample_doc();
+        let (doc, ellipse, text) = sample_doc();
         let flags = CanvasFlags { view_mode: ViewMode::Outline, ..CanvasFlags::default() };
-        let c = build_scene(&doc, &flags).counts();
-        assert_eq!(c.fills, 0);
-        assert_eq!(c.images, 0);
-        assert_eq!(c.strokes, 4);
+        let scene = build_scene(&doc, &flags);
+        let counts = scene.counts();
+        assert_eq!(counts.fills, 0);
+        assert_eq!(counts.images, 0);
+        assert_eq!(counts.texts, 0);
+        assert!(scene.prims.iter().any(|prim| matches!(prim,
+            Prim::Stroke { object, width, closed: true, .. } if *object == ellipse && *width == 0.0
+        )));
+
+        let glyph_contours = dtool_core::text_lines::text_outlines(&doc, text).expect("glyph contours");
+        let text_strokes = scene.prims.iter().filter_map(|prim| match prim {
+            Prim::Stroke { object, points, width, closed: true, .. } if *object == text && *width == 0.0 => Some(points),
+            _ => None,
+        }).collect::<Vec<_>>();
+        assert_eq!(text_strokes, glyph_contours.iter().collect::<Vec<_>>());
     }
 
     #[test]

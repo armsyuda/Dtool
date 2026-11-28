@@ -33,6 +33,13 @@ pub(crate) fn mask_dimensions(document: &Document, object: &Object) -> Option<[u
 }
 
 pub(super) fn resample_selection(document: &Document, object: &Object, size: [usize; 2], selection: &PixelSelection) -> Option<PixelSelection> {
+    resample_selection_in_frame(document, object, size, selection, [0.0, 0.0, 1.0, 1.0])
+}
+
+pub(super) fn resample_selection_in_frame(
+    document: &Document, object: &Object, size: [usize; 2],
+    selection: &PixelSelection, [left, top, width, height]: [f32; 4],
+) -> Option<PixelSelection> {
     let surface = crate::selection::PixelSurface::for_page(document, selection.page_id)?;
     let scale = [selection.width as f32 / surface.bounds[2], selection.height as f32 / surface.bounds[3]];
     let quad = crate::geometry::object_world_quad(object);
@@ -40,9 +47,9 @@ pub(super) fn resample_selection(document: &Document, object: &Object, size: [us
     let down = [quad[3][0] - quad[0][0], quad[3][1] - quad[0][1]];
     let mut mask = PixelSelection::empty(size[0] as u32, size[1] as u32);
     for y in 0..size[1] {
-        let v = (y as f32 + 0.5) / size[1] as f32;
+        let v = top + height * (y as f32 + 0.5) / size[1] as f32;
         for x in 0..size[0] {
-            let u = (x as f32 + 0.5) / size[0] as f32;
+            let u = left + width * (x as f32 + 0.5) / size[0] as f32;
             let point = [quad[0][0] + across[0] * u + down[0] * v, quad[0][1] + across[1] * u + down[1] * v];
             let [px, py] = std::array::from_fn(|axis| (point[axis] - surface.bounds[axis]) * scale[axis]);
             if px >= 0.0 && py >= 0.0 {
@@ -82,25 +89,36 @@ fn run_inner(session: &mut Session, command: &Command) -> CommandResult {
     if !session.has_document { return Err(CommandError::no_document()); }
     let id = ObjectId(command.params.get("id").and_then(serde_json::Value::as_u64).ok_or_else(CommandError::invalid_params)?);
     let object = session.document.get_object(id).ok_or_else(CommandError::not_found)?;
-    let current = session.document.layer_masks.iter().find(|mask| mask.object == id).map(|mask| mask.coverage.clone());
-    if command.name == QUERY { return Ok(json!({"id":id.0,"mask":current,"doc_version":session.generation})); }
-    if object.locked { return Err(CommandError::new("LOCKED")); }
+    let existing = session.document.layer_masks.iter().find(|mask| mask.object == id);
+    let current = existing.map(|mask| mask.coverage.clone());
+    let frame = existing.and_then(|mask| mask.frame);
+    if command.name == QUERY { return Ok(json!({"id":id.0,"mask":current,"frame":frame,"doc_version":session.generation})); }
+    if session.document.is_object_locked(object) { return Err(CommandError::new("LOCKED")); }
     let size = if matches!(command.name.as_str(), SET | FROM_SELECTION) {
         mask_dimensions(&session.document, object).ok_or_else(CommandError::invalid_params)?
     } else {
         [0, 0]
     };
     let coverage = next_coverage(session, command, object, size, &current)?;
-    if current == coverage { return Ok(json!({"id":id.0,"doc_version":session.generation,"changes":[]})); }
+    let next_frame = if command.name == INVERT { frame } else { None };
+    if current == coverage && frame == next_frame { return Ok(json!({"id":id.0,"doc_version":session.generation,"changes":[]})); }
     let mut document = session.document.clone();
     document.layer_masks.retain(|mask| mask.object != id);
-    if let Some(coverage) = coverage { document.layer_masks.push(LayerMask::new(id, coverage)); }
+    if let Some(coverage) = coverage {
+        let mut mask = LayerMask::new(id, coverage);
+        mask.frame = next_frame;
+        document.layer_masks.push(mask);
+    }
     let name = command.name.clone();
     super::document_change::commit(session, &name, document, session.selection.ids.clone(), json!({"id":id.0}))
 }
 
 pub fn can_execute(session: &Session, command: &Command) -> Option<bool> {
-    ours(command.name.as_str()).then_some(session.has_document)
+    ours(command.name.as_str()).then(|| {
+        session.has_document && command.params["id"].as_u64().map(ObjectId)
+            .and_then(|id| session.document.get_object(id))
+            .is_some_and(|object| command.name == QUERY || !session.document.is_object_locked(object))
+    })
 }
 
 pub fn run(session: &mut Session, command: &Command) -> Option<CommandResult> {

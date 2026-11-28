@@ -722,7 +722,8 @@ fn art_caret_line(session: &Session, at: usize) -> Option<[[f32; 2]; 2]> {
     let line = lines.iter().find(|line| at >= line.range.start && at <= line.range.end).or_else(|| lines.last());
     let point = line.map_or(object.pos, |line| {
         let x = text::frame::caret_x(line, at);
-        [object.pos[0] + x, object.pos[1] + line.baseline - size * 0.8]
+        let top = if line.range.start == 0 { 0.0 } else { line.baseline - size * 0.8 };
+        [object.pos[0] + x, object.pos[1] + top]
     });
     Some([point, [point[0], point[1] + size * 1.2]])
 }

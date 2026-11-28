@@ -8,7 +8,11 @@ use crate::theme::ThemeStyle;
 const ICONS_JSON: &str = include_str!("../assets/icons.json");
 const ICON_APP_MAIN: &[u8] = include_bytes!("../assets/icons/dtool-256.png");
 
-pub const SVG_ICONS: [(&str, &str); 223] = [
+pub const SVG_ICONS: [(&str, &str); 231] = [
+    ("ai-play", include_str!("../assets/icons/ai-play.svg")),
+    ("ai-stop", include_str!("../assets/icons/ai-stop.svg")),
+    ("ai-compare-vertical", include_str!("../assets/icons/ai-compare-vertical.svg")),
+    ("ai-compare-horizontal", include_str!("../assets/icons/ai-compare-horizontal.svg")),
     ("app-update", include_str!("../assets/icons/app-update.svg")),
     ("ctx-transform-separately", include_str!("../assets/icons/ctx-transform-separately.svg")),
     ("tool-shape-star", include_str!("../assets/icons/tool-shape-star.svg")),
@@ -188,6 +192,9 @@ pub const SVG_ICONS: [(&str, &str); 223] = [
     ("persona-vector", include_str!("../assets/icons/persona-vector.svg")),
     ("px-brush", include_str!("../assets/icons/px-brush.svg")),
     ("px-clone", include_str!("../assets/icons/px-clone.svg")),
+    ("px-heal", include_str!("../assets/icons/px-heal.svg")),
+    ("px-patch", include_str!("../assets/icons/px-patch.svg")),
+    ("px-blemish", include_str!("../assets/icons/px-blemish.svg")),
     ("px-eraser", include_str!("../assets/icons/px-eraser.svg")),
     ("sel-ellipse", include_str!("../assets/icons/sel-ellipse.svg")),
     ("sel-flood", include_str!("../assets/icons/sel-flood.svg")),
@@ -223,6 +230,7 @@ pub const SVG_ICONS: [(&str, &str); 223] = [
     ("tool-text-flow", include_str!("../assets/icons/tool-text-flow.svg")),
     ("tool-transparency", include_str!("../assets/icons/tool-transparency.svg")),
     ("tool-vector-brush", include_str!("../assets/icons/tool-vector-brush.svg")),
+    ("tool-vector-blob", include_str!("../assets/icons/tool-vector-blob.svg")),
     ("tool-view", include_str!("../assets/icons/tool-view.svg")),
     ("tool-zoom", include_str!("../assets/icons/tool-zoom.svg")),
     ("ui-separator", include_str!("../assets/icons/ui-separator.svg")),
@@ -234,12 +242,16 @@ pub const SVG_ICONS: [(&str, &str); 223] = [
     ("tool-flood-fill", include_str!("../assets/icons/tool-flood-fill.svg")),
 ];
 
-pub const TOOL_ICON_ALIASES: [(&str, &str); 65] = [
+pub const TOOL_ICON_ALIASES: [(&str, &str); 74] = [
     ("tool.select.object", "tool-object-selection"),
     ("tool.shape.polygon", "tool-polygon"),
     ("tool.vector_crop", "tool-vector-crop"),
     ("tool.paint.smudge", "tool-eraser-smudge"),
     ("tool.paint.clone", "px-clone"),
+    ("tool.healing_brush", "px-heal"),
+    ("tool.patch", "px-patch"),
+    ("tool.blemish_removal", "px-blemish"),
+    ("tool.undo_brush", "tool-undo-brush"),
     ("tool.retouch", "tool-inpaint"),
     ("tool.boolean", "cmd-bool-add"),
     ("tool.boolean.add", "cmd-bool-add"),
@@ -277,6 +289,9 @@ pub const TOOL_ICON_ALIASES: [(&str, &str); 65] = [
     ("tool.burn", "tool-burn"),
     ("tool.paint.sponge", "tool-sponge"),
     ("tool.paint.vector_brush", "tool-vector-brush"),
+    ("tool.blob_brush", "tool-vector-blob"),
+    ("tool.blob_erase", "px-eraser"),
+    ("tool.vector_flood", "tool-flood-fill"),
     ("tool.paint_brush", "px-brush"),
     ("tool.pen.pen", "tool-pen"),
     ("tool.pen.smart", "tool-pen-smart"),
@@ -291,12 +306,14 @@ pub const TOOL_ICON_ALIASES: [(&str, &str); 65] = [
     ("tool.transform.flip", "cmd-flip"),
     ("tool.knife", "tool-knife"),
     ("tool.contour", "tool-contour"),
+    ("tool.corner", "tool-corner"),
     ("tool.blend", "tool-blend"),
     ("tool.stroke_width", "tool-stroke-width"),
     ("tool.artboard", "tool-artboard"),
     ("tool.qr", "tool-qr"),
     ("tool.symmetry", "tool-symmetry"),
     ("tool.distribute", "tool-distribute"),
+    ("tool.fill", "tool-gradient"),
     ("tool.flood_fill", "tool-flood-fill"),
     ("tool.picture_frame", "tool-picture-frame-rect"),
     ("tool.crop", "tool-crop"),

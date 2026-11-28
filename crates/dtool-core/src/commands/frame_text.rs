@@ -304,6 +304,7 @@ fn run_frame_add(cmd: &Command, session: &mut Session) -> CommandResult {
     if optional_u64(&redo.params, "story")?.is_none() {
         redo.params["story"] = next_story_id(&session.document).into();
     }
+    crate::text_cmd::remember_story_defaults(&mut redo, &session.document);
     apply_frame_add(&redo, &mut session.document)?;
     let id = param_u64(&redo.params, "id")?;
     let story = param_u64(&redo.params, "story")?;
@@ -334,7 +335,7 @@ fn apply_frame_add(cmd: &Command, doc: &mut Document) -> Result<(), CommandError
         specials: Vec::new(),
         paras: Vec::new(),
     };
-    set_size_range(&mut story, DEFAULT_SIZE_PT);
+    crate::text_cmd::style_new_story(&mut story, &cmd.params, doc)?;
     let frame = crate::FrameProps::from_rect(size);
     let mut object = Object {
         id: object_id,
@@ -350,6 +351,7 @@ fn apply_frame_add(cmd: &Command, doc: &mut Document) -> Result<(), CommandError
         ..Object::default()
     };
     let center = [pos[0] + size[0] * 0.5, pos[1] + size[1] * 0.5];
+    object.effects = super::defaults::effects_for_creation(doc, size, &cmd.params)?;
     crate::artboard::edit::assign_new_object(doc, &mut object, center);
     doc.stories.push(story);
     let _ = doc.create_object(object);
@@ -377,6 +379,7 @@ fn run_shape_text_add(cmd: &Command, session: &mut Session) -> CommandResult {
     if optional_u64(&redo.params, "story")?.is_none() {
         redo.params["story"] = next_story_id(&session.document).into();
     }
+    crate::text_cmd::remember_story_defaults(&mut redo, &session.document);
     apply_shape_text_add(&redo, &mut session.document)?;
     let id = param_u64(&redo.params, "id")?;
     let story = param_u64(&redo.params, "story")?;
@@ -417,7 +420,7 @@ fn apply_shape_text_add(cmd: &Command, doc: &mut Document) -> Result<(), Command
         specials: Vec::new(),
         paras: Vec::new(),
     };
-    set_size_range(&mut story, DEFAULT_SIZE_PT);
+    crate::text_cmd::style_new_story(&mut story, &cmd.params, doc)?;
     let object_mut = doc.find_object_mut(shape.0).ok_or_else(CommandError::not_found)?;
     object_mut.kind = ObjectKind::FrameText { story: story_id };
     object_mut.frame = Some(frame);

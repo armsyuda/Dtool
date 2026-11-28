@@ -294,6 +294,12 @@ impl Default for TransformSelectionBoxArgs {
     }
 }
 
+impl TransformSelectionBoxArgs {
+    pub fn translation_only(&self) -> bool {
+        self.scale == unit_scale() && self.rotation_deg == 0.0 && self.shear_deg == 0.0
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TransformSetArgs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -495,7 +501,7 @@ fn plan_transform_box(
         next.rotation_deg = wrap_degrees(obj.rotation_deg + args.rotation_deg);
         next.shear_deg = (obj.shear_deg + args.shear_deg).clamp(-89.0, 89.0);
         scale_text_geometry(&mut next, args.scale, args.reflow_frame_text)?;
-        scale_curve_geometry(&mut next, factors);
+        scale_local_outline(&mut next, factors)?;
         updated.push((next, factors));
     }
     Ok(updated)
@@ -525,8 +531,20 @@ fn scale_text_geometry(object: &mut Object, scale: [f32; 2], reflow_frame_text: 
     Ok(())
 }
 
-fn scale_curve_geometry(object: &mut Object, [sx, sy]: [f64; 2]) {
-    let crate::object::ObjectKind::Curve(curve) = &mut object.kind else { return };
+fn scale_local_outline(object: &mut Object, [sx, sy]: [f64; 2]) -> Result<(), CommandError> {
+    if [sx, sy] == [1.0, 1.0] {
+        return Ok(());
+    }
+    if let Some(crop) = &mut object.vector_crop {
+        let rect = std::array::from_fn(|axis| {
+            (f64::from(crop.rect[axis]) * [sx, sy][axis % 2]) as f32
+        });
+        if rect.iter().any(|value| !value.is_finite()) || rect[2] <= 0.0 || rect[3] <= 0.0 {
+            return Err(CommandError::invalid_params());
+        }
+        crop.rect = rect;
+    }
+    let crate::object::ObjectKind::Curve(curve) = &mut object.kind else { return Ok(()) };
     let scale = |point: &mut [f64; 2]| {
         point[0] *= sx;
         point[1] *= sy;
@@ -540,6 +558,7 @@ fn scale_curve_geometry(object: &mut Object, [sx, sy]: [f64; 2]) {
             }
         }
     }
+    Ok(())
 }
 
 fn scale_object_paint(doc: &mut Document, id: ObjectId, factors: [f64; 2]) -> Result<(), CommandError> {
@@ -725,7 +744,7 @@ pub(crate) fn transform_group_member(object: &Object, map: &[f32; 6], map_path_t
         }
         next.path_text_linear = ([a, b, c, d] != [1.0, 0.0, 0.0, 1.0]).then_some([a, b, c, d]);
     }
-    scale_curve_geometry(&mut next, factors);
+    scale_local_outline(&mut next, factors)?;
     Ok((next, factors))
 }
 
@@ -789,10 +808,13 @@ fn apply_transform_set(doc: &mut Document, ids: &[ObjectId], args: &TransformSet
         if !finite2(next.pos) || !finite2(next.size) {
             return Err(CommandError::invalid_params());
         }
-        if let Some(members) = groups.get(id).filter(|_| {
-            next.pos != from.pos || next.size != from.size
-                || next.rotation_deg != from.rotation_deg || next.shear_deg != from.shear_deg
-        }) {
+        let changed = next.pos != from.pos || next.size != from.size
+            || next.rotation_deg != from.rotation_deg || next.shear_deg != from.shear_deg;
+        if visual.is_none() && scale != [1.0, 1.0] {
+            scale_text_geometry(&mut next, scale.map(|value| value as f32), true)?;
+            scale_local_outline(&mut next, scale)?;
+        }
+        if let Some(members) = groups.get(id).filter(|_| changed) {
             let map = group_member_transform(from, &next, scale)?;
             if visual.is_some() {
                 next = transform_group_member(obj, &map, false, false)?.0;
@@ -811,7 +833,12 @@ fn apply_transform_set(doc: &mut Document, ids: &[ObjectId], args: &TransformSet
                 updated.push(member);
             }
         } else if visual.is_some() {
-            next = obj.clone();
+            next = if changed {
+                let map = group_member_transform(from, &next, scale)?;
+                transform_group_member(obj, &map, false, false)?.0
+            } else {
+                obj.clone()
+            };
         }
         factors.push((obj.id, scale));
         updated.push(next);
@@ -880,7 +907,8 @@ pub fn transform_box(doc: &Document, object: &Object) -> [f32; 4] {
 }
 
 fn transform_geometry(doc: &Document, object: &Object) -> Option<Object> {
-    let [x, y, w, h] = crate::scene_hit::group_content_bounds(doc, object, None)?;
+    let [x, y, w, h] = crate::scene_hit::pixel_content_bounds(doc, object)
+        .or_else(|| crate::scene_hit::group_content_bounds(doc, object, None))?;
     if !(w > 0.0 && h > 0.0) { return None; }
     let mut visual = object.clone();
     let centre = crate::geometry::apply_matrix(&crate::geometry::object_matrix(object), [x + w * 0.5, y + h * 0.5]);
@@ -1012,23 +1040,33 @@ pub fn execute_object_create(doc: &mut Document, args: ObjectCreateArgs) -> Resu
     
     obj.pos = args.pos;
     obj.size = args.size;
-    obj.fill = args.fill.unwrap_or_default();
-    if let Some(stroke) = args.stroke {
-        obj.stroke = stroke;
-    }
+    let defaults = crate::commands::defaults::for_document(doc);
+    obj.stroke = args.stroke.unwrap_or_else(|| defaults.stroke_for_document(doc));
+    obj.fill = args.fill.unwrap_or(defaults.fill);
     obj.opacity = opacity;
+    obj.effects = match args.effects {
+        Some(effects) if effects.iter().all(crate::layer_style::LayerEffect::is_valid) => effects,
+        Some(_) => return Err(CommandError::invalid_params()),
+        None => crate::commands::defaults::effects_for_creation(doc, obj.size, &serde_json::Value::Null)?,
+    };
     crate::artboard::edit::assign_new_object(doc, &mut obj, args.pos);
 
     let id = doc.create_object(obj);
     Ok(id)
 }
 
-pub fn execute_object_update(doc: &mut Document, args: ObjectUpdateArgs) -> Result<(), CommandError> {
-    let id = ObjectId(args.id);
-
-    if doc.get_object(id).is_none() {
-        return Err(CommandError::not_found());
+pub(crate) fn check_object_style_edit(doc: &Document, args: &ObjectUpdateArgs) -> Result<(), CommandError> {
+    let object = doc.get_object(ObjectId(args.id)).ok_or_else(CommandError::not_found)?;
+    let changes_style = args.fill.is_some() || args.stroke.is_some()
+        || args.opacity.is_some() || args.transparency.is_some();
+    if changes_style && doc.is_object_locked(object) {
+        return Err(CommandError::new("LOCKED"));
     }
+    Ok(())
+}
+
+pub fn execute_object_update(doc: &mut Document, args: ObjectUpdateArgs) -> Result<(), CommandError> {
+    check_object_style_edit(doc, &args)?;
 
     if let Some(size) = args.size {
         if size[0] <= 0.0 || size[1] <= 0.0 {
@@ -1549,6 +1587,7 @@ pub struct Session {
     pub selection: Selection,
     pub active_slice: Option<crate::slice::SliceId>,
     pub ai_image: crate::ai_image::Jobs,
+    pub inpaint: crate::commands::inpaint::State,
     pub table_selection: crate::table::selection::TableSelection,
     pub clipboard: AppClipboard,
     pub last_duplicate_ids: Vec<ObjectId>,
@@ -1564,6 +1603,7 @@ pub struct Session {
     pub panel_colour_pick_previous: Option<String>,
     pub panel_sampled_colour: Option<crate::paint::Colour>,
     pub tool_options: crate::context_toolbar::ToolOptionStore,
+    pub clone_sources: crate::commands::pixel_brush::global_source::Store,
     pub quick_mask: crate::commands::quickmask::State,
     pub(crate) mixer_load: crate::brush::MixerLoad,
     pub(crate) last_deselected: Option<PixelSelection>,
@@ -1662,6 +1702,24 @@ impl Session {
     /// Artwork caches track document history but can reuse ink across object selections.
     pub fn artwork_generation(&self) -> u64 {
         self.generation.wrapping_sub(self.selection_generations)
+    }
+
+    /// An undo position is reusable only along certified canvas transitions.
+    pub fn canvas_history_position(&self) -> u64 {
+        self.undo.position()
+    }
+
+    pub fn can_reuse_canvas_from(&self, artwork_generation: u64, document_version: u64) -> bool {
+        self.change_log.shape_canvas_transition
+            == Some(((artwork_generation, document_version), (self.artwork_generation(), self.document.version)))
+    }
+
+    /// The last certified local edit, provided it directly follows the given artwork revision.
+    pub fn canvas_damage_from(&self, generation: u64, version: u64) -> Option<&crate::query::CanvasDamage> {
+        self.change_log.canvas_damage.as_ref().filter(|damage| {
+            damage.before == (generation, version)
+                && damage.after == (self.artwork_generation(), self.document.version)
+        })
     }
 
     fn push_guide_undo(&mut self, name: &str, redo: Command, undo_cmd: Command) {
@@ -1866,6 +1924,7 @@ impl Session {
 
     pub fn new(mut document: Document) -> Self {
         document.hydrate_ids();
+        document.object_defaults.get_or_insert_with(crate::commands::defaults::current);
         Session {
             autosave: crate::autosave::Autosave::new(),
             generation: 0,
@@ -1891,6 +1950,7 @@ impl Session {
             panel_colour_pick_previous: None,
             panel_sampled_colour: None,
             tool_options: crate::context_toolbar::ToolOptionStore::default(),
+            clone_sources: Default::default(),
             appearance_focus: None,
             guides: Guides::default(),
             view: crate::view_state::ViewState::default(),
@@ -1908,6 +1968,7 @@ impl Session {
             effect_preview_owner: std::sync::Arc::new(()),
             quick_mask: Default::default(),
             mixer_load: Default::default(),
+            inpaint: Default::default(),
             last_deselected: None,
         }
     }
@@ -2067,6 +2128,11 @@ impl Session {
             if cmd.name == crate::table::styles::DEFAULT_SAVE || !ok {
                 return Err(CommandError { code: "BATCH_PREFLIGHT_FAILED".to_string(), message_key: "error.batch_preflight_failed".to_string() });
             }
+        }
+
+        if let Some(result) = crate::commands::layer_style::commit_batch(self, &commands) {
+            result?;
+            return Ok(commands.into_iter().map(|cmd| ChangeName { name: cmd.name }).collect());
         }
 
         let rollback = BatchRollback::capture(self);
@@ -2336,6 +2402,19 @@ impl Session {
         self.change_log.start(generation_before);
         let version_before = self.document.version;
         let geometry_before = self.document.geometry_rev;
+        // Shape creation has an object-only inverse. Certify both ends of
+        // that step so the canvas can reuse a composite at its undo position.
+        use crate::commands::shape::RESTORE_ADDED_SHAPE;
+        let shape_history_step = match command.name.as_str() {
+            "shape.add" => true,
+            "edit.undo" => self.undo.next_action_is(false, RESTORE_ADDED_SHAPE),
+            "edit.redo" => self.undo.next_action_is(true, RESTORE_ADDED_SHAPE),
+            _ => false,
+        };
+        let local_edit = matches!(command.name.as_str(), "object.update" | "transform.selection_box");
+        let canvas_before = ((shape_history_step || local_edit) && self.edit.is_none() && self.text_edit.is_none()
+            && self.document.master_pages.is_empty() && !crate::commands::brush::has_live_blends(&self.document))
+            .then(|| (self.artwork_generation(), version_before));
         let macro_context = self.macro_recorder.step_context(self);
         self.macro_recorder.enter();
         let result = dispatch(self, command);
@@ -2369,6 +2448,32 @@ impl Session {
                     self.selection_generations += self.generation - generation_before;
                 }
                 self.change_log.record(self.generation, &command.name);
+                if !selection_only || captions_moved || self.document.version != version_before
+                    || self.document.geometry_rev != geometry_before
+                {
+                    let stable = canvas_before
+                        .filter(|_| !inherited && !captions_moved && self.document.geometry_rev == geometry_before);
+                    let after = (self.artwork_generation(), self.document.version);
+                    self.change_log.shape_canvas_transition = stable.filter(|_| shape_history_step)
+                        .map(|before| (before, after));
+                    self.change_log.canvas_damage = stable.filter(|_| local_edit).and_then(|before| {
+                        let changes = result.as_ref().ok()?;
+                        if changes.get("warnings").is_some() {
+                            return None;
+                        }
+                        let change = changes["changes"].as_array()?.first()?;
+                        let objects = if let Some(id) = change["id"].as_u64() {
+                            vec![ObjectId(id)]
+                        } else {
+                            change["ids"].as_array()?.iter()
+                                .map(|value| value.as_u64().map(ObjectId)).collect::<Option<Vec<_>>>()?
+                        };
+                        let translation_only = command.name == "transform.selection_box"
+                            && serde_json::from_value::<TransformSelectionBoxArgs>(command.params.clone())
+                                .is_ok_and(|args| args.translation_only());
+                        (!objects.is_empty()).then_some(crate::query::CanvasDamage { before, after, objects, translation_only })
+                    });
+                }
             }
             if self.macro_recorder.is_recording() {
                 self.macro_recorder.tap_step(&self.catalog, command, macro_context, Some(&self.document));
@@ -2521,8 +2626,7 @@ impl Session {
                     );
                 }
 
-                execute_object_update(&mut self.document, args.clone())
-                    .map_err(|_| CommandError { code: "INVALID_PARAMS".to_string(), message_key: "error.invalid_params".to_string() })?;
+                execute_object_update(&mut self.document, args)?;
 
                 let undo_cmd = Command {
                     name: "object.restore".to_string(),
@@ -2540,7 +2644,7 @@ impl Session {
 
                 Ok(serde_json::json!({
                     "doc_version": self.generation,
-                    "changes": [{ "name": "object.update", "id": args.id }]
+                    "changes": [{ "name": "object.update", "id": id.0 }]
                 }))
             },
             "object.delete" => {

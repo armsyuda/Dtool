@@ -749,6 +749,7 @@ pub(crate) fn apply_object_update(
     document: &mut Document, mut args: crate::object::ObjectUpdateArgs, shared: bool,
 ) -> Result<bool, CommandError> {
     let id = ObjectId(args.id);
+    crate::command::check_object_style_edit(document, &args)?;
     let fill = args.fill.as_ref().and_then(|paint| fill_link(document, id, paint))
         .and_then(|link| args.fill.take().map(|paint| (link, paint)));
     let stroke = if let Some(next) = args.stroke.take_if(|_| object_link(document, id).is_some()) {

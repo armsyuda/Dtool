@@ -7,11 +7,11 @@ pub(crate) fn is_para_break(ch: char) -> bool {
 
 impl Session {
     pub fn selected_table_stories(&self) -> Vec<StoryId> {
-        if self.active_tool != "tool.table" || self.text_edit.is_some() {
+        if self.text_edit.is_some() {
             return Vec::new();
         }
-        let selection = crate::table::selection::current(self);
-        let Some(object) = selection.table.and_then(|id| self.document.get_object(id)) else {
+        let selection = crate::table::selection::for_format(self);
+        let Some(object) = selection.table.and_then(|id| self.document.get_object(id)).filter(|object| !object.locked) else {
             return Vec::new();
         };
         let crate::ObjectKind::Table(table) = &object.kind else {

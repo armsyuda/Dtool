@@ -149,7 +149,9 @@ fn hit_test_scoped(
                 if let Some(brush) = brush {
                     brush.hit(p, tolerance)
                 } else {
-                    frame_image_hit(doc, *object, quad, p).unwrap_or_else(|| prim_hit(scene, prim, p, tolerance))
+                    pixel_bounds_hit(doc, *object, p)
+                        .or_else(|| frame_image_hit(doc, *object, quad, p))
+                        .unwrap_or_else(|| prim_hit(scene, prim, p, tolerance))
                 }
             }
             _ => prim_hit(scene, prim, p, tolerance),
@@ -182,28 +184,85 @@ fn hit_test_scoped(
     })
 }
 
-/// Canvas handles follow symbol contents and the visible geometry of vector masks.
+pub(crate) fn pixel_content_bounds(doc: &Document, object: &crate::Object) -> Option<[f32; 4]> {
+    let pixels = doc.pixel_layers.get(object.id)?;
+    let [x, y, width, height] = pixels.visible_bounds()?.map(|value| value as f32);
+    let [sx, sy] = [
+        object.size[0].abs() / pixels.width as f32,
+        object.size[1].abs() / pixels.height as f32,
+    ];
+    (sx > 0.0 && sy > 0.0 && sx.is_finite() && sy.is_finite()).then_some([
+        object.pos[0] + x * sx, object.pos[1] + y * sy, width * sx, height * sy,
+    ])
+}
+
+fn pixel_bounds_hit(doc: &Document, id: ObjectId, point: [f32; 2]) -> Option<bool> {
+    let object = doc.get_object(id)?;
+    let bounds = pixel_content_bounds(doc, object)?;
+    let quad = crate::geometry::rect_quad(bounds, &crate::geometry::object_matrix(object));
+    Some(inside(&[quad.to_vec()], point[0], point[1]))
+}
+
+/// Canvas handles follow raster content, symbols and the visible geometry of vector masks.
 pub fn selection_quad(scene: &Scene, doc: &Document, id: ObjectId) -> Option<crate::scene::Quad> {
     doc.get_object(id).and_then(|root| {
-        let matrix = crate::geometry::object_matrix(root);
-        let bounds = if scene.quad(id).is_some() && matches!(root.kind, ObjectKind::ArtText { .. }) {
-            let inverse = crate::geometry::invert_matrix(&matrix)?;
-            let mut contours = crate::text_lines::text_outlines(doc, id)?;
-            for point in contours.iter_mut().flatten() {
-                *point = crate::geometry::apply_matrix(&inverse, *point);
-            }
-            let [l, t, r, b] = contours_bounds(&contours)?;
-            (r > l && b > t).then_some([l, t, r - l, b - t])
-        } else if matches!(root.kind, ObjectKind::Shape | ObjectKind::Curve(_))
-            && doc.objects().iter().any(|object| object.parent_id == Some(id) && object.clip_role == crate::object::ClipRole::Mask)
-        {
-            visible_masked_bounds(scene, id, &matrix)
-        } else {
-            group_content_bounds(doc, root, Some(scene))
-        }?;
-        Some(crate::geometry::rect_quad(bounds, &matrix))
-    })
-        .or_else(|| scene.quad(id))
+        object_selection_quad(scene, doc, root, || scene.quad(id).is_some(), || {
+            doc.objects().iter().any(|object| object.parent_id == Some(id)
+                && object.clip_role == crate::object::ClipRole::Mask)
+        })
+    }).or_else(|| scene.quad(id))
+}
+
+fn object_selection_quad(
+    scene: &Scene, doc: &Document, root: &crate::Object, has_scene_quad: impl FnOnce() -> bool,
+    has_vector_mask: impl FnOnce() -> bool,
+) -> Option<crate::scene::Quad> {
+    let id = root.id;
+    let matrix = crate::geometry::object_matrix(root);
+    let bounds = if let Some(bounds) = pixel_content_bounds(doc, root) {
+        Some(bounds)
+    } else if matches!(root.kind, ObjectKind::ArtText { .. }) && has_scene_quad() {
+        let inverse = crate::geometry::invert_matrix(&matrix)?;
+        let mut contours = crate::text_lines::text_outlines(doc, id)?;
+        for point in contours.iter_mut().flatten() {
+            *point = crate::geometry::apply_matrix(&inverse, *point);
+        }
+        let [l, t, r, b] = contours_bounds(&contours)?;
+        (r > l && b > t).then_some([l, t, r - l, b - t])
+    } else if matches!(root.kind, ObjectKind::Shape | ObjectKind::Curve(_)) && has_vector_mask() {
+        visible_masked_bounds(scene, id, &matrix)
+    } else {
+        group_content_bounds(doc, root, Some(scene))
+    }?;
+    Some(crate::geometry::rect_quad(bounds, &matrix))
+}
+
+/// Resolve many visible selection quads without scanning the scene for each object.
+pub struct SelectionQuads<'a> {
+    scene: &'a Scene,
+    doc: &'a Document,
+    quads: std::collections::HashMap<ObjectId, crate::scene::Quad>,
+    mask_owners: std::collections::HashSet<ObjectId>,
+}
+
+impl<'a> SelectionQuads<'a> {
+    pub fn new(scene: &'a Scene, doc: &'a Document) -> Self {
+        let mut quads = std::collections::HashMap::with_capacity(scene.quads.len());
+        for &(id, quad) in &scene.quads {
+            quads.entry(id).or_insert(quad);
+        }
+        let mask_owners = doc.objects().iter().filter_map(|object| {
+            object.parent_id.filter(|_| object.clip_role == crate::object::ClipRole::Mask)
+        }).collect();
+        Self { scene, doc, quads, mask_owners }
+    }
+
+    pub fn visible_quad(&self, object: &crate::Object) -> Option<crate::scene::Quad> {
+        let raw = self.quads.get(&object.id).copied()?;
+        object_selection_quad(self.scene, self.doc, object, || true, || {
+            self.mask_owners.contains(&object.id)
+        }).or(Some(raw))
+    }
 }
 
 fn visible_masked_bounds(scene: &Scene, id: ObjectId, matrix: &[f32; 6]) -> Option<[f32; 4]> {

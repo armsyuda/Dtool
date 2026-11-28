@@ -8,7 +8,7 @@ use egui::ecolor::Hsva;
 use serde_json::json;
 
 use crate::dialog_chrome::{confirm_cancel_buttons, show_modal, ClosePolicy, DialogResult};
-use crate::panels::table::{baseline_controls, choice, frame_insets, paint_choice_with, scalar, stroke_pattern};
+use crate::panels::table::{baseline_controls, choice, paint_choice_with, scalar, stroke_pattern};
 use super::images::Images;
 
 pub(super) enum Outcome {
@@ -75,7 +75,7 @@ impl FormatEditor {
                 dtool_design::panel_columns(ui, 2, 280.0, |ui, column| {
                     dtool_design::dialog_section(ui, |ui| {
                         if column == 0 {
-                            self.structure(ui, units, &session.document, images);
+                            self.structure(ui, &session.document, images);
                         } else {
                             self.cell_controls(ui, units, &paragraphs, &session.document, images);
                         }
@@ -104,7 +104,7 @@ impl FormatEditor {
         }
     }
 
-    fn structure(&mut self, ui: &mut Ui, units: &str, doc: &Document, images: &mut Images) {
+    fn structure(&mut self, ui: &mut Ui, doc: &Document, images: &mut Images) {
         ui.label(egui::RichText::new(text("table.formats.structure")).strong());
         let pattern = &mut self.draft.pattern;
         let mut rows = pattern.rows;
@@ -134,13 +134,8 @@ impl FormatEditor {
         }
         self.pattern_grid(ui, doc, images);
         ui.separator();
-        ui.label(egui::RichText::new(text("table.panel.frame")).strong());
         ui.push_id("frame", |ui| {
             let frame = &mut self.draft.frame;
-            paint_controls(ui, &mut frame.fill, &mut frame.edges, &mut self.colour, &mut self.outline, doc, images);
-            if let Some(insets) = frame_insets(ui, frame.insets, units) {
-                frame.insets = insets;
-            }
             dtool_design::toggle(ui, &mut frame.ignore_baseline_grid, text("table.frame.ignore_grid"));
             if let Some(baseline) = baseline_controls(ui, &frame.baseline.clone().unwrap_or_default()) {
                 frame.baseline = Some(baseline);
@@ -300,7 +295,8 @@ fn paint_controls(ui: &mut Ui, fill: &mut Option<Paint>, edges: &mut [Option<Edg
         for edge in &mut *selected {
             let width_pt = active_edge(edge).map_or(1.0, |edge| edge.width_pt);
             let line_style = active_edge(edge).map_or(style, |edge| edge.line_style);
-            *edge = (!matches!(paint, Paint::None)).then(|| EdgeStyle { paint: paint.clone(), width_pt, line_style });
+            let align = edge.as_ref().map_or(Default::default(), |edge| edge.align);
+            *edge = (!matches!(paint, Paint::None)).then(|| EdgeStyle { paint: paint.clone(), width_pt, line_style, align });
         }
     }
     if let Some(width) = scalar(ui, "table.panel.frame_width", same_width.then_some(width), "pt") {
@@ -308,7 +304,8 @@ fn paint_controls(ui: &mut Ui, fill: &mut Option<Paint>, edges: &mut [Option<Edg
         for edge in &mut *selected {
             let paint = active_edge(edge).map_or_else(|| fallback.clone(), |edge| edge.paint.clone());
             let line_style = active_edge(edge).map_or(style, |edge| edge.line_style);
-            *edge = (width > 0.0).then_some(EdgeStyle { paint, width_pt: width, line_style });
+            let align = edge.as_ref().map_or(Default::default(), |edge| edge.align);
+            *edge = (width > 0.0).then_some(EdgeStyle { paint, width_pt: width, line_style, align });
         }
     }
     if let Some(line_style) = stroke_pattern(ui, same_style.then_some(style)) {
@@ -321,6 +318,7 @@ fn paint_controls(ui: &mut Ui, fill: &mut Option<Paint>, edges: &mut [Option<Edg
                     paint: Paint::Solid { colour: crate::panels::colour::picker_colour(*outline) },
                     width_pt: 1.0,
                     line_style,
+                    align: edge.as_ref().map_or(Default::default(), |edge| edge.align),
                 });
             }
         }

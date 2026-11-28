@@ -1,7 +1,7 @@
 use dtool_design::icons::tool_icon_for;
 use dtool_strings::text;
 use dtool_ui::icon_cache::IconCache;
-use dtool_ui::tools_panel::{tool_column, tool_column_icons, tool_column_ids};
+use dtool_ui::tools_panel::{tool_column, tool_column_icons};
 use egui::{Context, Pos2, RawInput, Rect, Shape, TextureId};
 
 fn frame(ctx: &Context, mut add: impl FnMut(&mut egui::Ui)) -> (Vec<TextureId>, Vec<String>) {
@@ -13,6 +13,13 @@ fn frame(ctx: &Context, mut add: impl FnMut(&mut egui::Ui)) -> (Vec<TextureId>, 
         collect(&clipped.shape, &mut ids, &mut texts);
     }
     (ids, texts)
+}
+
+fn selected_ink(ctx: &Context) -> egui::Color32 {
+    match ctx.theme() {
+        egui::Theme::Dark => dtool_design::theme::dark().text,
+        egui::Theme::Light => dtool_design::theme::light().text,
+    }
 }
 
 fn collect(shape: &Shape, ids: &mut Vec<TextureId>, texts: &mut Vec<String>) {
@@ -42,14 +49,15 @@ fn tools_column_draws_icons_for_move_and_knife() {
         });
     }
     let (ids, texts) = shown;
-    let colour = ctx.style_of(ctx.theme()).visuals.selection.stroke.color;
+    let colour = selected_ink(&ctx);
     let px = (dtool_design::size("icon.size.md") * ctx.pixels_per_point()).ceil() as u32;
     let move_texture = icons.tool_texture(&ctx, "tool.move", colour, px).expect("move icon texture");
     assert!(ids.contains(&move_texture.id()), "{ids:?}");
     assert!(!texts.iter().any(|t| t == text("tool.knife")), "{texts:?}");
     assert!(!texts.iter().any(|t| t == text("tool.move")), "{texts:?}");
-    let mapped = tool_column_ids("tool.move").iter().filter(|id| tool_icon_for(id).is_some()).count();
-    assert_eq!(icons.len(), mapped);
+    let knife_colour = dtool_design::icons::current_icon_colour();
+    let knife_texture = icons.tool_texture(&ctx, "tool.knife", knife_colour, px).expect("knife icon texture");
+    assert!(ids.contains(&knife_texture.id()), "{ids:?}");
 }
 
 #[test]

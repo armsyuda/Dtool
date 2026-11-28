@@ -330,15 +330,21 @@ impl ColourPanel {
     fn brush_colour(session: &dtool_core::Session) -> Option<(dtool_core::brush::BrushOp, &'static str)> {
         use dtool_core::brush::BrushOp;
         match dtool_core::commands::pixel_brush::operation(&session.active_tool)? {
+            op @ (BrushOp::Paint | BrushOp::Pixel) => Some((op, dtool_core::context_toolbar::BRUSH_FOREGROUND)),
             BrushOp::ColourReplace => Some((BrushOp::ColourReplace, "brush.replacement_colour")),
             BrushOp::Mixer => Some((BrushOp::Mixer, "brush.mixer_colour")),
-            BrushOp::Tone => Some((BrushOp::Tone, "brush.tone_colour")),
+            BrushOp::Tone if session.active_tool == dtool_core::context_toolbar::TONE_TOOL =>
+                Some((BrushOp::Tone, "brush.tone_colour")),
             _ => None,
         }
     }
 
     fn well_state(workspace: &Workspace, target: ColourTarget, follow_slot: bool) -> crate::fill_stroke::WellState {
         use crate::fill_stroke::WellState;
+        if target == ColourTarget::Fill && let Some(session) = workspace.session() {
+            let ranges = super::character::table_colour_ranges(session);
+            if !ranges.is_empty() { return super::character::table_text_paint(&ranges); }
+        }
         if target == ColourTarget::Fill
             && let Some(session) = workspace.session()
             && let Some((op, _)) = Self::brush_colour(session)
@@ -347,7 +353,7 @@ impl ColourPanel {
             return WellState::Single(if a == 0 { Paint::None } else { Paint::Solid { colour: Colour::new(r, g, b, a) } });
         }
         let Some(session) = workspace.session().filter(|session| !session.selection.ids.is_empty()) else {
-            let defaults = dtool_core::commands::defaults::current();
+            let defaults = dtool_core::commands::defaults::for_session(workspace.session());
             return WellState::Single(match target {
                 ColourTarget::Fill => defaults.fill,
                 ColourTarget::Stroke => defaults.stroke.paint,
@@ -470,6 +476,10 @@ impl ColourPanel {
             })));
         }
         let paint = Paint::Solid { colour: self.colour };
+        if self.target == ColourTarget::Fill {
+            let ranges = super::character::table_colour_ranges(session);
+            if !ranges.is_empty() { return super::character::table_text_colour_command(&ranges, &paint); }
+        }
         if let Some(focus) = focused_slot(workspace, self.target) {
             let current = focus.slot.paint(session.document.get_object(focus.node)?)?;
             return (*current != paint).then(|| focus.slot.paint_command(focus.node, paint));
@@ -554,6 +564,14 @@ impl ColourPanel {
     }
 
     fn apply_paint(&mut self, workspace: &mut Workspace, paint: Paint) {
+        if self.target == ColourTarget::Fill && matches!(paint, Paint::None)
+            && let Some(command) = workspace.session().and_then(|session| {
+                super::character::table_text_colour_command(&super::character::table_colour_ranges(session), &paint)
+            })
+        {
+            self.run(workspace, command);
+            return;
+        }
         if self.target == ColourTarget::Fill
             && let Some((op, _)) = workspace.session().and_then(Self::brush_colour)
         {
@@ -581,7 +599,7 @@ impl ColourPanel {
                     ColourTarget::Fill => (Some(paint), None),
                     ColourTarget::Stroke => (None, Some(paint)),
                 };
-                dtool_core::commands::defaults::set_paints(fill, stroke);
+                dtool_core::commands::defaults::set_paints(workspace.session_mut(), fill, stroke);
             }
             _ => {}
         }
@@ -721,7 +739,7 @@ impl ColourPanel {
     pub(crate) fn tool_swatches(&mut self, ui: &mut egui::Ui, workspace: &Workspace) -> Option<ToolColourAction> {
         let selected = Self::selection(workspace);
         let editable = workspace.session().is_some_and(|session| {
-            selected.iter().all(|id| session.document.get_object(*id).is_some_and(|object| !object.locked))
+            selected.iter().all(|id| session.document.get_object(*id).is_some_and(|object| !session.document.is_object_locked(object)))
         });
         let mut picked = None;
         for (target, response) in self.overlapping_swatches(ui, workspace, true) {
@@ -755,8 +773,8 @@ impl ColourPanel {
 
     pub(crate) fn swap_paints(&mut self, workspace: &mut Workspace) {
         if Self::selection(workspace).is_empty() {
-            let defaults = dtool_core::commands::defaults::current();
-            dtool_core::commands::defaults::set_paints(Some(defaults.stroke.paint), Some(defaults.fill));
+            let defaults = dtool_core::commands::defaults::for_session(workspace.session());
+            dtool_core::commands::defaults::set_paints(workspace.session_mut(), Some(defaults.stroke.paint), Some(defaults.fill));
         } else {
             self.run(workspace, Command::with_params(crate::fill_stroke::PAINT_SWAP, json!({})));
         }
@@ -795,7 +813,8 @@ impl ColourPanel {
 
     pub(crate) fn clear_paint(&mut self, workspace: &mut Workspace, target: ColourTarget) {
         self.set_target(target);
-        if Self::selection(workspace).is_empty() {
+        if Self::selection(workspace).is_empty() || (target == ColourTarget::Fill && workspace.session().is_some_and(|session|
+            !super::character::table_colour_ranges(session).is_empty())) {
             self.apply_paint(workspace, Paint::None);
         } else {
             let role = match target { ColourTarget::Fill => "fill", ColourTarget::Stroke => "stroke" };
@@ -814,7 +833,7 @@ impl ColourPanel {
         }
         let recent = if workspace.session().is_some() { self.recent(workspace) } else { Vec::new() };
         let editable = workspace.session().is_none_or(|session| session.selection.ids.iter().all(|id| {
-            session.document.get_object(*id).is_some_and(|object| !object.locked)
+            session.document.get_object(*id).is_some_and(|object| !session.document.is_object_locked(object))
         }));
         let preview_selection = workspace.session().is_some_and(|session| {
             !session.selection.ids.is_empty()

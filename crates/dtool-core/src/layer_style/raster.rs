@@ -1170,6 +1170,22 @@ fn draw_effect_region(doc: &Document, pixels: &mut [u8], layer: &EffectLayer, bo
     } else if !layer.invert && layer.alpha_edge.is_none() {
         match &layer.prim {
             Prim::Fill { contours, .. } => contours_bounds(contours),
+            Prim::Stroke { object, points, closed, width, paint, .. } => {
+                let expanded = if matches!(paint, Paint::Solid { .. } | Paint::Gradient { .. }) {
+                    doc.get_object(*object).and_then(|object| {
+                        crate::scene::solid_stroke_contours(object, points, *closed, *width)
+                    })
+                } else {
+                    None
+                };
+                if let Some(contours) = expanded {
+                    contours_bounds(&contours)
+                } else {
+                    let radius = if *width <= 0.0 { 0.5 } else { *width * 0.5 };
+                    contours_bounds(std::slice::from_ref(points))
+                        .map(|[left, top, right, bottom]| [left - radius, top - radius, right + radius, bottom + radius])
+                }
+            }
             Prim::Image { quad, .. } => {
                 let x = quad.map(|p| p[0]);
                 let y = quad.map(|p| p[1]);
@@ -1342,8 +1358,32 @@ pub fn render_region_scaled(doc: &Document, flags: &CanvasFlags, staged: &[Stage
 }
 
 pub fn render_scene_region(doc: &Document, flags: &CanvasFlags, staged: &[StagedEffect], scene: &Scene, bounds: [f32; 4], size: [u32; 2], effect_scale: f32) -> Vec<u8> {
-    let items = effect_items(doc, flags, scene_items(scene), staged);
-    rasterize_items_scaled(doc, scene, &items, bounds, size[0], size[1], effect_scale)
+    RegionRenderer::new(doc, flags, scene, staged).render(bounds, size, effect_scale)
+}
+
+/// Render regions of one scene with a shared effect list when the scene needs one.
+pub struct RegionRenderer<'a> {
+    doc: &'a Document,
+    scene: &'a Scene,
+    effects: Option<Vec<Item>>,
+}
+
+impl<'a> RegionRenderer<'a> {
+    pub fn new(doc: &'a Document, flags: &CanvasFlags, scene: &'a Scene, staged: &[StagedEffect]) -> Self {
+        let show_effects = !matches!(flags.view_mode, crate::ViewMode::Outline | crate::ViewMode::Wireframe);
+        let effects = (show_effects && (staged.iter().any(|item| item.effect.enabled)
+            || doc.objects().iter().any(|object| object.effects.iter().any(|effect| effect.enabled))))
+            .then(|| effect_items(doc, flags, scene_items(scene), staged));
+        Self { doc, scene, effects }
+    }
+
+    pub fn render(&self, bounds: [f32; 4], [width, height]: [u32; 2], effect_scale: f32) -> Vec<u8> {
+        if let Some(items) = &self.effects {
+            rasterize_items_scaled(self.doc, self.scene, items, bounds, width, height, effect_scale)
+        } else {
+            rasterize_scene(self.doc, self.scene, bounds, width, height, None)
+        }
+    }
 }
 
 pub fn render_object_alone(doc: &Document, flags: &CanvasFlags, object: ObjectId, bounds: [f32; 4], width: u32, height: u32) -> Vec<u8> {
@@ -1361,6 +1401,27 @@ pub fn render_object_region(doc: &Document, flags: &CanvasFlags, staged: &[Stage
     let scene = clipped_scene(doc, flags);
     let items = upto(doc, effect_items(doc, flags, scene_items(&scene), staged), object);
     rasterize_items(doc, &scene, &items, bounds, width, height)
+}
+
+pub(crate) fn render_below_object_region(doc: &Document, flags: &CanvasFlags, object: ObjectId, bounds: [f32; 4], size: [u32; 2]) -> Option<Vec<u8>> {
+    render_relative_object_region(doc, flags, object, bounds, size, false)
+}
+
+pub(crate) fn render_relative_object_region(
+    doc: &Document, flags: &CanvasFlags, object: ObjectId,
+    bounds: [f32; 4], size: [u32; 2], include_object: bool,
+) -> Option<Vec<u8>> {
+    let scene = clipped_scene(doc, flags);
+    let mut items = effect_items(doc, flags, scene_items(&scene), &[]);
+    let is_target = |item: &Item| item.object() == Some(object);
+    let boundary = if include_object {
+        items.iter().rposition(is_target)? + 1
+    } else {
+        items.iter().position(is_target)?
+    };
+    if boundary == 0 { return None; }
+    items.truncate(boundary);
+    Some(rasterize_items(doc, &scene, &items, bounds, size[0], size[1]))
 }
 
 pub fn object_effect_bounds(doc: &Document, flags: &CanvasFlags, staged: &[StagedEffect], object: ObjectId) -> Option<[f32; 4]> {

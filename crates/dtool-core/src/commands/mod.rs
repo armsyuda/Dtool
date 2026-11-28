@@ -18,6 +18,7 @@ pub mod style_pick;
 pub mod export_presets;
 pub mod curves;
 pub mod vector_crop;
+pub mod contour;
 pub mod curve_edit;
 pub mod curve_nodes;
 pub mod measure;
@@ -75,6 +76,9 @@ pub mod pixel_presets;
 pub mod layer_meta;
 pub mod brush;
 pub mod red_eye;
+pub mod inpaint;
+pub mod patch;
+pub use patch::blemish;
 pub mod selection_magic_wand;
 pub mod selection_refine;
 pub mod pixel_selection;
@@ -129,6 +133,7 @@ pub fn can_execute(session: &Session, command: &Command) -> Option<bool> {
     if let Some(v) = crate::boolean::can_execute(session, command) { return Some(v); }
     if let Some(v) = vector_crop::can_execute(session, command) { return Some(v); }
     if let Some(v) = curve_edit::can_execute(session, command) { return Some(v); }
+    if let Some(v) = contour::can_execute(session, command) { return Some(v); }
     if let Some(v) = curve_nodes::can_execute(session, command) { return Some(v); }
     if let Some(v) = measure::can_execute(session, command) { return Some(v); }
     if let Some(v) = view_actual::can_execute(session, command) { return Some(v); }
@@ -163,6 +168,9 @@ pub fn can_execute(session: &Session, command: &Command) -> Option<bool> {
     if let Some(v) = ui::can_execute(session, command) { return Some(v); }
     if let Some(v) = pixel_selection::can_execute(session, command) { return Some(v); }
     if let Some(v) = selection_magic_wand::can_execute(session, command) { return Some(v); }
+    if let Some(v) = inpaint::can_execute(session, command) { return Some(v); }
+    if let Some(v) = patch::can_execute(session, command) { return Some(v); }
+    if let Some(v) = blemish::can_execute(session, command) { return Some(v); }
     if let Some(v) = red_eye::can_execute(session, command) { return Some(v); }
     if let Some(v) = history_menu::can_execute(session, command) { return Some(v); }
     if let Some(v) = crate::pixel_perspective::can_execute(session, command) { return Some(v); }
@@ -240,6 +248,7 @@ pub fn run(session: &mut Session, command: &Command) -> Option<CommandResult> {
     if let Some(v) = crate::boolean::run(session, command) { return Some(v); }
     if let Some(v) = vector_crop::run(session, command) { return Some(v); }
     if let Some(v) = curve_edit::run(session, command) { return Some(v); }
+    if let Some(v) = contour::run(session, command) { return Some(v); }
     if let Some(v) = curve_nodes::run(session, command) { return Some(v); }
     if let Some(v) = measure::run(session, command) { return Some(v); }
     if let Some(v) = view_actual::run(session, command) { return Some(v); }
@@ -274,6 +283,9 @@ pub fn run(session: &mut Session, command: &Command) -> Option<CommandResult> {
     if let Some(v) = ui::run(session, command) { return Some(v); }
     if let Some(v) = pixel_selection::run(session, command) { return Some(v); }
     if let Some(v) = selection_magic_wand::run(session, command) { return Some(v); }
+    if let Some(v) = inpaint::run(session, command) { return Some(v); }
+    if let Some(v) = patch::run(session, command) { return Some(v); }
+    if let Some(v) = blemish::run(session, command) { return Some(v); }
     if let Some(v) = red_eye::run(session, command) { return Some(v); }
     if let Some(v) = history_menu::run(session, command) { return Some(v); }
     if let Some(v) = crate::pixel_perspective::run(session, command) { return Some(v); }
@@ -314,12 +326,13 @@ pub fn run(session: &mut Session, command: &Command) -> Option<CommandResult> {
 
 pub fn apply(session: &mut Session, command: &Command) -> Option<Result<(), CommandError>> {
     if matches!(command.name.as_str(),
+        contour::SET | contour::BAKE | curve_nodes::corner::CORNER_SET |
         curve_edit::CURVE_NODES_SET | curve_nodes::CURVE_NODES_DELETE | curve_nodes::CURVE_NODES_CONVERT
     ) {
         // A batch writes one document snapshot. Reuse the leaf command (including symbol
         // propagation) without adding its private undo entry to the batch history.
         let undo = std::mem::take(&mut session.undo);
-        let result = curve_edit::run(session, command).or_else(|| curve_nodes::run(session, command));
+        let result = curve_edit::run(session, command).or_else(|| curve_nodes::run(session, command)).or_else(|| contour::run(session, command));
         session.undo = undo;
         return result.map(|result| result.map(|_| ()));
     }

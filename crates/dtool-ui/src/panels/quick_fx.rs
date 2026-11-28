@@ -94,6 +94,10 @@ impl QuickFxPanel {
         let effects: Vec<_> = workspace.session().map(|s| s.selection.ids.iter()
             .filter_map(|id| s.document.get_object(*id).map(|o| o.effects.as_slice())).collect()).unwrap_or_default();
         let selection = workspace.session().map(|s| (s.document.instance.0, s.selection.ids.as_slice()));
+        let editable = workspace.session().is_some_and(|session| {
+            session.selection.ids.iter().all(|id| session.document.get_object(*id)
+                .is_some_and(|object| !session.document.is_object_locked(object)))
+        });
         let mut toggle = None;
         let mut numeric = None;
         let mut blend = None;
@@ -101,6 +105,7 @@ impl QuickFxPanel {
         dtool_design::panel_frame(ui, |ui| {
             dtool_design::panel_header(ui, text("menu.window.vector.quick_fx"));
             if effects.is_empty() { ui.label(text("fx.no_selection")); return; }
+            if !editable { ui.disable(); }
             let choices: Vec<_> = crate::dialogs::layer_effects::EFFECT_KINDS.iter().map(|&(kind, key)| {
                 let parsed: EffectKind = serde_json::from_value(json!(kind)).expect("known effect kind");
                 let rows: Vec<_> = effects.iter().map(|list| list.iter().find(|fx| fx.kind == parsed)).collect();

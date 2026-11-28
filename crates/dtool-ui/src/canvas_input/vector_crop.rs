@@ -102,6 +102,11 @@ impl Crop {
         hit: impl Fn([f32; 2]) -> Option<ObjectId>,
     ) -> Option<Command> {
         let selected = bounds(session, scene);
+        if self.drag.as_ref().is_some_and(|drag| {
+            !selected.is_some_and(|frame| frame.id == drag.frame.id)
+        }) {
+            self.drag = None;
+        }
         let (pressed, released) = primary_button_positions(ui);
         let zoom = session.view.zoom;
         let grip_at_point = |frame: Frame, point: [f32; 2]| {
@@ -280,7 +285,7 @@ fn bounds(session: &Session, scene: &Scene) -> Option<Frame> {
         return None;
     };
     let object = session.document.get_object(*id)?;
-    if object.locked
+    if session.document.is_object_locked(object)
         || matches!(object.kind, ObjectKind::Group | ObjectKind::Artboard)
         || scene.quad(*id).is_none()
     {

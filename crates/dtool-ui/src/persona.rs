@@ -99,6 +99,10 @@ pub const TOOLBAR_ACTIONS: &[(&str, &str, &str)] = &[
     ("boolean.intersect", "cmd-bool-intersect", "menu.vector.geometry.intersect"),
     ("boolean.xor", "cmd-bool-xor", "menu.vector.geometry.xor"),
     ("boolean.divide", "cmd-bool-divide", "menu.vector.geometry.divide"),
+    ("layer.pixel.add", "tool-paint-pixel", "menu.pixel.new_layer"),
+    ("selection.invert", "sel-rect", "menu.pixel.pixel_selection.invert"),
+    ("selection.none", "layer-mask-release", "menu.pixel.pixel_selection.deselect"),
+    ("page.add", "file-new", "toolbar.catalog.page_add"),
 ];
 
 fn registered_tools()->Vec<ToolId>{default_flyouts().into_iter().flat_map(|flyout|std::iter::once(flyout.parent).chain(flyout.children)).collect()}
@@ -126,12 +130,14 @@ pub fn persona_catalog()->Vec<PersonaDef>{
         };
         let tools=registered_tools().into_iter().filter(|tool|match id{
             _ if tool.0 == "tool.paint.pixel" => id == PersonaId::Pixel,
-            _ if matches!(tool.0, "tool.select.object" | "tool.selection_brush" | "tool.magic_wand") => id == PersonaId::Pixel,
+            _ if matches!(tool.0, dtool_core::context_toolbar::BLOB_BRUSH | dtool_core::context_toolbar::BLOB_ERASE
+                | dtool_core::context_toolbar::VECTOR_FLOOD) => id == PersonaId::Vector,
+            _ if matches!(tool.0, dtool_core::commands::fill::TOOL | "tool.select.object" | "tool.selection_brush" | "tool.magic_wand") => id == PersonaId::Pixel,
             _ if matches!(tool.0, "tool.paint.adjustment" | "tool.paint.tone" | "tool.dodge" | "tool.burn" | "tool.paint.sponge"
                 | "tool.paint.filter" | "tool.paint.blur" | "tool.sharpen" | "tool.paint.median" | "tool.paint.smudge"
-                | dtool_core::context_toolbar::CLONE_TOOL | dtool_core::commands::red_eye::TOOL) => id == PersonaId::Pixel,
+                | dtool_core::context_toolbar::CLONE_TOOL | dtool_core::context_toolbar::HEAL_TOOL | dtool_core::context_toolbar::UNDO_BRUSH_TOOL | dtool_core::commands::red_eye::TOOL | dtool_core::commands::inpaint::TOOL | dtool_core::commands::patch::TOOL | dtool_core::commands::blemish::TOOL) => id == PersonaId::Pixel,
             PersonaId::Vector=>!tool.0.starts_with("tool.eraser")&&!tool.0.starts_with("tool.marquee")&&tool.0!="tool.crop"&&tool.0!="tool.flood_fill",
-            _ if matches!(tool.0, "tool.shape_builder" | "tool.area" | "tool.vector_crop" | "tool.stroke_width" | "tool.qr" | "tool.artboard") => false,
+            _ if matches!(tool.0, "tool.shape_builder" | "tool.area" | "tool.vector_crop" | "tool.stroke_width" | dtool_core::commands::curve_nodes::corner::TOOL | "tool.qr" | "tool.artboard") => false,
             PersonaId::Slice=>["tool.view","tool.zoom"].contains(&tool.0),
             PersonaId::Layout=>layout_publication_tool(tool.0)||tool.0.starts_with("tool.text")||tool.0.starts_with("tool.shap")||["tool.view","tool.zoom","tool.move"].contains(&tool.0),
             _=>true,
@@ -143,11 +149,11 @@ pub fn persona_catalog()->Vec<PersonaDef>{
         let (tools,toolbar,panels,name_key)=match id{
             ExtraStudio::Typography=>(registered_tools().into_iter().filter(|t|t.0.starts_with("tool.text")||["tool.view","tool.zoom","tool.move"].contains(&t.0)).collect(),vec!["edit.undo".into(),"edit.redo".into()],vec![PanelId::Character,PanelId::Paragraph,PanelId::Layers,PanelId::History],format!("studio.{key}")),
             ExtraStudio::Compositing=>(registered_tools().into_iter().filter(|t|["tool.view","tool.zoom","tool.move","tool.selection","tool.paint","tool.eraser"].contains(&t.0)).collect(),vec!["edit.undo".into(),"edit.redo".into()],vec![PanelId::Layers,PanelId::Colour,PanelId::History,PanelId::Navigator],format!("studio.{key}")),
-            ExtraStudio::Retouching=>(registered_tools().into_iter().filter(|t|{let id=t.0;id=="tool.move"||id=="tool.selection"||id=="tool.crop"||id=="tool.flood_fill"||id.starts_with("tool.paint")||id.starts_with("tool.eraser")||id.starts_with("tool.clone")||id.starts_with("tool.heal")||id==dtool_core::commands::red_eye::TOOL||id.starts_with("tool.dodge")||id.starts_with("tool.burn")||id.starts_with("tool.sharpen")||id.starts_with("tool.soften")||id.starts_with("tool.smudge")||id=="tool.view"||id=="tool.zoom"}).collect(),vec!["edit.undo".into(),"edit.redo".into()],vec![PanelId::Layers,PanelId::Colour,PanelId::History,PanelId::Navigator],"studio.retouching".to_string()),
+            ExtraStudio::Retouching=>(registered_tools().into_iter().filter(|t|{let id=t.0;id=="tool.move"||id=="tool.selection"||id=="tool.crop"||id=="tool.flood_fill"||id==dtool_core::commands::fill::TOOL||id.starts_with("tool.paint")||id.starts_with("tool.eraser")||id.starts_with("tool.clone")||id.starts_with("tool.heal")||matches!(id,dtool_core::commands::red_eye::TOOL|dtool_core::commands::inpaint::TOOL|dtool_core::commands::patch::TOOL|dtool_core::commands::blemish::TOOL|dtool_core::context_toolbar::UNDO_BRUSH_TOOL)||id.starts_with("tool.dodge")||id.starts_with("tool.burn")||id.starts_with("tool.sharpen")||id.starts_with("tool.soften")||id.starts_with("tool.smudge")||id=="tool.view"||id=="tool.zoom"}).collect(),vec!["edit.undo".into(),"edit.redo".into()],vec![PanelId::Layers,PanelId::Colour,PanelId::History,PanelId::Navigator],"studio.retouching".to_string()),
             ExtraStudio::ColourGrading=>(registered_tools().into_iter().filter(|t|{let id=t.0;id=="tool.view"||id=="tool.zoom"||id=="tool.move"||id=="tool.adjustment"||id.starts_with("tool.curves")||id.starts_with("tool.levels")||id.starts_with("tool.exposure")||id.starts_with("tool.white_balance")||id.starts_with("tool.hsl")||id.starts_with("tool.color_balance")||id.starts_with("tool.black_and_white")||id.starts_with("tool.invert")||id.starts_with("tool.posterize")||id.starts_with("tool.threshold")||id.starts_with("tool.gradient_map")}).collect(),vec!["edit.undo".into(),"edit.redo".into()],vec![PanelId::Colour,PanelId::Swatches,PanelId::Layers,PanelId::History,PanelId::Navigator],format!("studio.{key}")),
             ExtraStudio::Astrophotography=>(registered_tools().into_iter().filter(|t|["tool.view","tool.zoom","tool.move"].contains(&t.0)).collect(),vec!["edit.undo".into(),"edit.redo".into()],vec![PanelId::Layers,PanelId::Colour,PanelId::History,PanelId::Navigator],format!("studio.{key}")),
             ExtraStudio::Scripting=>{
-                let scripting_order=["tool.view","tool.zoom","tool.move","tool.node","tool.text","tool.shape","tool.pen","tool.line","tool.curve","tool.rectangle","tool.ellipse","tool.polygon","tool.star","tool.spiral","tool.slice","tool.crop","tool.flood_fill","tool.paint_brush","tool.eraser",dtool_core::context_toolbar::CLONE_TOOL,"tool.heal","tool.dodge","tool.burn","tool.sharpen","tool.soften","tool.smudge"];
+                let scripting_order=["tool.view","tool.zoom","tool.move","tool.node","tool.text","tool.shape","tool.pen","tool.line","tool.curve","tool.rectangle","tool.ellipse","tool.polygon","tool.star","tool.spiral","tool.slice","tool.crop","tool.flood_fill","tool.paint_brush","tool.eraser",dtool_core::context_toolbar::CLONE_TOOL,dtool_core::context_toolbar::HEAL_TOOL,"tool.dodge","tool.burn","tool.sharpen","tool.soften","tool.smudge"];
                 let tools=scripting_order.iter().filter_map(|id|tool(id)).collect();
                 (tools,vec!["edit.undo".into(),"edit.redo".into()],vec![PanelId::Layers,PanelId::Properties,PanelId::History,PanelId::Navigator],format!("studio.{key}"))
             },
@@ -206,6 +212,16 @@ pub struct PersonaState {
     clone_tool_default_added: bool,
     #[serde(default)]
     red_eye_tool_default_added: bool,
+    #[serde(default)]
+    inpaint_tool_default_added: bool,
+    #[serde(default)]
+    undo_brush_default_added: bool,
+    #[serde(default)]
+    heal_brush_default_added: bool,
+    #[serde(default)]
+    patch_tool_default_added: bool,
+    #[serde(default)]
+    blemish_tool_default_added: bool,
 }
 impl Default for PersonaState {
     fn default() -> Self {
@@ -213,7 +229,7 @@ impl Default for PersonaState {
         let live = initial(&definition);
         Self {
             active: definition.entry, layouts: HashMap::new(), live, custom_studios: Vec::new(),
-            toolbar_defaults_updated: true, clone_tool_default_added: true, red_eye_tool_default_added: true,
+            toolbar_defaults_updated: true, clone_tool_default_added: true, red_eye_tool_default_added: true, inpaint_tool_default_added: true, undo_brush_default_added: true, heal_brush_default_added: true, patch_tool_default_added: true, blemish_tool_default_added: true,
         }
     }
 }
@@ -312,9 +328,26 @@ impl PersonaStore {
                 let index = layout.tools.iter().position(|tool| tool.0 == "tool.pen").map_or(layout.tools.len(), |index| index + 1);
                 layout.tools.insert(index, ToolId("tool.stroke_width"));
             }
+            if !layout.tools.iter().any(|tool| tool.0 == dtool_core::commands::contour::TOOL) {
+                let index = layout.tools.iter().position(|tool| tool.0 == "tool.stroke_width").map_or(layout.tools.len(), |index| index + 1);
+                layout.tools.insert(index, ToolId(dtool_core::commands::contour::TOOL));
+            }
+            let corner = dtool_core::commands::curve_nodes::corner::TOOL;
+            if !layout.tools.iter().any(|tool| tool.0 == corner) {
+                let index = layout.tools.iter().position(|tool| tool.0 == "tool.node").map_or(layout.tools.len(), |index| index + 1);
+                layout.tools.insert(index, ToolId(corner));
+            }
             let has_builder = layout.tools.iter().any(|tool| tool.0 == "tool.shape_builder");
             if !has_builder {
                 layout.tools.push(ToolId("tool.shape_builder"));
+            }
+            let mut insert_at = layout.tools.iter().position(|tool| tool.0 == "tool.shape_builder")
+                .map_or(layout.tools.len(), |index| index + 1);
+            for id in [dtool_core::context_toolbar::BLOB_BRUSH, dtool_core::context_toolbar::BLOB_ERASE, dtool_core::context_toolbar::VECTOR_FLOOD] {
+                if !layout.tools.contains(&ToolId(id)) {
+                    layout.tools.insert(insert_at, ToolId(id));
+                    insert_at += 1;
+                }
             }
             if !layout.tools.iter().any(|tool| tool.0 == "tool.style_picker") {
                 layout.tools.push(ToolId("tool.style_picker"));
@@ -343,6 +376,13 @@ impl PersonaStore {
         let active_pixel = state.active == PersonaEntry::Builtin(PersonaId::Pixel);
         let migrate_clone_tool = !state.clone_tool_default_added;
         for layout in state.layouts.get_mut("pixel").into_iter().chain(active_pixel.then_some(&mut state.live)) {
+            let fill = ToolId(dtool_core::commands::fill::TOOL);
+            let flood = ToolId("tool.flood_fill");
+            if !layout.tools.contains(&fill) && !layout.standalone_tools.contains(&flood)
+                && let Some(index) = layout.tools.iter().position(|tool| *tool == flood)
+            {
+                layout.tools.insert(index, fill);
+            }
             if layout.tool_columns.is_some() { continue; }
             let marquee = [
                 ToolId("tool.marquee"), ToolId("tool.marquee.rectangle"), ToolId("tool.marquee.ellipse"),
@@ -434,21 +474,38 @@ impl PersonaStore {
         }
         state.clone_tool_default_added = true;
         let migrate_red_eye_tool = !state.red_eye_tool_default_added;
+        let migrate_inpaint_tool = !state.inpaint_tool_default_added;
         state.red_eye_tool_default_added = true;
+        state.inpaint_tool_default_added = true;
+        let migrate_undo_brush = !state.undo_brush_default_added;
+        state.undo_brush_default_added = true;
+        let migrate_heal_brush = !state.heal_brush_default_added;
+        state.heal_brush_default_added = true;
+        let migrate_patch_tool = !state.patch_tool_default_added;
+        state.patch_tool_default_added = true;
+        let migrate_blemish_tool = !state.blemish_tool_default_added;
+        state.blemish_tool_default_added = true;
+        let existing_tool = |tool: &&ToolId| {
+            (!migrate_red_eye_tool || tool.0 != dtool_core::commands::red_eye::TOOL)
+                && (!migrate_inpaint_tool || tool.0 != dtool_core::commands::inpaint::TOOL)
+                && (!migrate_undo_brush || tool.0 != dtool_core::context_toolbar::UNDO_BRUSH_TOOL)
+                && (!migrate_heal_brush || tool.0 != dtool_core::context_toolbar::HEAL_TOOL)
+                && (!migrate_patch_tool || tool.0 != dtool_core::commands::patch::TOOL)
+                && (!migrate_blemish_tool || tool.0 != dtool_core::commands::blemish::TOOL)
+        };
         for definition in persona_catalog().into_iter().filter(|definition| {
             matches!(definition.entry, PersonaEntry::Builtin(PersonaId::Vector | PersonaId::Layout | PersonaId::Pixel))
-                || (migrate_red_eye_tool && definition.entry == PersonaEntry::Extra(ExtraStudio::Retouching))
+                || ((migrate_red_eye_tool || migrate_inpaint_tool || migrate_undo_brush || migrate_heal_brush || migrate_patch_tool || migrate_blemish_tool)
+                    && definition.entry == PersonaEntry::Extra(ExtraStudio::Retouching))
         }) {
-            let legacy_tools: Vec<_> = definition.tools.iter().filter(|tool| {
-                !dtool_core::context_toolbar::is_advanced_shape_tool(tool.0)
-                    && (!migrate_red_eye_tool || tool.0 != dtool_core::commands::red_eye::TOOL)
-            }).cloned().collect();
+            let legacy_tools: Vec<_> = definition.tools.iter().filter(existing_tool)
+                .filter(|tool| !dtool_core::context_toolbar::is_advanced_shape_tool(tool.0)).cloned().collect();
             let active = state.active == definition.entry;
             for layout in state.layouts.get_mut(&definition.entry.key()).into_iter().chain(active.then_some(&mut state.live)) {
-                let legacy_red_eye_tools = migrate_red_eye_tool
-                    && layout.tools.iter().eq(definition.tools.iter().filter(|tool| tool.0 != dtool_core::commands::red_eye::TOOL));
+                let legacy_retouch_tools = (migrate_red_eye_tool || migrate_inpaint_tool || migrate_undo_brush || migrate_heal_brush || migrate_patch_tool || migrate_blemish_tool)
+                    && layout.tools.iter().eq(definition.tools.iter().filter(existing_tool));
                 if layout.tool_columns.is_none() && layout.standalone_tools.is_empty()
-                    && (layout.tools == legacy_tools || legacy_red_eye_tools)
+                    && (layout.tools == legacy_tools || legacy_retouch_tools)
                 {
                     layout.tools.clone_from(&definition.tools);
                 }

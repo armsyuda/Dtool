@@ -48,7 +48,6 @@ pub(crate) fn apply(
     }
     let mut bounds = [width, dst.height as usize, 0, 0];
     for (i, _) in coverage.iter().enumerate().filter(|(_, amount)| **amount > 0.0) {
-
         let (x, y) = (i % width, i / width);
         bounds = [bounds[0].min(x), bounds[1].min(y), bounds[2].max(x + 1), bounds[3].max(y + 1)];
     }
@@ -61,6 +60,8 @@ pub(crate) fn apply(
         let amount = coverage[index];
         if amount == 0.0 { return; }
         let initial = original_pixel(x, y);
+        let amount = amount * tonal_coverage(params, || initial);
+        if amount == 0.0 { return; }
         let adjusted = match op {
             BrushOp::Sharpen => sharpen(initial, sampled, params.sharpen_mode),
             _ => sampled,
@@ -82,6 +83,13 @@ pub(crate) fn apply(
         }
         _ => gaussian(&source, bounds, radius, &mut write),
     }
+}
+
+fn tonal_coverage(params: &OpParams, pixel: impl FnOnce() -> Pixel) -> f32 {
+    let Some(range) = params.filter_tonal_range else { return 1.0; };
+    let [r, g, b, alpha] = pixel();
+    if alpha <= 0.0 { return 0.0; }
+    super::tonal_weight([r / alpha, g / alpha, b / alpha], range)
 }
 
 fn premultiplied(pixel: [u8; 4]) -> Pixel {
@@ -215,9 +223,13 @@ fn smudge(dst: &mut RasterViewMut, source: &RasterView, dabs: &[Dab], settings: 
             let index = (y as i64 - cy + radius) as usize * side + (x as i64 - cx + radius) as usize;
             let load = carried[index];
             let current = premultiplied(dst.get_pixel(x as i64, y as i64));
-            let mut result = lerp(current, load, amount * strength);
+            let weight = amount * strength * tonal_coverage(params, || {
+                premultiplied(source.get_pixel(x as i64, y as i64))
+            });
+            if weight <= 0.0 { return; }
+            let mut result = lerp(current, load, weight);
             if params.pigment && current[3] > 0.0 && load[3] > 0.0 {
-                let mixed = mix_colour(straight(current), straight(load), amount * strength, true);
+                let mixed = mix_colour(straight(current), straight(load), weight, true);
                 for c in 0..3 { result[c] = f32::from(mixed[c]) / 255.0 * result[3]; }
             }
             let [r, g, b, a] = straight(result);

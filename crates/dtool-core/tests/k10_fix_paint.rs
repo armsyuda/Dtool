@@ -10,7 +10,7 @@ fn hatch(matrix: [f64; 6]) -> Hatch {
 }
 
 fn bitmap(id: &str) -> Paint {
-    Paint::Bitmap(BitmapPaint { resource_id: id.to_string(), matrix: IDENTITY, seed: None })
+    Paint::Bitmap(BitmapPaint { resource_id: id.to_string(), matrix: IDENTITY, seed: None, single_image: false })
 }
 
 #[test]
@@ -46,7 +46,7 @@ fn hatch_and_gradient_compose_transform_after_paint_matrix() {
     let Paint::Gradient { geom, .. } = &gradient else { panic!("gradient variant changed") };
     assert_eq!(h.matrix, [2.0, 0.0, 0.0, 1.0, 10.0, 7.0]);
     assert_eq!([h.matrix[4], h.matrix[5]], geom.start);
-    let mut bitmapped = Paint::Bitmap(BitmapPaint { resource_id: "img".into(), matrix: translate, seed: None });
+    let mut bitmapped = Paint::Bitmap(BitmapPaint { resource_id: "img".into(), matrix: translate, seed: None, single_image: false });
     transform_paint_matrix(&mut bitmapped, scale);
     let Paint::Bitmap(b) = &bitmapped else { panic!("bitmap variant changed") };
     assert_eq!(b.matrix, h.matrix);

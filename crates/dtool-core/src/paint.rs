@@ -222,13 +222,16 @@ pub struct GradientGeom {
     /// Radius of the start circle, relative to the end circle.
     #[serde(default, skip_serializing_if = "is_zero_radius")]
     pub focus_radius: f64,
+    /// The sweep's second axis, expressed in units along and perpendicular to its first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sweep_basis: Option<[f64; 2]>,
 }
 
 fn is_zero_radius(radius: &f64) -> bool { *radius == 0.0 }
 
 impl Default for GradientGeom {
     fn default() -> Self {
-        Self { start: [0.0, 0.0], end: [1.0, 0.0], ratio: 1.0, spread: GradientSpread::Pad, focus: None, focus_radius: 0.0 }
+        Self { start: [0.0, 0.0], end: [1.0, 0.0], ratio: 1.0, spread: GradientSpread::Pad, focus: None, focus_radius: 0.0, sweep_basis: None }
     }
 }
 
@@ -259,18 +262,44 @@ impl GradientGeom {
         [dx, dy, px, py, self.start[0], self.start[1]]
     }
 
+    pub fn gradient_matrix(&self, kind: GradientKind) -> [f64; 6] {
+        match kind {
+            GradientKind::Conical => {
+                let dx = self.end[0] - self.start[0];
+                let dy = self.end[1] - self.start[1];
+                let [along, across] = self.sweep_basis.unwrap_or([0.0, 1.0]);
+                [dx, dy, along * dx - across * dy, along * dy + across * dx, self.start[0], self.start[1]]
+            }
+            GradientKind::Radial => Self { ratio: 1.0, ..*self }.to_matrix(),
+            GradientKind::Elliptical | GradientKind::Linear => self.to_matrix(),
+        }
+    }
+
     pub fn transform(&self, matrix: [f64; 6]) -> Self {
-        fn apply(matrix: [f64; 6], point: [f64; 2]) -> [f64; 2] {
-            [
-                matrix[0] * point[0] + matrix[2] * point[1] + matrix[4],
-                matrix[1] * point[0] + matrix[3] * point[1] + matrix[5],
-            ]
+        let transform = kurbo::Affine::new(matrix);
+        let start = transform * kurbo::Point::new(self.start[0], self.start[1]);
+        let end = transform * kurbo::Point::new(self.end[0], self.end[1]);
+        Self { start: [start.x, start.y], end: [end.x, end.y], ..*self }
+    }
+
+    pub fn transform_for_kind(&self, kind: GradientKind, matrix: [f64; 6]) -> Self {
+        let mut result = self.transform(matrix);
+        if kind == GradientKind::Conical {
+            let transform = kurbo::Affine::new(matrix);
+            let [dx, dy, sx, sy, ..] = (transform * kurbo::Affine::new(self.gradient_matrix(kind))).as_coeffs();
+            let length = dx.hypot(dy);
+            let direction = [dx / length, dy / length];
+            let along = direction[0] * (sx / length) + direction[1] * (sy / length);
+            let across = direction[0] * (sy / length) - direction[1] * (sx / length);
+            result.sweep_basis = if along.is_finite() && across.is_finite() && across.abs() > 1e-14
+                && (along.abs() > 1e-12 || (across - 1.0).abs() > 1e-12)
+            {
+                Some([along, across])
+            } else {
+                None
+            };
         }
-        Self {
-            start: apply(matrix, self.start),
-            end: apply(matrix, self.end),
-            ..*self
-        }
+        result
     }
 }
 
@@ -348,7 +377,17 @@ pub fn gradient_parameter(kind: GradientKind, x: f64, y: f64, geom: &GradientGeo
                 } else { u.hypot(v) }
             }
         },
-        GradientKind::Conical => return ((py.atan2(px) - dy.atan2(dx)) / std::f64::consts::TAU).rem_euclid(1.0) as f32,
+        GradientKind::Conical => {
+            let angle = if let Some([along, across]) = geom.sweep_basis {
+                if !along.is_finite() || !across.is_finite() || across.abs() <= 1e-14 { return 0.0; }
+                let v = (-px * uy + py * ux) / across;
+                let u = px * ux + py * uy - along * v;
+                v.atan2(u)
+            } else {
+                py.atan2(px) - dy.atan2(dx)
+            };
+            return (angle / std::f64::consts::TAU).rem_euclid(1.0) as f32;
+        }
     };
     geom.spread.map(position)
 }
@@ -451,6 +490,25 @@ pub struct BitmapPaint {
     pub resource_id: String,
     pub matrix: [f64; 6],
     pub seed: Option<u64>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub single_image: bool,
+}
+
+impl BitmapPaint {
+    /// PDF and SVG use repeating patterns. Keep the neighboring copies outside the painted area.
+    pub fn tile_period(&self, size: [f64; 2], transform: kurbo::Affine, bounds: kurbo::Rect) -> [f64; 2] {
+        if !self.single_image || !transform.is_finite() || transform.determinant().abs() < 1e-12 {
+            return size;
+        }
+        let local = transform.inverse().transform_rect_bbox(bounds);
+        if !local.is_finite() {
+            return size;
+        }
+        [
+            local.x1.max(size[0] - local.x0).max(size[0]).ceil() + 1.0,
+            local.y1.max(size[1] - local.y0).max(size[1]).ceil() + 1.0,
+        ]
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -778,6 +836,7 @@ fn paint_from_wire(wire: PaintWire) -> Paint {
             resource_id: String::new(),
             matrix: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
             seed: None,
+            single_image: false,
         })),
         "pattern" => Paint::Pattern(wire.pattern.unwrap_or(PatternPaint {
             resource_id: String::new(),
@@ -862,9 +921,10 @@ pub enum Join {
     Bevel,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum StrokeAlign {
     Inside,
+    #[default]
     Centre,
     Outside,
 }
@@ -951,7 +1011,9 @@ fn matrix_is_finite(matrix: &[f64; 6]) -> bool {
 pub fn validate_paint(paint: &Paint) -> bool {
     match paint {
         Paint::None | Paint::Solid { .. } => true,
-        Paint::Gradient { stops, .. } => !stops.is_empty() && stops.iter().all(|stop| stop.offset.is_finite() && (0.0..=1.0).contains(&stop.offset)),
+        Paint::Gradient { stops, geom, .. } => !stops.is_empty()
+            && stops.iter().all(|stop| stop.offset.is_finite() && (0.0..=1.0).contains(&stop.offset))
+            && geom.sweep_basis.is_none_or(|[along, across]| along.is_finite() && across.is_finite() && across.abs() > 1e-14),
         Paint::Hatch(hatch) => hatch.weight.is_finite() && hatch.weight >= 0.0 && matrix_is_finite(&hatch.matrix) && hatch.lines.iter().all(|line| line.spacing.is_finite() && line.spacing > 0.0 && line.angle_rad.is_finite()),
         Paint::Bitmap(bitmap) => !bitmap.resource_id.is_empty() && matrix_is_finite(&bitmap.matrix),
         Paint::Pattern(pattern) => !pattern.resource_id.is_empty() && matrix_is_finite(&pattern.matrix),
@@ -1008,6 +1070,7 @@ impl TableCell {
                 paint: self.stroke.paint.clone(),
                 width_pt: self.stroke.width,
                 line_style: LineStyle::from_dash(&self.stroke.dash),
+                align: self.stroke.align,
             })
         };
         cell.local.edges = [edge.clone(), edge.clone(), edge.clone(), edge];
@@ -1278,6 +1341,7 @@ pub fn edge_stroke_style(edge: &crate::table::model::EdgeStyle) -> StrokeStyle {
         paint: edge.paint.clone(),
         width: edge.width_pt,
         dash: edge.line_style.preset_dash().to_vec(),
+        align: edge.align,
         ..StrokeStyle::default()
     }
 }
@@ -1594,8 +1658,8 @@ pub fn clone_stroke_style(style: &StrokeStyle) -> StrokeStyle {
 
 pub fn transform_paint_matrix(paint: &mut Paint, transform: [f64; 6]) {
     match paint {
-        Paint::Gradient { geom, .. } => {
-            *geom = geom.transform(transform);
+        Paint::Gradient { kind, geom, .. } => {
+            *geom = geom.transform_for_kind(*kind, transform);
         }
         Paint::Hatch(hatch) => {
             hatch.matrix = multiply_matrices(transform, hatch.matrix);
@@ -1623,7 +1687,7 @@ pub fn transform_stroke_style_matrix(style: &mut StrokeStyle, transform: [f64; 6
 pub(crate) fn transform_transparency_matrix(transparency: &mut Transparency, transform: [f64; 6]) {
     match transparency {
         Transparency::None => {}
-        Transparency::Gradient { geom, .. } => *geom = geom.transform(transform),
+        Transparency::Gradient { kind, geom, .. } => *geom = geom.transform_for_kind(*kind, transform),
         Transparency::InverseBitmap(bitmap) => bitmap.matrix = multiply_matrices(transform, bitmap.matrix),
     }
 }
@@ -2145,7 +2209,7 @@ mod legacy_fill_contracts {
         assert_eq!(project_table_paint(PaintRole::Cell, None, Some(&cell), None, None), Paint::None);
         cell.fill = Some(red.clone());
         assert_eq!(project_table_paint(PaintRole::Cell, None, Some(&cell), None, None), red);
-        let edge = crate::table::model::EdgeStyle { paint: red.clone(), width_pt: 1.0, line_style: LineStyle::Solid };
+        let edge = crate::table::model::EdgeStyle { paint: red.clone(), width_pt: 1.0, line_style: LineStyle::Solid, align: StrokeAlign::Centre };
         assert_eq!(project_table_paint(PaintRole::Edge, None, None, Some(&edge), None), red);
         assert_eq!(project_table_paint(PaintRole::Glyph, None, Some(&cell), Some(&edge), None), Paint::None);
         assert_eq!(PaintRole::from_display_role("TableEdge"), PaintRole::Edge);

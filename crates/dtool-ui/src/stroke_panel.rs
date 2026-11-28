@@ -75,7 +75,7 @@ impl StrokePanel {
             self.width_rail_press = None;
             self.error_key = None;
         }
-        let enabled = !selected.is_empty() && selected.iter().all(|object| !object.locked)
+        let enabled = !selected.is_empty() && workspace.session().is_some_and(|session| selected.iter().all(|object| !session.document.is_object_locked(object)))
             && focus.is_none_or(|focus| focus.slot.kind == Kind::Stroke);
         let units_per_point = workspace.session().map_or(1.0, |session| {
             dtool_core::units::units_per_point(session.document.units, session.document.dpi)
@@ -266,9 +266,30 @@ impl StrokePanel {
             });
             (start, end)
         }).body_returned;
+        let pressure = common_value(&strokes, |stroke| stroke.pressure.clone());
+        let show_pressure = session.is_some_and(|session| session.active_tool == "tool.stroke_width");
+        if let Some(profile) = pressure.as_ref().filter(|_| show_pressure) {
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 26.0), egui::Sense::hover());
+            let painter = ui.painter_at(rect);
+            painter.rect_filled(rect, 3.0, ui.visuals().extreme_bg_color);
+            let plot = rect.shrink(4.0);
+            let maximum = profile.iter().map(|point| point[1]).fold(1.0, f32::max);
+            let position = |at: f32, weight: f32| {
+                egui::pos2(plot.left() + at * plot.width(), plot.bottom() - weight / maximum * plot.height())
+            };
+            let points = std::iter::once(position(0.0, profile.first().map_or(1.0, |p| p[1])))
+                .chain(profile.iter().map(|&[at, weight]| position(at, weight)))
+                .chain(std::iter::once(position(1.0, profile.last().map_or(1.0, |p| p[1]))))
+                .collect();
+            let colour = crate::canvas_input::SELECTION_BLUE;
+            painter.add(egui::Shape::line(points, egui::Stroke::new(1.25, colour)));
+            for &[at, weight] in profile {
+                painter.circle_filled(position(at, weight), 2.15, colour);
+            }
+        }
         egui::CollapsingHeader::new(text("stroke.pressure")).id_salt("pressure_details").show(ui, |ui| {
-            let pressure = common_value(&strokes, |stroke| stroke.pressure.clone());
-            let points = pressure.unwrap_or_default().iter().map(|p| format!("{},{}", p[0], p[1])).collect::<Vec<_>>().join("; ");
+            let points = pressure.as_deref().unwrap_or_default().iter()
+                .map(|p| format!("{},{}", p[0], p[1])).collect::<Vec<_>>().join("; ");
             if let Some(input) = text_edit(ui, "pressure_points", &points, text("stroke.pressure.none")) {
                 let parsed = if input.trim().is_empty() { Some(Vec::new()) } else {
                     input.split(';').map(|point| {
@@ -587,7 +608,7 @@ fn paint_join(painter: &egui::Painter, at: egui::Pos2, colour: egui::Color32, jo
     painter.add(egui::Shape::line(points.iter().map(|&(x, y)| at + egui::vec2(x, y)).collect(), egui::Stroke::new(2.0, colour)));
 }
 
-fn paint_align(painter: &egui::Painter, at: egui::Pos2, colour: egui::Color32, align: StrokeAlign) {
+pub(crate) fn paint_align(painter: &egui::Painter, at: egui::Pos2, colour: egui::Color32, align: StrokeAlign) {
     let offset = match align { StrokeAlign::Inside => 3.0, StrokeAlign::Centre => 0.0, StrokeAlign::Outside => -3.0 };
     let corner = |x: f32, y: f32| [at + egui::vec2(x, 6.0), at + egui::vec2(x, y), at + egui::vec2(8.0, y)];
     painter.add(egui::Shape::line(corner(-4.0, -3.0).to_vec(), egui::Stroke::new(1.0, colour.gamma_multiply(0.65))));

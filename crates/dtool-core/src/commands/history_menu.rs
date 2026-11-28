@@ -1,11 +1,12 @@
 use crate::command::Session;
-use crate::history_store::{DocumentSnapshot, HistoryStore};
+use crate::history_store::{BrushSource, DocumentSnapshot, HistoryStore};
 use dtool_protocol::{Command, CommandError, CommandResult};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use crate::object::{Object, ObjectId, ObjectKind};
 use std::collections::HashMap;
 
+pub const BRUSH_SOURCE_SET: &str = "history.brush.source.set";
 pub const HISTORY_LIST: &str = "history.list";
 pub const HISTORY_LABELS_QUERY: &str = "history.labels.query";
 pub const HISTORY_JUMP: &str = "history.jump";
@@ -45,8 +46,15 @@ struct BudgetArgs { max_steps: u32 }
 #[serde(deny_unknown_fields)]
 struct EnabledArgs { enabled: bool }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+enum BrushSourceArgs {
+    Index(u64),
+    Snapshot(u64),
+}
+
 fn is_history(name: &str) -> bool {
-    matches!(name, HISTORY_LIST | HISTORY_LABELS_QUERY | HISTORY_JUMP | HISTORY_RECOVER | HISTORY_UNDO | HISTORY_REDO | HISTORY_SNAPSHOT_CREATE | HISTORY_SNAPSHOT_RESTORE | HISTORY_SNAPSHOT_LAYER_FROM | HISTORY_SNAPSHOT_LIST | HISTORY_BUDGET_QUERY | HISTORY_BUDGET_SET | HISTORY_SAVE_WITH_DOC_SET | HISTORY_SAVE_WITH_DOC_QUERY)
+    matches!(name, BRUSH_SOURCE_SET | HISTORY_LIST | HISTORY_LABELS_QUERY | HISTORY_JUMP | HISTORY_RECOVER | HISTORY_UNDO | HISTORY_REDO | HISTORY_SNAPSHOT_CREATE | HISTORY_SNAPSHOT_RESTORE | HISTORY_SNAPSHOT_LAYER_FROM | HISTORY_SNAPSHOT_LIST | HISTORY_BUDGET_QUERY | HISTORY_BUDGET_SET | HISTORY_SAVE_WITH_DOC_SET | HISTORY_SAVE_WITH_DOC_QUERY)
 }
 
 fn params(command: &Command) -> Value {
@@ -117,6 +125,15 @@ fn layer_from_snapshot(session: &mut Session, id: u64) -> Result<Value, CommandE
 
 fn preflight(session: &Session, command: &Command) -> Result<(), CommandError> {
     match command.name.as_str() {
+        BRUSH_SOURCE_SET => match parse::<BrushSourceArgs>(command)? {
+            BrushSourceArgs::Index(index) if index >= session.undo.total_steps() as u64 => {
+                return Err(CommandError::not_found());
+            }
+            BrushSourceArgs::Snapshot(id) if !session.history.snapshots.iter().any(|s| s.id == id) => {
+                return Err(CommandError::not_found());
+            }
+            _ => {}
+        },
         HISTORY_JUMP => {
             let args: JumpArgs = parse(command)?;
             if args.index >= session.undo.total_steps() as u64 { return Err(CommandError::invalid_params()); }
@@ -184,6 +201,31 @@ fn jump(session: &mut Session, index: u64) -> Result<(), CommandError> {
     Ok(())
 }
 
+fn set_brush_source(session: &mut Session, args: BrushSourceArgs) -> Result<Value, CommandError> {
+    let (source, document) = match args {
+        BrushSourceArgs::Index(index) => {
+            // Replay only the needed steps on a private document without moving the live cursor.
+            let mut copy = Session::new(session.document.clone());
+            copy.selection = session.selection.clone();
+            copy.guides = session.guides.clone();
+            copy.view = session.view.clone();
+            copy.symbol_sync = session.symbol_sync;
+            for command in session.undo.commands_to_position(index as usize + 1) {
+                copy.apply_command(command)?;
+            }
+            let step_id = session.undo.history_step_id(index).ok_or_else(CommandError::not_found)?;
+            (BrushSource::History(step_id), copy.document)
+        }
+        BrushSourceArgs::Snapshot(id) => {
+            let snapshot = session.history.snapshots.iter().find(|s| s.id == id)
+                .ok_or_else(CommandError::not_found)?;
+            (BrushSource::Snapshot(id), snapshot.document.clone())
+        }
+    };
+    session.history.brush_source = Some((source, std::sync::Arc::new(document)));
+    Ok(json!({"changes": []}))
+}
+
 fn recover_available(session: &Session) -> bool {
     match &session.history.recover {
         Some(point) => session.undo.applied_steps() == point.after_jump_steps && session.undo.total_steps() == point.total_steps,
@@ -222,6 +264,7 @@ pub fn run(session: &mut Session, command: &Command) -> Option<CommandResult> {
         if !session.has_document { return Err(CommandError::no_document()); }
         preflight(session, command)?;
         match command.name.as_str() {
+            BRUSH_SOURCE_SET => set_brush_source(session, parse(command)?),
             HISTORY_LIST => Ok(json!({"entries": entries(session), "cursor": cursor(session), "can_undo": session.undo.can_undo(), "can_redo": session.undo.can_redo()})),
             HISTORY_LABELS_QUERY => Ok(json!({"labels": entries(session)})),
             HISTORY_JUMP => {

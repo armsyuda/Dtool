@@ -208,12 +208,74 @@ fn pane_tile(tree: &Tree<PanelId>, id: &PanelId) -> Option<TileId> {
     })
 }
 
+fn visible_studio_columns(tree: &Tree<PanelId>, tile: TileId) -> usize {
+    if !tree.tiles.is_visible(tile) {
+        return 0;
+    }
+    match tree.tiles.get(tile) {
+        Some(Tile::Pane(_)) => 1,
+        Some(Tile::Container(container)) => {
+            let columns = container.children().map(|&child| visible_studio_columns(tree, child));
+            if matches!(container, egui_tiles::Container::Linear(linear)
+                if linear.dir == egui_tiles::LinearDir::Horizontal)
+            {
+                columns.sum()
+            } else {
+                columns.max().unwrap_or(0)
+            }
+        }
+        None => 0,
+    }
+}
+
 fn invalid_params() -> CommandError {
     CommandError::new("INVALID_PARAMS")
 }
 
 fn not_found() -> CommandError {
     CommandError::new("NOT_FOUND")
+}
+
+pub(crate) struct PanelUpdate {
+    side: Option<DockSide>,
+    visible: Option<bool>,
+    floated: Option<bool>,
+    os_window: Option<bool>,
+}
+
+impl PanelUpdate {
+    pub(crate) fn parse(params: &Value) -> Result<Self, CommandError> {
+        let flag = |key| params.get(key).map(|value| value.as_bool().ok_or_else(invalid_params)).transpose();
+        let side = params.get("side")
+            .map(|value| value.as_str().and_then(DockSide::from_key).ok_or_else(invalid_params))
+            .transpose()?;
+        Ok(Self {
+            side,
+            visible: flag("visible")?,
+            floated: flag("floated")?,
+            os_window: flag("os_window")?,
+        })
+    }
+
+    pub(crate) fn apply(self, layout: &mut Layout, id: &PanelId) {
+        if let Some(side) = self.side {
+            layout.dock_panel(id, side);
+        }
+        if let Some(visible) = self.visible {
+            layout.set_panel_visible(id, visible);
+        }
+        match self.floated {
+            Some(true) => layout.float_panel(id, self.os_window.unwrap_or(false)),
+            Some(false) => layout.redock_panel(id),
+            None => {
+                if let Some(os_window) = self.os_window
+                    && let Some(state) = layout.panel_state_mut(id).filter(|state| state.floated)
+                {
+                    state.os_window = os_window;
+                }
+            }
+        }
+    }
 }
 
 impl Default for Layout {
@@ -496,37 +558,7 @@ impl Layout {
 
     fn command_panel_set(&mut self, params: &Value) -> Result<Value, CommandError> {
         let id = params.get("id").and_then(PanelId::from_value).ok_or_else(invalid_params)?;
-        if let Some(side) = params.get("side").and_then(|v| v.as_str()) {
-            let side = DockSide::from_key(side).ok_or_else(invalid_params)?;
-            self.dock_panel(&id, side);
-        }
-        if let Some(visible) = params.get("visible") {
-            let visible = visible.as_bool().ok_or_else(invalid_params)?;
-            self.set_panel_visible(&id, visible);
-        }
-        let os_window = match params.get("os_window") {
-            Some(value) => Some(value.as_bool().ok_or_else(invalid_params)?),
-            None => None,
-        };
-        match params.get("floated") {
-            Some(value) => {
-                let floated = value.as_bool().ok_or_else(invalid_params)?;
-                if floated {
-                    self.float_panel(&id, os_window.unwrap_or(false));
-                } else {
-                    self.redock_panel(&id);
-                }
-            }
-            None => {
-                if let Some(os_window) = os_window {
-                    if let Some(state) = self.panel_state_mut(&id) {
-                        if state.floated {
-                            state.os_window = os_window;
-                        }
-                    }
-                }
-            }
-        }
+        PanelUpdate::parse(params)?.apply(self, &id);
         Ok(self.panel_state_json(&id))
     }
 
@@ -620,8 +652,15 @@ impl Layout {
         self.redock_split(id, side, adjacent, direction);
     }
 
-    pub(crate) fn redock_as_column(&mut self, id: &PanelId, side: DockSide, mut group: TileId, before: bool) -> bool {
-        let Some(tree) = self.tree(side) else { return false; };
+    pub(crate) fn studio_column_count(&self, side: DockSide) -> usize {
+        self.tree(side).and_then(|tree| tree.root.map(|root| visible_studio_columns(&tree, root))).unwrap_or(0)
+    }
+
+    pub(crate) fn redock_as_column(
+        &mut self, id: &PanelId, side: DockSide, mut group: TileId, before: bool, columns_before_drop: Option<usize>,
+    ) {
+        let Some(tree) = self.tree(side) else { return; };
+        let old_columns = columns_before_drop.unwrap_or_else(|| tree.root.map_or(0, |root| visible_studio_columns(&tree, root)));
         while let Some(parent) = tree.tiles.parent_of(group) {
             if matches!(tree.tiles.get(parent), Some(Tile::Container(egui_tiles::Container::Linear(linear)))
                 if linear.dir == egui_tiles::LinearDir::Horizontal)
@@ -630,7 +669,15 @@ impl Layout {
             }
             group = parent;
         }
-        self.redock_split(id, side, Some((group, before)), egui_tiles::LinearDir::Horizontal)
+        if !self.redock_split(id, side, Some((group, before)), egui_tiles::LinearDir::Horizontal) {
+            return;
+        }
+        // Moving the last pane out of an existing column can replace that column.
+        if self.studio_column_count(side) > old_columns
+            && let Some(width) = self.dock_sizes.get_mut(side.key())
+        {
+            *width += dtool_design::size("panel.default_width");
+        }
     }
 
     fn redock_split(

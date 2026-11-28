@@ -506,7 +506,7 @@ fn column_name(mut index: usize) -> String {
 }
 
 fn paint_grid(ui: &Ui, response: &Response, session: &Session, view: &ViewState) {
-    if view.canvas_flags.preview_mode { return; }
+    if view.canvas_flags.preview_mode || crate::app_canvas::appearance_preview_active(ui, session) { return; }
     let Some(object) = selected_table(session) else { return; };
     let ObjectKind::Table(table) = &object.kind else { return; };
     let selection = dtool_core::table::selection::current(session);
@@ -516,7 +516,11 @@ fn paint_grid(ui: &Ui, response: &Response, session: &Session, view: &ViewState)
     let points = |[l, t, r, b]: [f32; 4]| {
         [[l, t], [r, t], [r, b], [l, b]].map(|point| screen(response.rect, view, object_point(object, point)))
     };
-    let selected_ids: std::collections::HashSet<_> = selection.cells.iter().copied().collect();
+    let selected_ids: std::collections::HashSet<_> = if active_text(session).is_some() {
+        std::collections::HashSet::new()
+    } else {
+        selection.cells.iter().copied().collect()
+    };
     let fill = dtool_design::color("table.selection.fill");
     for cell in grid.rects.iter().filter(|cell| selected_ids.contains(&CellId(cell.id))) {
         painter.add(egui::Shape::convex_polygon(points(cell.rect).to_vec(), fill, egui::Stroke::NONE));
@@ -882,8 +886,9 @@ pub fn handle(ui: &mut Ui, response: &Response, session: &mut Session, scene: &S
                     }
                 }
                 response.request_focus();
-            } else {
+            } else if active_text(session).is_some() {
                 text_input::finish_text_input(session);
+            } else {
                 session.run(&Command::with_params("selection.set", json!({ "ids": [] })))?;
             }
             ui.ctx().request_repaint();
@@ -896,7 +901,7 @@ pub fn handle(ui: &mut Ui, response: &Response, session: &mut Session, scene: &S
     if released.is_some() {
         ui.data_mut(|data| data.remove::<TablePress>(press_id));
     }
-    if keyboard && !editing && session.text_edit.is_none() {
+    if response.has_focus() && !editing && session.text_edit.is_none() {
         let (enter, typing) = ui.input(|input| (
             input.key_pressed(egui::Key::Enter),
             starts_cell_text(input),

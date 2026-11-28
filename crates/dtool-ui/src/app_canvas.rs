@@ -3,7 +3,7 @@ use crate::panels::layers::LayerOpacityPreview;
 use dtool_core::command::Session;
 use dtool_core::commands::layer_style::{staged, StagedEffect};
 use dtool_core::layer_style::raster::{
-    EffectCache, effect_bounds, effects_key, live_effects, object_effect_bounds, prim_object,
+    EffectCache, effect_bounds, effect_margin, effects_key, live_effects, object_effect_bounds, prim_object,
     render_scene_region,
 };
 use dtool_core::object::ObjectId;
@@ -25,6 +25,8 @@ const EFFECT_TEXTURE_START: usize = usize::MAX / 2 + 1;
 const PAN_MARGIN: usize = 96;
 const COMPOSITE_HISTORY_LIMIT: usize = 2;
 const COMPOSITE_HISTORY_PIXEL_LIMIT: usize = 6_000_000;
+const COMPOSITE_DAMAGE_PIXEL_LIMIT: usize = 512 * 512;
+const COMPOSITE_DAMAGE_REGION_LIMIT: usize = 8;
 
 type TextureKey = (ObjectId, u64, usize, [usize; 2]);
 type GlyphContours = std::sync::Arc<Vec<Vec<[f32; 2]>>>;
@@ -60,6 +62,7 @@ struct GlyphTexture {
 }
 
 struct CompositeTexture {
+    history_position: u64,
     rotation_deg: Option<f32>,
     bounds: [f32; 4],
     size: [usize; 2],
@@ -68,12 +71,173 @@ struct CompositeTexture {
     blend_preview: Option<Vec<BlendPreview>>,
     tone_preview: Option<crate::dialogs::tone_blend::Preview>,
     brush_revision: Option<u64>,
+    brush_pixels: Option<(ObjectId, dtool_core::pixel::PixelLayer)>,
     sample_scale: Option<f32>,
     pixel_step: Option<f32>,
     detail: i32,
     image: std::sync::Arc<egui::ColorImage>,
     texture: egui::TextureHandle,
     transform_preview: Option<CompositeTransformPreview>,
+}
+
+fn disjoint_composite_bounds(a: [f32; 4], b: [f32; 4]) -> bool {
+    (0..2).any(|axis| a[axis] + a[axis + 2] <= b[axis] || b[axis] + b[axis + 2] <= a[axis])
+}
+
+fn remember_composite(history: &mut Vec<CompositeTexture>, mut cached: CompositeTexture) {
+    if cached.sample_scale.is_none() {
+        return;
+    }
+    cached.transform_preview = None;
+    history.retain(|old| old.history_position != cached.history_position
+        || old.sample_scale != cached.sample_scale || disjoint_composite_bounds(old.bounds, cached.bounds));
+    history.push(cached);
+    while history.len() > COMPOSITE_HISTORY_LIMIT
+        || history.iter().map(|cached| cached.size[0] * cached.size[1]).sum::<usize>() > COMPOSITE_HISTORY_PIXEL_LIMIT
+    {
+        history.remove(0);
+    }
+}
+
+fn composite_damage(
+    document: &dtool_core::Document, previous: &[Prim], current: &[Prim], targets: &[ObjectId],
+) -> Option<Vec<Rect>> {
+    use dtool_core::{ObjectKind, layer_style::EffectKind};
+
+    // Group and tone effects can read ink outside the edited shape. The
+    // ordinary layer effects below work on one layer and have a known reach.
+    if document.objects().iter().any(|object| {
+        object.tone_blend.is_some() || object.effects.iter().any(|effect| {
+            effect.enabled && (object.is_group() || object.expanded_stroke_effects
+                || matches!(effect.kind, EffectKind::BevelEmboss | EffectKind::ThreeD))
+        })
+    }) || targets.iter().any(|id| !document.get_object(*id).is_some_and(|object| {
+        matches!(object.kind, ObjectKind::Shape | ObjectKind::Curve(_)) && object.path_brush.is_none()
+    })) {
+        return None;
+    }
+    let edited = |prim: &Prim| prim_object(prim).is_some_and(|id| targets.contains(&id));
+    if !previous.iter().filter(|prim| !edited(prim)).eq(current.iter().filter(|prim| !edited(prim))) {
+        return None;
+    }
+    let margins: Vec<_> = targets.iter().map(|&id| effect_margin(document, id, &[])).collect();
+    let mut regions = Vec::new();
+    for scene in [previous, current] {
+        let mut bounds = vec![Rect::NOTHING; targets.len()];
+        for prim in scene {
+            let Some(target) = prim_object(prim).and_then(|id| targets.iter().position(|&target| target == id)) else {
+                continue;
+            };
+            match prim {
+                Prim::Fill { contours, .. } => {
+                    let [x0, y0, x1, y1] = contours_bounds(contours)?;
+                    let rect = Rect::from_min_max(egui::pos2(x0, y0), egui::pos2(x1, y1));
+                    bounds[target] = bounds[target].union(rect);
+                }
+                Prim::Mark { .. } | Prim::Handle { .. } => {}
+                _ => return None,
+            }
+        }
+        regions.extend(bounds.into_iter().zip(&margins).filter_map(|(rect, &margin)| {
+            (rect.is_finite() && rect.is_positive()).then(|| rect.expand(margin))
+        }));
+    }
+    (!regions.is_empty()).then_some(regions)
+}
+
+fn composite_image(
+    document: &dtool_core::Document, flags: &dtool_core::CanvasFlags, staged: &[StagedEffect],
+    scene: &Scene, bounds: [f32; 4], size: [usize; 2], antialias: bool,
+) -> egui::ColorImage {
+    let draw = || render_scene_region(document, flags, staged, scene, bounds, size.map(|length| length as u32), 1.0);
+    let pixels = if antialias { dtool_render::scene::with_fill_antialiasing(draw) } else { draw() };
+    egui::ColorImage::from_rgba_unmultiplied(size, &pixels)
+}
+
+fn patch_composite_damage(
+    cached: &mut CompositeTexture, damage: &[Rect],
+    render: &impl Fn([f32; 4], [usize; 2]) -> egui::ColorImage,
+) -> bool {
+    let [x, y, w, h] = cached.bounds;
+    let [dx, dy] = [w / cached.size[0] as f32, h / cached.size[1] as f32];
+    let mut patches = Vec::new();
+    for rect in damage {
+        // Expand on the original pixel grid before merging so antialiasing
+        // at the old and new edges is included in the update.
+        let x0 = ((((rect.min.x - x) / dx).floor() - 2.0) as usize).min(cached.size[0]);
+        let y0 = ((((rect.min.y - y) / dy).floor() - 2.0) as usize).min(cached.size[1]);
+        let x1 = ((((rect.max.x - x) / dx).ceil() + 2.0) as usize).min(cached.size[0]);
+        let y1 = ((((rect.max.y - y) / dy).ceil() + 2.0) as usize).min(cached.size[1]);
+        if x0 >= x1 || y0 >= y1 {
+            continue;
+        }
+        let mut patch = [x0, y0, x1, y1];
+        while let Some(index) = patches.iter().position(|&other| pixel_rect_intersection(patch, other).is_some()) {
+            let [left, top, right, bottom] = patches.swap_remove(index);
+            patch = [patch[0].min(left), patch[1].min(top), patch[2].max(right), patch[3].max(bottom)];
+        }
+        patches.push(patch);
+    }
+    let pixels: usize = patches.iter().map(|[x0, y0, x1, y1]| (x1 - x0) * (y1 - y0)).sum();
+    if patches.len() > COMPOSITE_DAMAGE_REGION_LIMIT || pixels > COMPOSITE_DAMAGE_PIXEL_LIMIT {
+        return false;
+    }
+    for [x0, y0, x1, y1] in patches {
+        let size = [x1 - x0, y1 - y0];
+        let bounds = [x + x0 as f32 * dx, y + y0 as f32 * dy, size[0] as f32 * dx, size[1] as f32 * dy];
+        replace_composite_patch(std::sync::Arc::make_mut(&mut cached.image), &mut cached.texture, cached.filter, [x0, y0], render(bounds, size));
+    }
+    true
+}
+
+fn replace_composite_patch(
+    image: &mut egui::ColorImage, texture: &mut egui::TextureHandle, filter: egui::TextureOptions,
+    offset: [usize; 2], patch: egui::ColorImage,
+) {
+    let width = patch.size[0];
+    for (row, src) in patch.pixels.chunks_exact(width).enumerate() {
+        let start = (offset[1] + row) * image.size[0] + offset[0];
+        image.pixels[start..start + width].copy_from_slice(src);
+    }
+    texture.set_partial(offset, patch, filter);
+}
+
+fn patch_brush_composite(
+    cached: &mut CompositeTexture,
+    object: &dtool_core::Object,
+    pixels: &dtool_core::pixel::PixelLayer,
+    render: &impl Fn([f32; 4], [usize; 2]) -> egui::ColorImage,
+) {
+    let (_, previous) = cached.brush_pixels.as_ref().unwrap();
+    let matrix = dtool_core::geometry::object_matrix(object);
+    let [left, top, width, height] = cached.bounds;
+    let scale = [cached.size[0] as f32 / width, cached.size[1] as f32 / height];
+    let image = std::sync::Arc::make_mut(&mut cached.image);
+    for [x, y, width, height] in pixels.changed_regions(previous) {
+        let right = x + width;
+        let bottom = y + height;
+        let corners = [[x, y], [right, y], [x, bottom], [right, bottom]].map(|point| {
+            let local = std::array::from_fn(|axis| {
+                let side = [pixels.width, pixels.height][axis] as f32;
+                object.pos[axis] + object.size[axis].abs() * point[axis] as f32 / side
+            });
+            dtool_core::geometry::apply_matrix(&matrix, local)
+        });
+        let [x0, y0, x1, y1] = contours_bounds(&[corners.to_vec()]).unwrap();
+        let limits = |axis: usize, first: f32, last: f32, origin: f32| {
+            let size = cached.size[axis] as f32;
+            let low = (((first - origin) * scale[axis]).floor() - 2.0).clamp(0.0, size);
+            let high = (((last - origin) * scale[axis]).ceil() + 2.0).clamp(0.0, size);
+            [low as usize, high as usize]
+        };
+        let [x0, x1] = limits(0, x0, x1, left);
+        let [y0, y1] = limits(1, y0, y1, top);
+        if x0 == x1 || y0 == y1 { continue; }
+        let size = [x1 - x0, y1 - y0];
+        let area = [left + x0 as f32 / scale[0], top + y0 as f32 / scale[1],
+            size[0] as f32 / scale[0], size[1] as f32 / scale[1]];
+        replace_composite_patch(image, &mut cached.texture, cached.filter, [x0, y0], render(area, size));
+    }
 }
 
 struct CompositeRegion {
@@ -125,13 +289,16 @@ impl CompositeRegion {
 
 struct CompositeTransformPreview {
     args: dtool_core::command::TransformSelectionBoxArgs,
+    selection: Vec<ObjectId>,
     patches: Vec<CompositeMovePatch>,
     backdrop: Vec<[usize; 4]>,
+    draft: Option<Box<dtool_core::Document>>,
 }
 
 struct CompositeMovePatch {
     pixels: [usize; 4],
     texture: egui::TextureHandle,
+    stationary_source: bool,
 }
 
 fn canvas_detail(view: &ViewState) -> i32 {
@@ -250,12 +417,67 @@ fn canvas_scene(document: &dtool_core::Document, view: &ViewState, detail: i32) 
     scene
 }
 
+fn translated_leaf_scene(
+    document: &dtool_core::Document, view: &ViewState, scene: &Scene, id: ObjectId,
+) -> Option<Scene> {
+    use dtool_core::scene::{ObjectPaint, oriented_vector_crop, push_object_with_tolerance};
+    use dtool_core::paint::{Paint, PaintRole, project_object_paint};
+
+    let object = document.get_object(id)?;
+    let flags = &view.canvas_flags;
+    if flags.view_mode != dtool_core::ViewMode::Normal || flags.clip_to_canvas
+        || flags.mask_view.is_some() || !document.master_pages.is_empty()
+        || !matches!(object.kind, dtool_core::ObjectKind::Shape | dtool_core::ObjectKind::Curve(_))
+        || object.parent_id.is_some() || object.path_brush.is_some()
+        || oriented_vector_crop(object).is_some()
+        || dtool_core::commands::brush::has_live_blends(document)
+        || !dtool_core::scene::is_drawn_with_flags(document, flags, id)
+        || document.objects().iter().any(|other| {
+            other.parent_id == Some(id) || other.path_text_data().is_some_and(|text| text.path == id)
+        })
+    {
+        return None;
+    }
+    // Regenerate the moving leaf on the original z-order slots. Other
+    // primitives, including the PDF's masks and text, keep their ink.
+    let mut leaf = Scene::default();
+    let projected = project_object_paint(PaintRole::SourceObject, object);
+    let paint = ObjectPaint {
+        fill: (projected != Paint::None).then_some(projected),
+        opacity: dtool_core::scene::effective_opacity(document, id),
+        matrix: dtool_render::scene::node_matrix(object),
+        outline_only: false,
+        clip: None,
+    };
+    let tolerance = dtool_core::outline::OUTLINE_TOLERANCE / 2.0_f64.powi(canvas_detail(view));
+    push_object_with_tolerance(document, object, &paint, &dtool_render::scene::node_matrix, &mut leaf, tolerance);
+    dtool_core::paint::display_scene(document, &mut leaf);
+    let (start, _) = scene.prims.iter().enumerate().find(|(_, prim)| prim_object(prim) == Some(id))?;
+    let end = start + leaf.prims.len();
+    if !leaf.prims.iter().all(|prim| matches!(prim, Prim::Fill { .. }))
+        || leaf.prims.is_empty() || !scene.prims.get(start..end).is_some_and(|prims| {
+        prims.iter().all(|prim| matches!(prim, Prim::Fill { object, .. } if *object == id))
+    }) || scene.prims[end..].iter().any(|prim| prim_object(prim) == Some(id)) {
+        return None;
+    }
+    let mut moved = scene.clone();
+    moved.version = document.version;
+    for (slot, prim) in moved.prims[start..end].iter_mut().zip(leaf.prims) {
+        *slot = prim;
+    }
+    if let Some((_, quad)) = moved.quads.iter_mut().find(|(object, _)| *object == id) {
+        *quad = leaf.quads.first()?.1;
+    }
+    Some(moved)
+}
+
 fn composite_transform_patches(
     ctx: &egui::Context, session: &Session, view: &ViewState, scene: &Scene,
     bounds: [f32; 4], size: [usize; 2], antialias: bool,
     args: &dtool_core::command::TransformSelectionBoxArgs,
-) -> Option<Vec<CompositeMovePatch>> {
-    use dtool_core::layer_style::raster::{effect_bounds, has_group_effect, prim_object};
+    cacheable: bool, mut previous: Option<&mut CompositeTransformPreview>,
+) -> Option<(Vec<CompositeMovePatch>, Option<Box<dtool_core::Document>>)> {
+    use dtool_core::layer_style::raster::{effect_bounds, has_group_effect, RegionRenderer};
     use dtool_core::object::ObjectKind;
 
     let doc = &session.document;
@@ -266,15 +488,33 @@ fn composite_transform_patches(
         return None;
     }
     let targets = dtool_core::command::transform_target_ids(doc, selected);
-    let mut draft = doc.clone();
+    let translated = match targets.as_slice() {
+        [id] if args.translation_only() => Some(*id),
+        _ => None,
+    };
+    let mut draft = if let Some(id) = translated
+        && let Some(mut draft) = previous.as_mut().and_then(|preview| preview.draft.take())
+            .filter(|draft| draft.instance == doc.instance && draft.version == doc.version)
+    {
+        // Translation edits only this object. Start each sample from the
+        // live object so pointer motion never accumulates into the draft.
+        *draft.find_object_mut(id.0)? = doc.get_object(id)?.clone();
+        draft
+    } else {
+        Box::new(doc.clone())
+    };
     dtool_core::command::execute_transform_selection_box(&mut draft, selected, args).ok()?;
-    let moved = canvas_scene(&draft, view, canvas_detail(view));
+    let moved_leaf = translated.and_then(|id| translated_leaf_scene(&draft, view, scene, id));
+    let keep_draft = cacheable && moved_leaf.is_some();
+    let can_reuse_source = moved_leaf.is_some()
+        && !doc.objects().iter().any(|object| object.effects.iter().any(|effect| effect.enabled));
+    let moved = moved_leaf.unwrap_or_else(|| canvas_scene(&draft, view, canvas_detail(view)));
     // Include the old ink so the patch also restores what the object had
     // covered. Evaluate both scenes since a stationary clip may reveal more ink.
     let [x, y, w, h] = bounds;
     let [dx, dy] = [w / size[0] as f32, h / size[1] as f32];
-    let mut regions = Vec::new();
-    for (document, scene) in [(doc, scene), (&draft, &moved)] {
+    let mut regions = [None, None];
+    for (slot, (document, scene)) in regions.iter_mut().zip([(doc, scene), (draft.as_ref(), &moved)]) {
         let mut region = Rect::NOTHING;
         for &id in &targets {
             let prims = scene.prims.iter().filter(|prim| prim_object(prim) == Some(id));
@@ -291,26 +531,42 @@ fn composite_transform_patches(
         let x1 = ((((region.max.x - x) / dx).ceil() + 2.0) as usize).min(size[0]);
         let y1 = ((((region.max.y - y) / dy).ceil() + 2.0) as usize).min(size[1]);
         if x0 < x1 && y0 < y1 {
-            regions.push([x0, y0, x1, y1]);
+            *slot = Some([x0, y0, x1, y1]);
         }
     }
-    if let [a, b] = regions.as_slice()
-        && pixel_rect_intersection(*a, *b).is_some()
-    {
-        regions = vec![[a[0].min(b[0]), a[1].min(b[1]), a[2].max(b[2]), a[3].max(b[3])]];
+    let source = regions[0];
+    let mut cache_source = can_reuse_source;
+    if let [Some(a), Some(b)] = regions && pixel_rect_intersection(a, b).is_some() {
+        regions = [Some([a[0].min(b[0]), a[1].min(b[1]), a[2].max(b[2]), a[3].max(b[3])]), None];
+        cache_source = false;
     }
     // Keep disjoint regions separate; the span between them is unchanged.
-    if regions.iter().map(|[x0, y0, x1, y1]| (x1 - x0) * (y1 - y0)).sum::<usize>() > 512 * 512 {
+    if regions.iter().flatten().map(|[x0, y0, x1, y1]| (x1 - x0) * (y1 - y0)).sum::<usize>() > 512 * 512 {
         return None;
     }
-    Some(regions.into_iter().map(|pixels @ [x0, y0, x1, y1]| {
+    if regions == [None, None] {
+        return Some((Vec::new(), keep_draft.then_some(draft)));
+    }
+    let previous_patches = previous.as_ref().map_or(&[][..], |preview| preview.patches.as_slice());
+    let mut renderer = None;
+    let patches = regions.into_iter().flatten().map(|pixels @ [x0, y0, x1, y1]| {
+        // With no moved ink in these samples, the first patch shows only
+        // the stationary artwork. Its texture is valid on the same composite.
+        let stationary_source = cache_source && source == Some(pixels);
+        if stationary_source && let Some(patch) = previous_patches.iter()
+            .find(|patch| patch.stationary_source && patch.pixels == pixels)
+        {
+            return CompositeMovePatch { pixels, texture: patch.texture.clone(), stationary_source };
+        }
         let patch_size = [x1 - x0, y1 - y0];
         let patch_bounds = [x + x0 as f32 * dx, y + y0 as f32 * dy, patch_size[0] as f32 * dx, patch_size[1] as f32 * dy];
-        let render = || render_scene_region(&draft, &view.canvas_flags, &[], &moved, patch_bounds, patch_size.map(|side| side as u32), 1.0);
+        let renderer = renderer.get_or_insert_with(|| RegionRenderer::new(&draft, &view.canvas_flags, &moved, &[]));
+        let render = || renderer.render(patch_bounds, patch_size.map(|length| length as u32), 1.0);
         let rgba = if antialias { dtool_render::scene::with_fill_antialiasing(render) } else { render() };
         let texture = ctx.load_texture("canvas transform patch", egui::ColorImage::from_rgba_unmultiplied(patch_size, &rgba), egui::TextureOptions::NEAREST);
-        CompositeMovePatch { pixels, texture }
-    }).collect())
+        CompositeMovePatch { pixels, texture, stationary_source }
+    }).collect();
+    Some((patches, keep_draft.then_some(draft)))
 }
 
 fn pixel_rect_intersection(a: [usize; 4], b: [usize; 4]) -> Option<[usize; 4]> {
@@ -434,6 +690,20 @@ impl GeometryPreview {
 
 const GEOMETRY_PREVIEW_ID: &str = "dtool.canvas.numeric_geometry_preview";
 
+fn geometry_preview(ui: &Ui, session: &Session) -> Option<GeometryPreview> {
+    if !ui.input(|input| input.pointer.primary_down() && !input.key_pressed(egui::Key::Escape)) { return None; }
+    ui.data(|data| data.get_temp::<GeometryPreview>(egui::Id::unique(GEOMETRY_PREVIEW_ID)))
+        .filter(|preview| preview.revision == GeometryPreview::revision(session)
+            && preview.selection == session.selection.ids
+            && ui.ctx().cumulative_pass_nr().saturating_sub(preview.pass) <= 1)
+}
+
+pub(crate) fn appearance_preview_active(ui: &Ui, session: &Session) -> bool {
+    session.edit.as_ref().is_some_and(|edit| edit.key == crate::panels::table::TABLE_FORMAT_EDIT)
+        || dtool_tools::dtool_text::font_preview::appearance_preview_active(&session.document)
+        || geometry_preview(ui, session).is_some()
+}
+
 pub(crate) fn stage_geometry_preview(ui: &Ui, session: &Session, command: dtool_core::Command) {
     let preview = GeometryPreview {
         revision: GeometryPreview::revision(session),
@@ -486,6 +756,8 @@ pub struct AppCanvas {
     composite: Option<CompositeTexture>,
     rotated_fill_scene: Option<(f32, Option<Scene>)>,
     composite_history: Vec<CompositeTexture>,
+    composite_position: u64,
+    pending_composite_damage: Option<Vec<Rect>>,
     mesh_preview: Option<crate::canvas_input::warp_mesh::MeshPreview>,
     node_preview: Option<(Vec<(ObjectId, Vec<dtool_core::curve::Contour>)>, Box<AppCanvas>)>,
     composition_draft: Option<Box<CompositionDraft>>,
@@ -644,6 +916,13 @@ fn effect_needs_backdrop(effect: &dtool_core::layer_style::LayerEffect) -> bool 
 }
 
 impl AppCanvas {
+    pub(crate) fn has_appearance_preview(&self, ui: &Ui, session: &Session) -> bool {
+        appearance_preview_active(ui, session)
+            || self.layer_opacity_preview.is_some()
+            || self.stroke_width_preview.is_some()
+            || !self.toolbar_paint_preview.is_empty()
+    }
+
     pub fn new() -> Self {
         Self::default()
     }
@@ -679,10 +958,36 @@ impl AppCanvas {
                 *context == session.context && *instance == session.document.instance && *generation == session.artwork_generation()
                     && *version == session.document.version && old_flags == flags
             });
+        let reusable_history = !font_changed && previous.is_none() && gradient.is_none()
+            && self.key.as_ref().is_some_and(|(context, instance, generation, version, old_flags, _)| {
+                *context == session.context && *instance == session.document.instance && old_flags == flags
+                    && session.can_reuse_canvas_from(*generation, *version)
+            });
+        let damage = if !font_changed && previous.is_none() && gradient.is_none()
+            && self.pending_composite_damage.is_none() && self.composite.is_some()
+        {
+            self.key.as_ref().and_then(|(context, instance, generation, version, old_flags, old_detail)| {
+                (*context == session.context && *instance == session.document.instance && old_flags == flags && *old_detail == detail)
+                    .then(|| session.canvas_damage_from(*generation, *version)).flatten()
+            })
+        } else {
+            None
+        };
         let changing = [previous.map(|draft| draft.id), gradient.map(|draft| draft.id)];
         let rebuild_scene = !same_scene_key || previous.into_iter().chain(gradient).any(|draft| draft.changes_scene_paint());
         if rebuild_scene { self.rotated_fill_scene = None; }
-        let previous_prims = rebuild_scene.then(|| self.rebuild_scene(session, detail));
+        let previous_prims = rebuild_scene.then(|| {
+            if let Some(damage) = damage.filter(|damage| damage.translation_only)
+                && let [id] = damage.objects.as_slice()
+                && let Some(scene) = translated_leaf_scene(&session.document, &session.view, &self.scene, *id)
+            {
+                // The edited leaf keeps its slots and paint, so the effect
+                // index and the scene's compositing requirements are unchanged.
+                std::mem::replace(&mut self.scene, scene).prims
+            } else {
+                self.rebuild_scene(session, detail)
+            }
+        });
         if same_scene_key {
             // Fill textures belong to scene slots. Preserve only unchanged ink
             // outside the draft targets, including when a paint changes the slot order.
@@ -699,10 +1004,22 @@ impl AppCanvas {
         }) {
             self.fill_textures.clear();
         }
+        self.pending_composite_damage = damage
+            .zip(previous_prims.as_deref())
+            .and_then(|(damage, old)| composite_damage(&session.document, old, &self.scene.prims, &damage.objects));
         if !only_detail_changed {
-            self.composite = None;
-            self.composite_history.clear();
+            if self.pending_composite_damage.is_some() {
+                self.composite_history.clear();
+            } else if reusable_history {
+                if let Some(cached) = self.composite.take() {
+                    remember_composite(&mut self.composite_history, cached);
+                }
+            } else {
+                self.composite = None;
+                self.composite_history.clear();
+            }
         }
+        self.composite_position = session.canvas_history_position();
         self.key = Some(key);
         self.painted_gradient = gradient.cloned();
         // Undo can change the scene generation without changing the document version.
@@ -934,7 +1251,10 @@ impl AppCanvas {
             self.input.update(ui, response, session, &self.scene, false);
         }
         let move_input = input && session.has_document && matches!(session.active_tool.as_str(), "tool.move" | "tool.select.object");
-        if move_input {
+        let brush_input = input && session.has_document
+            && matches!(crate::canvas_input::tool_kind(&session.active_tool), crate::canvas_input::ToolKind::PixelBrush(_) | crate::canvas_input::ToolKind::Patch);
+        let width_input = input && session.has_document && session.active_tool == "tool.stroke_width";
+        if move_input || brush_input || width_input {
             self.refresh(session);
             self.input.update(ui, response, session, &self.scene, false);
         }
@@ -949,6 +1269,7 @@ impl AppCanvas {
         let original_mesh = mesh_preview.as_ref().and_then(|preview| preview.install(session));
         let vector_draft = move_input.then(|| self.direct_vector_transform(session)).flatten();
         let numeric_preview = self.paint_numeric_geometry_preview(ui, rect, session);
+        let appearance_preview = numeric_preview || self.has_appearance_preview(ui, session);
         if numeric_preview || self.paint_composition_preview(ui, rect, session, input, !frame_tool) {
             self.transform_draft = None;
             self.node_preview = None;
@@ -1003,8 +1324,8 @@ impl AppCanvas {
             return;
         }
         if input {
-            if node_input || move_input {
-                if !crate::rulers::guide_drag_active(ui.ctx()) {
+            if node_input || move_input || brush_input || width_input {
+                if !appearance_preview && !crate::rulers::guide_drag_active(ui.ctx()) {
                     self.input.paint_preview(ui, rect, session, &self.scene);
                 }
             } else {
@@ -1013,7 +1334,7 @@ impl AppCanvas {
                     ui.ctx().request_repaint();
                 }
             }
-            if !numeric_preview {
+            if !appearance_preview {
                 self.paint_selection(&ui.painter_at(rect), rect, &session.view, session, true);
                 crate::canvas::frame_text_input::paint_text_selection(ui, session, response, &session.view);
                 crate::canvas::frame_text_input::paint_caret(ui, session, response, &session.view);
@@ -1022,7 +1343,7 @@ impl AppCanvas {
             if self.input.busy() {
                 self.input.cancel();
             }
-            if !numeric_preview {
+            if !appearance_preview {
                 self.paint_selection(&ui.painter_at(rect), rect, &session.view, session, false);
             }
         }
@@ -1035,12 +1356,7 @@ impl AppCanvas {
             self.geometry_draft = None;
             return false;
         }
-        let preview = ui.data(|data| data.get_temp::<GeometryPreview>(id));
-        let Some(preview) = preview.filter(|preview| {
-            preview.revision == GeometryPreview::revision(session)
-                && preview.selection == session.selection.ids
-                && ui.ctx().cumulative_pass_nr().saturating_sub(preview.pass) <= 1
-        }) else {
+        let Some(preview) = geometry_preview(ui, session) else {
             self.geometry_draft = None;
             return false;
         };
@@ -1062,9 +1378,9 @@ impl AppCanvas {
 
         let Some(draft) = self.geometry_draft.as_mut() else { return false };
         draft.session.view = session.view.clone();
+        draft.session.view.canvas_flags.preview_mode = true;
         draft.canvas.show_invisibles = self.show_invisibles;
-        draft.canvas.paint_layers(ui, rect, &draft.session, true);
-        draft.canvas.paint_selection(&ui.painter_at(rect), rect, &draft.session.view, &draft.session, false);
+        draft.canvas.paint_layers(ui, rect, &draft.session, false);
         true
     }
 
@@ -1381,26 +1697,47 @@ impl AppCanvas {
         } else {
             None
         };
-        let matching = |cached: &CompositeTexture| {
+        let same_sampling = |cached: &CompositeTexture| {
             cached.rotation_deg == rotation_deg && cached.sample_scale == sample_scale
                 && cached.pixel_step == pixel_step && cached.filter == filter
                 && cached.detail == detail && cached.staged.is_empty()
                 && cached.blend_preview.is_none() && cached.tone_preview.is_none() && cached.brush_revision.is_none()
         };
-        let covers = |cached: &CompositeTexture| {
+        let position = self.composite_position;
+        let matching = |cached: &CompositeTexture| cached.history_position == position && same_sampling(cached);
+        let covers_edges = |cached: &CompositeTexture| {
             let [x, y, w, h] = cached.bounds;
             let tolerance = sample_scale.map_or(0.0, |scale| 0.001 / scale);
-            matching(cached) && edges[0] + tolerance >= x && edges[1] + tolerance >= y
+            edges[0] + tolerance >= x && edges[1] + tolerance >= y
                 && edges[2] <= x + w + tolerance && edges[3] <= y + h + tolerance
         };
+        if let Some(damage) = self.pending_composite_damage.take() {
+            let updated = self.composite.as_mut().is_some_and(|cached| {
+                if sample_scale.is_none() || !same_sampling(cached) || !covers_edges(cached) {
+                    return false;
+                }
+                let render = |bounds, size| composite_image(
+                    &session.document, &view.canvas_flags, &staged, &self.scene, bounds, size, pixel_step.is_none(),
+                );
+                if !patch_composite_damage(cached, &damage, &render) {
+                    return false;
+                }
+                cached.history_position = position;
+                cached.transform_preview = None;
+                true
+            });
+            if !updated {
+                self.composite = None;
+            }
+        }
+        let covers = |cached: &CompositeTexture| matching(cached) && covers_edges(cached);
         if sample_scale.is_some() && !self.composite.as_ref().is_some_and(&covers)
             && let Some(index) = self.composite_history.iter().position(covers)
         {
             let mut cached = self.composite_history.remove(index);
             cached.transform_preview = None;
-            if let Some(mut previous) = self.composite.replace(cached) {
-                previous.transform_preview = None;
-                self.composite_history.push(previous);
+            if let Some(previous) = self.composite.replace(cached) {
+                remember_composite(&mut self.composite_history, previous);
             }
         }
         let covered = sample_scale.is_some() && self.composite.as_ref().is_some_and(covers);
@@ -1454,39 +1791,57 @@ impl AppCanvas {
             let document = preview_document.as_ref().unwrap_or(draft_document);
             let draft_scene = brush_draft.as_ref().map(|_| canvas_scene(document, &view, detail));
             let scene = draft_scene.as_ref().or(aligned).unwrap_or(&self.scene);
-            let render = |bounds, size: [usize; 2]| {
-                let draw = || render_scene_region(
-                    document, &view.canvas_flags, &staged, scene, bounds, size.map(|length| length as u32), 1.0,
-                );
-                let pixels = if pixel_step.is_none() { dtool_render::scene::with_fill_antialiasing(draw) } else { draw() };
-                egui::ColorImage::from_rgba_unmultiplied(size, &pixels)
-            };
-            let reused = sample_scale.zip(self.composite.as_ref()).and_then(|(scale, cached)| {
-                // A group blur can sample across a strip boundary. Keep the
-                // existing buffer during the pan and redraw it if that buffer runs out.
-                let needs_neighbours = document.objects().iter().any(dtool_core::layer_style::raster::has_group_effect);
-                if !matching(cached) || needs_neighbours {
-                    return None;
-                }
-                CompositeRegion { bounds, size }.reuse_pixels(cached, scale, render)
+            let render = |bounds, size| composite_image(
+                document, &view.canvas_flags, &staged, scene, bounds, size, pixel_step.is_none(),
+            );
+            let brush_pixels = brush_draft.as_ref().and_then(|draft| {
+                let id = draft.layer?;
+                Some((id, document.pixel_layers.get(id)?.clone()))
             });
-            let image = std::sync::Arc::new(reused.unwrap_or_else(|| render(bounds, size)));
-            let texture = ui.ctx().load_texture("canvas composite", image.clone(), filter);
-            let next = CompositeTexture {
-                rotation_deg, bounds, size, filter, staged, blend_preview: preview.cloned(), tone_preview, brush_revision,
-                sample_scale, pixel_step, detail, image, texture, transform_preview: None,
-            };
-            if let Some(mut previous) = self.composite.replace(next)
-                && previous.sample_scale.is_some() && previous.sample_scale != sample_scale
-            {
-                previous.transform_preview = None;
-                self.composite_history.retain(|old| old.sample_scale != previous.sample_scale);
-                self.composite_history.push(previous);
-            }
-            while self.composite_history.len() > COMPOSITE_HISTORY_LIMIT
-                || self.composite_history.iter().map(|cached| cached.size[0] * cached.size[1]).sum::<usize>() > COMPOSITE_HISTORY_PIXEL_LIMIT
-            {
-                self.composite_history.remove(0);
+            let updated = self.composite.as_mut().is_some_and(|cached| {
+                let Some((id, pixels)) = &brush_pixels else { return false };
+                if cached.bounds != bounds || cached.size != size || cached.filter != filter
+                    || cached.pixel_step != pixel_step || cached.sample_scale != sample_scale
+                    || cached.detail != detail || cached.rotation_deg.is_some() || rotation_deg.is_some()
+                    || !staged.is_empty() || !cached.staged.is_empty()
+                    || preview.is_some() || cached.blend_preview.is_some()
+                    || tone_preview.is_some() || cached.tone_preview.is_some()
+                    || cached.brush_pixels.as_ref().is_none_or(|(previous, layer)| {
+                        previous != id || layer.width != pixels.width || layer.height != pixels.height
+                    })
+                    || document.objects().iter().any(dtool_core::layer_style::raster::has_group_effect)
+                { return false; }
+                let Some(object) = document.get_object(*id).filter(|object| {
+                    !object.effects.iter().any(|effect| effect.enabled)
+                }) else { return false };
+                patch_brush_composite(cached, object, pixels, &render);
+                cached.brush_revision = brush_revision;
+                cached.brush_pixels = brush_pixels.clone();
+                cached.transform_preview = None;
+                true
+            });
+            if !updated {
+                let reused = sample_scale.zip(self.composite.as_ref()).and_then(|(scale, cached)| {
+                    // A group blur can sample across a strip boundary. Keep the
+                    // existing buffer during the pan and redraw it if that buffer runs out.
+                    let needs_neighbours = document.objects().iter().any(dtool_core::layer_style::raster::has_group_effect);
+                    if !matching(cached) || needs_neighbours {
+                        return None;
+                    }
+                    CompositeRegion { bounds, size }.reuse_pixels(cached, scale, render)
+                });
+                let image = std::sync::Arc::new(reused.unwrap_or_else(|| render(bounds, size)));
+                let texture = ui.ctx().load_texture("canvas composite", image.clone(), filter);
+                let next = CompositeTexture {
+                    history_position: self.composite_position,
+                    rotation_deg, bounds, size, filter, staged, blend_preview: preview.cloned(), tone_preview, brush_revision, brush_pixels,
+                    sample_scale, pixel_step, detail, image, texture, transform_preview: None,
+                };
+                if let Some(previous) = self.composite.replace(next)
+                    && (previous.sample_scale != sample_scale || disjoint_composite_bounds(previous.bounds, bounds))
+                {
+                    remember_composite(&mut self.composite_history, previous);
+                }
             }
         }
         let [left, top, width, height] = bounds;
@@ -1502,11 +1857,17 @@ impl AppCanvas {
                 && brush_revision.is_none()
         });
         if let Some(args) = transform {
-            if composite.transform_preview.as_ref().is_none_or(|preview| preview.args != *args) {
-                let patches = composite_transform_patches(ui.ctx(), session, view, &self.scene, bounds, size, pixel_step.is_none(), args)
+            let previous = composite.transform_preview.as_mut().filter(|preview| preview.selection == session.selection.ids);
+            if previous.as_ref().is_none_or(|preview| preview.args != *args) {
+                let (patches, draft) = composite_transform_patches(
+                    ui.ctx(), session, view, &self.scene, bounds, size, pixel_step.is_none(), args,
+                    cacheable, previous.filter(|_| cacheable),
+                )
                     .unwrap_or_default();
                 let backdrop = composite_move_backdrop(size, &patches);
-                composite.transform_preview = Some(CompositeTransformPreview { args: args.clone(), patches, backdrop });
+                composite.transform_preview = Some(CompositeTransformPreview {
+                    args: args.clone(), selection: session.selection.ids.clone(), patches, backdrop, draft,
+                });
             }
         } else {
             composite.transform_preview = None;
@@ -1585,7 +1946,8 @@ impl AppCanvas {
         dtool_tools::frame_text::install_flow_ranges();
         dtool_tools::frame_text::install_canvas_text();
         self.refresh_with_gradient(session, gradient);
-        let view = session.view.clone();
+        let mut view = session.view.clone();
+        view.canvas_flags.preview_mode |= self.has_appearance_preview(ui, session);
         for prim in &self.scene.prims {
             if let Prim::Page { index, rect: page } = prim
                 && !dtool_core::artboard::edit::is_backing_page(&session.document, *index)
@@ -2232,7 +2594,7 @@ impl AppCanvas {
             && !self.input.nodes.primitive
             && self.input.nodes.target.is_some_and(|id| session.selection.ids.contains(&id));
         if view.canvas_flags.preview_mode
-            || matches!(kind, ToolKind::VectorCrop | ToolKind::StrokeWidth | ToolKind::Slice | ToolKind::PixelBrush(_) | ToolKind::PixelFlood { .. } | ToolKind::PixelMarquee(_) | ToolKind::RedEye)
+            || matches!(kind, ToolKind::VectorCrop | ToolKind::StrokeWidth | ToolKind::Contour | ToolKind::Corner | ToolKind::Slice | ToolKind::PixelBrush(_) | ToolKind::PixelFlood { .. } | ToolKind::PixelMarquee(_) | ToolKind::RedEye | ToolKind::Inpaint | ToolKind::Patch | ToolKind::Blemish)
             || (session.quick_mask.active && matches!(kind, ToolKind::Gradient(_) | ToolKind::Transparency))
             || self.input.dragging_artboard()
             || self.input.warp_mesh.visible(session)

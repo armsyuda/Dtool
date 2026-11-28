@@ -14,6 +14,8 @@ use dtool_core::{CanvasFlags, Command, Session};
 use egui::{Color32, ColorImage, TextureHandle, TextureOptions, vec2};
 use serde_json::json;
 
+mod master_create;
+
 type PageRevision = (Option<dtool_core::ContextId>, u64, u64, u16);
 
 #[derive(Clone, Copy, Default, PartialEq)]
@@ -76,12 +78,10 @@ const TEXT_THUMBNAIL_DELAY: Duration = Duration::from_millis(200);
 type PageThumbnailJob = super::ThumbnailJob<PageRevision, Vec<(PageId, ColorImage)>>;
 
 struct MasterDraft {
-    id: Option<ObjectId>,
+    id: ObjectId,
     name: String,
     size: [f32; 2],
     initial_size: [f32; 2],
-    page_count: usize,
-    spine: usize,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -197,6 +197,7 @@ pub struct PagesPanel {
     delete_master: Option<ObjectId>,
     delete_unused_masters: bool,
     master_draft: Option<MasterDraft>,
+    master_create: Option<master_create::Draft>,
     master_range: Option<MasterRangeDraft>,
     master_base: Option<MasterBaseDraft>,
 }
@@ -315,6 +316,7 @@ impl PagesPanel {
             self.thumbnail_row_layout = None;
             self.resized_thumbnail_scroll = None;
             self.master_draft = None;
+            self.master_create = None;
             self.master_range = None;
             self.master_base = None;
             self.thumbnails.clear();
@@ -342,6 +344,7 @@ impl PagesPanel {
             self.thumbnail_row_layout = None;
             self.resized_thumbnail_scroll = None;
             self.master_draft = None;
+            self.master_create = None;
             self.master_range = None;
             self.master_base = None;
             self.selected_master = None;
@@ -1513,13 +1516,7 @@ impl PagesPanel {
         }
         if add {
             self.masters_open = true;
-            let next = doc.master_pages.spread_roots().count() + 1;
-            let size = dtool_core::data_merge::layout::page_size(doc);
-            self.master_draft = Some(MasterDraft {
-                id: None,
-                name: format!("{} {next}", text("panel.master")),
-                size, initial_size: size, page_count: 1, spine: 1,
-            });
+            self.master_create = Some(master_create::Draft::new(doc));
         }
         if duplicate && let Some(id) = selected {
             return Some(Command::with_params("master.duplicate", json!({"id": id})));
@@ -1640,12 +1637,10 @@ impl PagesPanel {
                     }
                     if ui.button(text("panel.master.options")).clicked() {
                         self.master_draft = Some(MasterDraft {
-                            id: Some(root.id),
+                            id: root.id,
                             name: master_name(root).to_owned(),
                             size: root.size,
                             initial_size: root.size,
-                            page_count: master_pages.len(),
-                            spine: doc.master_pages.spread(id).map_or(1, |spread| spread.spine),
                         });
                         ui.close();
                     }
@@ -1727,6 +1722,16 @@ impl PagesPanel {
         if let Some(command) = self.show_master_base(ui, doc) {
             return Some(command);
         }
+        if let Some(draft) = &mut self.master_create {
+            match draft.show(ui.ctx(), doc) {
+                Some(crate::dialog_chrome::DialogResult::Confirm) => {
+                    let draft = self.master_create.take()?;
+                    return Some(draft.command());
+                }
+                Some(crate::dialog_chrome::DialogResult::Cancel) => self.master_create = None,
+                _ => {}
+            }
+        }
         if let Some(draft) = &mut self.master_draft {
             use crate::dialog_chrome::{ClosePolicy, DialogResult, show_modal};
             let enabled = !draft.name.trim().is_empty() && draft.size.iter().all(|n| n.is_finite() && *n > 0.0);
@@ -1750,22 +1755,6 @@ impl PagesPanel {
                             dtool_design::numeric_value(ui, id, &mut value, &spec).labelled_by(caption.id);
                             draft.size[axis] = value as f32;
                         });
-                        if draft.id.is_none() {
-                            let count = ui.label(text("panel.master.page_count"));
-                            let spec = dtool_design::NumericSpec::new("").decimals(0)
-                                .range(1.0..=dtool_core::commands::masters::MAX_MASTER_PAGES as f64);
-                            let mut value = draft.page_count as f64;
-                            dtool_design::numeric_value(ui, ui.make_persistent_id("master.count"), &mut value, &spec).labelled_by(count.id);
-                            draft.page_count = value as usize;
-                            if draft.page_count > 1 {
-                                draft.spine = draft.spine.clamp(1, draft.page_count - 1);
-                                let label = ui.label(text("panel.master.spine"));
-                                let spec = dtool_design::NumericSpec::new("").decimals(0).range(1.0..=(draft.page_count - 1) as f64);
-                                let mut value = draft.spine as f64;
-                                dtool_design::numeric_value(ui, ui.make_persistent_id("master.spine"), &mut value, &spec).labelled_by(label.id);
-                                draft.spine = value as usize;
-                            }
-                        }
                     });
                     ui.horizontal_wrapped(|ui| {
                         let ready = !draft.name.trim().is_empty() && draft.size.iter().all(|n| n.is_finite() && *n > 0.0);
@@ -1776,22 +1765,11 @@ impl PagesPanel {
                 });
             if save || event == DialogResult::Confirm {
                 let draft = self.master_draft.take()?;
-                return Some(match draft.id {
-                    Some(id) => {
-                        let mut params = json!({"id": id, "name": draft.name});
-                        if draft.size != draft.initial_size {
-                            params["size"] = json!(draft.size);
-                        }
-                        Command::with_params("master.update", params)
-                    }
-                    None => {
-                        let mut params = json!({"name": draft.name, "size": draft.size, "page_count": draft.page_count});
-                        if draft.page_count > 1 {
-                            params["spine"] = json!(draft.spine);
-                        }
-                        Command::with_params("master.create", params)
-                    }
-                });
+                let mut params = json!({"id": draft.id, "name": draft.name});
+                if draft.size != draft.initial_size {
+                    params["size"] = json!(draft.size);
+                }
+                return Some(Command::with_params("master.update", params));
             }
             if cancel || event == DialogResult::Cancel {
                 self.master_draft = None;

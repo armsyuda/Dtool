@@ -44,9 +44,9 @@ fn c16_no_pie_in_catalog_or_ko() {
 }
 
 #[test]
-fn c16_no_pie_ui_module() {
+fn c16_pie_menu_is_local_to_ui() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    assert!(!root.join("src/pie_menu.rs").exists());
+    assert!(root.join("src/pie_menu.rs").exists());
     let lib = std::fs::read_to_string(root.join("src/lib.rs")).unwrap();
-    assert!(!lib.contains("pie_menu") && !lib.contains("draw_pie"));
+    assert!(lib.lines().any(|line| line == "mod pie_menu;"));
 }

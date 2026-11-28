@@ -142,6 +142,8 @@ pub struct Object {
     pub stroke_mask_outline: bool,
     #[serde(default, skip_serializing_if = "ClipRole::is_none")]
     pub clip_role: ClipRole,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contour: Option<crate::commands::contour::ContourSpec>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -151,6 +153,12 @@ pub enum ClipRole {
     None,
     Clip,
     Mask,
+}
+
+impl Object {
+    pub fn has_live_contour(&self) -> bool {
+        self.contour.is_some_and(|spec| spec.radius != 0.0 && spec.is_valid())
+    }
 }
 
 impl ClipRole {
@@ -227,6 +235,7 @@ impl Default for Object {
             expanded_stroke_effects: false,
             stroke_mask_outline: false,
             clip_role: ClipRole::None,
+            contour: None,
         }
     }
 }
@@ -261,6 +270,8 @@ pub struct ObjectCreateArgs {
     pub stroke: Option<StrokeStyle>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub opacity: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effects: Option<Vec<crate::layer_style::LayerEffect>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

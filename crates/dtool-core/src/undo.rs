@@ -15,6 +15,7 @@ pub struct Change {
 
 #[derive(Debug, Clone)]
 struct Step {
+    id: u64,
     change: Change,
     before: u64,
     after: u64,
@@ -66,6 +67,14 @@ impl UndoStack {
         Some((&step.change.name, step.after))
     }
 
+    pub(crate) fn next_action_is(&self, redo: bool, command: &str) -> bool {
+        let step = if redo { self.redo_stack.last() } else { self.undo_stack.last() };
+        step.is_some_and(|step| {
+            let action = if redo { &step.change.redo } else { &step.change.undo };
+            action.name == command
+        })
+    }
+
     pub fn push(&mut self, change: Change) {
         let before = self.position;
         let selection_only = change.undo.name == "selection.set"
@@ -75,7 +84,8 @@ impl UndoStack {
             self.position = next_position();
             self.revision = self.position;
         }
-        self.undo_stack.push(Step { change, before, after: self.position });
+        let id = if selection_only { next_position() } else { self.position };
+        self.undo_stack.push(Step { id, change, before, after: self.position });
         if self.undo_stack.len() > self.limit {
             let excess = self.undo_stack.len() - self.limit;
             self.undo_stack.drain(0..excess);
@@ -141,6 +151,22 @@ impl UndoStack {
 impl UndoStack {
     pub fn chronological_changes(&self) -> impl Iterator<Item = &Change> {
         self.undo_stack.iter().chain(self.redo_stack.iter().rev()).map(|step| &step.change)
+    }
+
+    pub(crate) fn commands_to_position(&self, target: usize) -> impl Iterator<Item = &Command> {
+        let applied = self.undo_stack.len();
+        self.undo_stack.iter().rev().take(applied.saturating_sub(target)).map(|step| &step.change.undo)
+            .chain(self.redo_stack.iter().rev().take(target.saturating_sub(applied)).map(|step| &step.change.redo))
+    }
+
+    pub fn history_step_id(&self, index: u64) -> Option<u64> {
+        let index = usize::try_from(index).ok()?;
+        if index < self.undo_stack.len() {
+            return Some(self.undo_stack[index].id);
+        }
+        let redo_offset = index - self.undo_stack.len();
+        let redo_index = self.redo_stack.len().checked_sub(redo_offset.checked_add(1)?)?;
+        Some(self.redo_stack[redo_index].id)
     }
 
     pub(crate) fn position(&self) -> u64 { self.position }

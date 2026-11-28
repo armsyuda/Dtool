@@ -22,7 +22,7 @@ pub fn show(ui: &mut Ui, workspace: &mut Workspace) {
         let [id] = session.selection.ids.as_slice() else { return None; };
         let object = session.document.get_object(*id).filter(|object| supports_multiple(object))?;
         let focus = session.appearance_focus.filter(|focus| focus.active(session));
-        Some(ui.add_enabled_ui(!object.locked, |ui| controls(ui, object, focus, workspace.active(), session.generation)).inner)
+        Some(ui.add_enabled_ui(!session.document.is_object_locked(object), |ui| controls(ui, object, focus, workspace.active(), session.generation)).inner)
     });
     match command {
         Some(Some(command)) => {

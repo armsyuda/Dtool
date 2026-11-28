@@ -4,7 +4,7 @@ use serde::{Serialize,Deserialize};
 use std::sync::atomic::{AtomicBool,Ordering};
 use std::sync::Arc;
 
-pub const ENGINE_VERSION:&str="patch-1";
+pub const ENGINE_VERSION:&str="patch-2";
 
 #[derive(Debug,Clone,Copy,PartialEq,Eq,Serialize,Deserialize)]
 #[serde(rename_all="snake_case")]
@@ -66,266 +66,186 @@ impl Rng {
     }
 }
 
-pub fn find_patches(src:&RasterView,mask:&PixelSelection,seed:u64,patch:u32,max_iters:u32)->Vec<PatchCandidate>{
-    let w=src.width;let h=src.height;
-    if w==0 || h==0 { return Vec::new(); }
-    
-    let mut rng=Rng(seed);
-    let mut candidates=Vec::new();
-    
-    let half_patch=(patch/2) as i32;
-    
-    for y in 0..h{
-        for x in 0..w{
-            if mask.coverage[y as usize*w as usize+x as usize]==0 { continue; }
-            
-            let mut best_source=[x,y];
-            let mut best_cost=u32::MAX;
-            
-            for _iter in 0..max_iters{
-                let rand_val=rng.next();
-                let search_radius=1u32<<(_iter+1); 
-                
-                let dx=(rand_val % (search_radius as u64*2)) as i32 - search_radius as i32;
-                let dy=((rand_val >> 32) % (search_radius as u64*2)) as i32 - search_radius as i32;
-                
-                let sx=(x as i32+dx).max(0).min(w as i32-1) as u32;
-                let sy=(y as i32+dy).max(0).min(h as i32-1) as u32;
-                
-                if mask.coverage[sy as usize*w as usize+sx as usize]!=0 { continue; }
-                
-                let mut cost=0u32;
-                let mut valid=true;
-                
-                for py in -half_patch..=half_patch{
-                    for px in -half_patch..=half_patch{
-                        let tx=x as i32+px;let ty=y as i32+py;
-                        if tx<0 || tx>=w as i32 || ty<0 || ty>=h as i32 { continue; }
-                        
-                        if mask.coverage[ty as usize*w as usize+tx as usize]!=0 { continue; }
-                        
-                        let src_x=sx as i32+px;let src_y=sy as i32+py;
-                        if src_x<0 || src_x>=w as i32 || src_y<0 || src_y>=h as i32 { valid=false; break; }
-                        
-                        let target_px=src.get(tx as u32,ty as u32);
-                        let source_px=src.get(src_x as u32,src_y as u32);
-                        
-                        let dr=(target_px[0] as i32-source_px[0] as i32).abs() as u32;
-                        let dg=(target_px[1] as i32-source_px[1] as i32).abs() as u32;
-                        let db=(target_px[2] as i32-source_px[2] as i32).abs() as u32;
-                        let da=(target_px[3] as i32-source_px[3] as i32).abs() as u32;
-                        
-                        cost+=dr*dr+dg*dg+db*db+da*da;
-                    }
-                    if !valid { break; }
-                }
-                
-                if valid && cost<best_cost{
-                    best_cost=cost;
-                    best_source=[sx,sy];
-                }
-            }
-            
-            if best_cost!=u32::MAX{
-                candidates.push(PatchCandidate{target:[x,y],source:best_source,cost:best_cost});
-            }
-        }
-    }
-    
-    candidates
+pub fn find_patches(src: &RasterView, mask: &PixelSelection, seed: u64, patch: u32, max_iters: u32) -> Vec<PatchCandidate> {
+    search(src, mask, seed, patch, max_iters, &CancelToken::new(), &mut |_| {}).unwrap_or_default()
 }
 
-#[derive(Debug,Clone)]
-pub struct StagedRegion { pub rect:[u32;4], pub rgba:Vec<u8> }
+fn colour_distance(left: [u8; 4], right: [u8; 4]) -> u32 {
+    left.into_iter().zip(right).map(|(a, b)| (i32::from(a) - i32::from(b)).pow(2) as u32).sum()
+}
 
-pub fn apply_patches(src:&RasterView,mask:&PixelSelection,c:&[PatchCandidate],opacity:f32)->StagedRegion{
-    let mut min_x=u32::MAX;let mut min_y=u32::MAX;let mut max_x=0u32;let mut max_y=0u32;
-    
-    for cand in c {
-        if cand.target[0]<min_x { min_x=cand.target[0]; }
-        if cand.target[1]<min_y { min_y=cand.target[1]; }
-        if cand.target[0]>max_x { max_x=cand.target[0]; }
-        if cand.target[1]>max_y { max_y=cand.target[1]; }
-    }
-    
-    if c.is_empty() { return StagedRegion{rect:[0,0,0,0],rgba:Vec::new()}; }
-    
-    let width=max_x-min_x+1;let height=max_y-min_y+1;
-    let mut rgba=vec![0u8;width as usize*height as usize*4];
-    
-    for y in 0..height{
-        for x in 0..width{
-            let global_x=min_x+x;
-            let global_y=min_y+y;
-            
-            let mask_idx=(global_y as usize)*mask.width as usize+(global_x as usize);
-            let coverage=if mask_idx < mask.coverage.len() { mask.coverage[mask_idx] } else { 0 };
-            
-            if coverage == 0 {
-                let src_px=src.get(global_x,global_y);
-                let idx=(y as usize*width as usize+x as usize)*4;
-                rgba[idx]=src_px[0];
-                rgba[idx+1]=src_px[1];
-                rgba[idx+2]=src_px[2];
-                rgba[idx+3]=src_px[3];
-            } else {
-                let mut vote_r=0u64;
-                let mut vote_g=0u64;
-                let mut vote_b=0u64;
-                let mut vote_a=0u64;
-                let mut count=0u64;
-                
-                for cand in c {
-                    if cand.target[0]==global_x && cand.target[1]==global_y {
-                        let src_px=src.get(cand.source[0],cand.source[1]);
-                        vote_r+=src_px[0] as u64;
-                        vote_g+=src_px[1] as u64;
-                        vote_b+=src_px[2] as u64;
-                        vote_a+=src_px[3] as u64;
-                        count+=1;
+fn search(
+    src: &RasterView, mask: &PixelSelection, seed: u64, patch: u32, max_iters: u32,
+    token: &CancelToken, progress: &mut dyn FnMut(Progress),
+) -> Result<Vec<PatchCandidate>, CommandError> {
+    let Some([left, top, width, height]) = mask.bounds() else { return Ok(Vec::new()) };
+    let index = |x: u32, y: u32| (y * src.width + x) as usize;
+    let usable = |x, y| mask.coverage[index(x, y)] == 0 && src.get(x, y)[3] != 0;
+    let mut rng = Rng(seed.max(1));
+    let mut candidates = Vec::new();
+    let mut missing = Vec::new();
+    let half = (patch.clamp(1, 15) / 2) as i32;
+    let [w, h] = [src.width as i32, src.height as i32];
+    for y in top..top + height {
+        if token.is_cancelled() { return Err(CommandError::new("CANCELLED")); }
+        for x in left..left + width {
+            if mask.coverage[index(x, y)] == 0 { continue; }
+            let mut best = None;
+            for trial in 0..max_iters.min(12) {
+                let distance = 1i32 << (trial + 1).min(8);
+                let random = rng.next();
+                let dx = (random as u32 % (2 * distance) as u32) as i32 - distance;
+                let dy = ((random >> 32) as u32 % (2 * distance) as u32) as i32 - distance;
+                let sx = (x as i32 + dx).clamp(0, w - 1);
+                let sy = (y as i32 + dy).clamp(0, h - 1);
+                if !usable(sx as u32, sy as u32) { continue; }
+                let center = src.get(sx as u32, sy as u32);
+                let mut cost = 0u32;
+                let mut center_cost = u32::MAX;
+                let mut weight = 0u32;
+                for row in -half..=half {
+                    for col in -half..=half {
+                        let [tx, ty, rx, ry] = [x as i32 + col, y as i32 + row, sx + col, sy + row];
+                        if !(0..w).contains(&tx) || !(0..h).contains(&ty) || !(0..w).contains(&rx) || !(0..h).contains(&ry)
+                            || mask.coverage[index(tx as u32, ty as u32)] != 0
+                            || !usable(rx as u32, ry as u32)
+                        { continue; }
+                        let [a, b] = [src.get(tx as u32, ty as u32), src.get(rx as u32, ry as u32)];
+                        cost += colour_distance(a, b);
+                        center_cost = center_cost.min(colour_distance(a, center));
+                        weight += 1;
                     }
                 }
-                
-                let orig_px=src.get(global_x,global_y);
-                
-                if count == 0 {
-                    let idx=(y as usize*width as usize+x as usize)*4;
-                    rgba[idx]=orig_px[0];
-                    rgba[idx+1]=orig_px[1];
-                    rgba[idx+2]=orig_px[2];
-                    rgba[idx+3]=orig_px[3];
-                } else {
-                    let avg_r=vote_r/count;
-                    let avg_g=vote_g/count;
-                    let avg_b=vote_b/count;
-                    let avg_a=vote_a/count;
-                    
-                    let mask_factor=f64::from(coverage)/255.0;
-                    let blend_factor=mask_factor*f64::from(opacity);
-                    
-                    let out_r=((orig_px[0] as f64)*(1.0-blend_factor)+(avg_r as f64)*blend_factor).round().clamp(0.0,255.0) as u8;
-                    let out_g=((orig_px[1] as f64)*(1.0-blend_factor)+(avg_g as f64)*blend_factor).round().clamp(0.0,255.0) as u8;
-                    let out_b=((orig_px[2] as f64)*(1.0-blend_factor)+(avg_b as f64)*blend_factor).round().clamp(0.0,255.0) as u8;
-                    let out_a=((orig_px[3] as f64)*(1.0-blend_factor)+(avg_a as f64)*blend_factor).round().clamp(0.0,255.0) as u8;
-                    
-                    let idx=(y as usize*width as usize+x as usize)*4;
-                    rgba[idx]=out_r;
-                    rgba[idx+1]=out_g;
-                    rgba[idx+2]=out_b;
-                    rgba[idx+3]=out_a;
+                // A masked interior has no local context to score a random patch against.
+                // Let the boundary pass carry a nearby unmasked sample into those pixels.
+                // A matching patch can still contain an unrelated isolated mark at its centre.
+                if weight == 0 || center_cost > 4 * 64 * 64 { continue; }
+                let score = cost / weight + center_cost / 4 + dx.unsigned_abs() + dy.unsigned_abs();
+                if best.as_ref().is_none_or(|old: &PatchCandidate| score < old.cost) {
+                    best = Some(PatchCandidate { target: [x, y], source: [sx as u32, sy as u32], cost: score });
+                }
+            }
+            if let Some(candidate) = best { candidates.push(candidate); }
+            else { missing.push([x, y]); }
+        }
+        if (y - top) % 16 == 0 { progress(Progress { done: y - top, total: height }); }
+    }
+    // Reuse sources from the mask boundary throughout holes without scanning the image for every pixel.
+    if !missing.is_empty() {
+        let mut sources = vec![[u32::MAX; 2]; width as usize * height as usize];
+        let at = |x: u32, y: u32| ((y - top) * width + x - left) as usize;
+        let neighbours = |x: u32, y: u32| {
+            [x.checked_sub(1).map(|x| [x, y]), y.checked_sub(1).map(|y| [x, y]),
+                (x + 1 < src.width).then_some([x + 1, y]), (y + 1 < src.height).then_some([x, y + 1])]
+                .into_iter().flatten()
+        };
+        let mut queue = std::collections::VecDeque::new();
+        for y in top..top + height {
+            if token.is_cancelled() { return Err(CommandError::new("CANCELLED")); }
+            for x in left..left + width {
+                if mask.coverage[index(x, y)] != 0
+                    && let Some(source) = neighbours(x, y).find(|[nx, ny]| usable(*nx, *ny))
+                {
+                    sources[at(x, y)] = source;
+                    queue.push_back([x, y]);
                 }
             }
         }
+        let mut visited = 0usize;
+        while let Some([x, y]) = queue.pop_front() {
+            if visited % 4096 == 0 && token.is_cancelled() { return Err(CommandError::new("CANCELLED")); }
+            visited += 1;
+            let source = sources[at(x, y)];
+            for [nx, ny] in neighbours(x, y) {
+                if mask.coverage[index(nx, ny)] != 0 && sources[at(nx, ny)][0] == u32::MAX {
+                    sources[at(nx, ny)] = source;
+                    queue.push_back([nx, ny]);
+                }
+            }
+        }
+        let fallback = std::cell::OnceCell::new();
+        for [x, y] in missing {
+            let mut source = sources[at(x, y)];
+            if source[0] == u32::MAX {
+                // The mask may be separated from opaque content by transparent pixels.
+                source = *fallback.get_or_init(|| {
+                    (0..src.height).flat_map(|sy| (0..src.width).map(move |sx| [sx, sy]))
+                        .find(|[sx, sy]| usable(*sx, *sy)).unwrap_or([u32::MAX; 2])
+                });
+            }
+            if source[0] != u32::MAX {
+                candidates.push(PatchCandidate { target: [x, y], source, cost: u32::MAX });
+            }
+        }
     }
-    
-    StagedRegion{rect:[min_x,min_y,width,height],rgba}
+    progress(Progress { done: height, total: height });
+    Ok(candidates)
+}
+
+#[derive(Debug, Clone)]
+pub struct StagedRegion { pub rect: [u32; 4], pub rgba: Vec<u8> }
+
+pub fn apply_patches(src: &RasterView, mask: &PixelSelection, candidates: &[PatchCandidate], opacity: f32) -> StagedRegion {
+    apply_over(src, src, mask, candidates, opacity)
+}
+
+fn apply_over(source: &RasterView, base: &RasterView, mask: &PixelSelection, candidates: &[PatchCandidate], opacity: f32) -> StagedRegion {
+    let Some([left, top, width, height]) = mask.bounds().filter(|_| !candidates.is_empty()) else {
+        return StagedRegion { rect: [0; 4], rgba: Vec::new() }
+    };
+    let mut rgba = Vec::with_capacity(width as usize * height as usize * 4);
+    for y in top..top + height {
+        let start = ((y * base.width + left) * 4) as usize;
+        rgba.extend_from_slice(&base.rgba[start..start + width as usize * 4]);
+    }
+    let mut ordered: Vec<_> = candidates.iter().collect();
+    ordered.sort_unstable_by_key(|candidate| candidate.target);
+    for group in ordered.chunk_by(|a, b| a.target == b.target) {
+        let [x, y] = group[0].target;
+        if !(left..left + width).contains(&x) || !(top..top + height).contains(&y) { continue; }
+        let coverage = f32::from(mask.coverage[(y * mask.width + x) as usize]) / 255.0;
+        if coverage == 0.0 { continue; }
+        let offset = (((y - top) * width + x - left) * 4) as usize;
+        let pixel = &mut rgba[offset..offset + 4];
+        let mut sum = [0u64; 4];
+        for candidate in group {
+            for (sum, value) in sum.iter_mut().zip(source.get(candidate.source[0], candidate.source[1])) {
+                *sum += u64::from(value);
+            }
+        }
+        let ratio = opacity * coverage;
+        for (value, sum) in pixel.iter_mut().zip(sum) {
+            let average = sum as f32 / group.len() as f32;
+            *value = (f32::from(*value) * (1.0 - ratio) + average * ratio).round() as u8;
+        }
+    }
+    StagedRegion { rect: [left, top, width, height], rgba }
 }
 
 pub struct CancelToken(Arc<AtomicBool>);
 impl CancelToken {
-    pub fn new()->Self{CancelToken(Arc::new(AtomicBool::new(false)))}
-    pub fn cancel(&self){self.0.store(true,Ordering::Relaxed);}
-    pub fn is_cancelled(&self)->bool{self.0.load(Ordering::Relaxed)}
+    pub fn new() -> Self { Self(Arc::new(AtomicBool::new(false))) }
+    pub fn cancel(&self) { self.0.store(true, Ordering::Relaxed); }
+    pub fn is_cancelled(&self) -> bool { self.0.load(Ordering::Relaxed) }
 }
 
-#[derive(Debug,Clone,Copy)]
-pub struct Progress { pub done:u32, pub total:u32 }
+#[derive(Debug, Clone, Copy)]
+pub struct Progress { pub done: u32, pub total: u32 }
 
-pub fn run_inpaint(req:&InpaintRequest,src:&RasterView,token:&CancelToken,progress:&mut dyn FnMut(Progress))->Result<StagedRegion,CommandError>{
-    if token.is_cancelled(){return Err(CommandError::new("CANCELLED"));}
-    
-    let w=src.width;let h=src.height;
-    if w==0 || h==0 { return Ok(StagedRegion{rect:[0,0,0,0],rgba:Vec::new()}); }
+pub fn run_inpaint(req: &InpaintRequest, src: &RasterView, token: &CancelToken, progress: &mut dyn FnMut(Progress)) -> Result<StagedRegion, CommandError> {
+    run_over(req, src, src, token, progress)
+}
 
-    let chunk_size=64u32;
-    let total_chunks=(h+chunk_size-1)/chunk_size;
-    
-    let mut all_candidates=Vec::new();
-    
-    for chunk_idx in 0..total_chunks{
-        if token.is_cancelled(){return Err(CommandError::new("CANCELLED"));}
-        
-        let y_start=chunk_idx*chunk_size;
-        let y_end=(y_start+chunk_size).min(h);
-        
-        let mut chunk_mask=PixelSelection::empty(w,h);
-        for y in y_start..y_end{
-            for x in 0..w{
-                let idx=y as usize*w as usize+x as usize;
-                if req.mask.coverage[idx]!=0 {
-                    chunk_mask.coverage[idx]=255;
-                }
-            }
-        }
-        
-        let mut rng=Rng(req.seed);
-        let patch=7u32;
-        let max_iters=5u32;
-        let half_patch=(patch/2) as i32;
-        
-        for y in y_start..y_end{
-            for x in 0..w{
-                if chunk_mask.coverage[y as usize*w as usize+x as usize]==0 { continue; }
-                
-                let mut best_source=[x,y];
-                let mut best_cost=u32::MAX;
-                
-                for _iter in 0..max_iters{
-                    let rand_val=rng.next();
-                    let search_radius=1u32<<(_iter+1); 
-                    
-                    let dx=(rand_val % (search_radius as u64*2)) as i32 - search_radius as i32;
-                    let dy=((rand_val >> 32) % (search_radius as u64*2)) as i32 - search_radius as i32;
-                    
-                    let sx=(x as i32+dx).max(0).min(w as i32-1) as u32;
-                    let sy=(y as i32+dy).max(0).min(h as i32-1) as u32;
-                    
-                    if req.mask.coverage[sy as usize*w as usize+sx as usize]!=0 { continue; }
-                    
-                    let mut cost=0u32;
-                    let mut valid=true;
-                    
-                    for py in -half_patch..=half_patch{
-                        for px in -half_patch..=half_patch{
-                            let tx=x as i32+px;let ty=y as i32+py;
-                            if tx<0 || tx>=w as i32 || ty<0 || ty>=h as i32 { continue; }
-                            
-                            if req.mask.coverage[ty as usize*w as usize+tx as usize]!=0 { continue; }
-                            
-                            let src_x=sx as i32+px;let src_y=sy as i32+py;
-                            if src_x<0 || src_x>=w as i32 || src_y<0 || src_y>=h as i32 { valid=false; break; }
-                            
-                            let target_px=src.get(tx as u32,ty as u32);
-                            let source_px=src.get(src_x as u32,src_y as u32);
-                            
-                            let dr=(target_px[0] as i32-source_px[0] as i32).abs() as u32;
-                            let dg=(target_px[1] as i32-source_px[1] as i32).abs() as u32;
-                            let db=(target_px[2] as i32-source_px[2] as i32).abs() as u32;
-                            let da=(target_px[3] as i32-source_px[3] as i32).abs() as u32;
-                            
-                            cost+=dr*dr+dg*dg+db*db+da*da;
-                        }
-                        if !valid { break; }
-                    }
-                    
-                    if valid && cost<best_cost{
-                        best_cost=cost;
-                        best_source=[sx,sy];
-                    }
-                }
-                
-                if best_cost!=u32::MAX{
-                    all_candidates.push(PatchCandidate{target:[x,y],source:best_source,cost:best_cost});
-                }
-            }
-        }
-        
-        progress(Progress{done:(chunk_idx+1),total:total_chunks});
-    }
-    
-    if token.is_cancelled(){return Err(CommandError::new("CANCELLED"));}
-    
-    let staged=apply_patches(src,&req.mask,&all_candidates,req.opacity);
-    
-    Ok(staged)
+pub fn run_over(
+    req: &InpaintRequest, src: &RasterView, base: &RasterView, token: &CancelToken, progress: &mut dyn FnMut(Progress),
+) -> Result<StagedRegion, CommandError> {
+    if token.is_cancelled() { return Err(CommandError::new("CANCELLED")); }
+    validate(req, [src.width, src.height])?;
+    let bytes = (src.width as usize).checked_mul(src.height as usize).and_then(|pixels| pixels.checked_mul(4));
+    if bytes != Some(src.rgba.len()) || bytes != Some(base.rgba.len())
+        || [src.width, src.height] != [base.width, base.height]
+    { return Err(CommandError::invalid_params()); }
+    let candidates = search(src, &req.mask, req.seed, 7, 7, token, progress)?;
+    if token.is_cancelled() { return Err(CommandError::new("CANCELLED")); }
+    Ok(apply_over(src, base, &req.mask, &candidates, req.opacity))
 }

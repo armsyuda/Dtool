@@ -66,6 +66,17 @@ pub fn text_outlines(doc: &Document, id: ObjectId) -> Option<Vec<Vec<[f32; 2]>>>
     TEXT_OUTLINES.get().and_then(|hook| hook(doc, id)).filter(|contours| contours.iter().any(|contour| contour.len() > 2))
 }
 
+type LabelOutlines = fn(&str, f32) -> Vec<Vec<[f32; 2]>>;
+static LABEL_OUTLINES: OnceLock<LabelOutlines> = OnceLock::new();
+
+pub fn register_label_outlines(provider: LabelOutlines) -> bool {
+    LABEL_OUTLINES.set(provider).is_ok() || LABEL_OUTLINES.get().is_some()
+}
+
+pub(crate) fn label_outlines(text: &str, size: f32) -> Option<Vec<Vec<[f32; 2]>>> {
+    LABEL_OUTLINES.get().map(|provider| provider(text, size))
+}
+
 pub struct TextInk {
     pub paint: Paint,
     pub contours: Vec<Vec<[f32; 2]>>,

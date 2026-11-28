@@ -61,6 +61,7 @@ fn t8_first_baseline_covered_and_overflow_use_real_metrics() {
         format: None,
         frame_local: TableFrameFormat::default(),
         frame_mask: FrameFormatMask::default(),
+        text_defaults: None,
     };
     let layout = layout_table(&lib, &doc, &table, &grid(&table, vec![0.0, 80.0, 100.0], 40.0));
     assert_eq!(layout.cells.len(), 2);

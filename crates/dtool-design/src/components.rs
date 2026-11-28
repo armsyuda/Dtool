@@ -137,6 +137,15 @@ pub fn with_icon_selection<R>(ui: &mut Ui, draw: impl FnOnce(&mut Ui) -> R) -> R
     }).inner
 }
 
+pub fn with_dialog_choice<R>(ui: &mut Ui, draw: impl FnOnce(&mut Ui) -> R) -> R {
+    ui.scope(|ui| {
+        let fill = surface(ui.ctx(), "dialog.choice");
+        let ink = selected_icon_ink(ui);
+        ui.visuals_mut().selection = egui::style::Selection { bg_fill: fill, stroke: egui::Stroke::new(stroke_width("thin"), ink) };
+        draw(ui)
+    }).inner
+}
+
 /// Use the dark control selection for text choices, preserving the document accent.
 pub fn choice_value<T: PartialEq>(ui: &mut Ui, value: &mut T, choice: T, label: impl Into<WidgetText>) -> Response {
     with_icon_selection(ui, |ui| ui.selectable_value(value, choice, label))
@@ -358,10 +367,11 @@ fn draw_slider_rail(ui: &mut Ui, value: &mut f32, range: std::ops::RangeInclusiv
         ui.spacing_mut().slider_width = width;
         ui.spacing_mut().interact_size.y = size("control.hit_size");
         let accent = ui.visuals().selection.bg_fill;
-        ui.visuals_mut().widgets.inactive.bg_fill = accent;
-        ui.visuals_mut().widgets.inactive.bg_stroke = egui::Stroke::NONE;
-        ui.visuals_mut().widgets.hovered.bg_fill = accent;
-        ui.visuals_mut().widgets.active.bg_fill = accent;
+        let visuals = ui.visuals_mut();
+        visuals.widgets.inactive.bg_fill = color("control.selected");
+        visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, accent);
+        visuals.widgets.hovered.bg_fill = accent;
+        visuals.widgets.active.bg_fill = accent;
         let mut slider = egui::Slider::new(value, range)
             .show_value(false).trailing_fill(true)
             .handle_shape(egui::style::HandleShape::Circle);
@@ -480,8 +490,11 @@ pub fn colour_well(ui: &mut Ui, fill: egui::Color32, id: &str) -> Response {
 }
 
 pub fn colour_well_with(ui: &mut Ui, value: WellValue, id: &str, state: &ControlState) -> Response {
-    let side = size("icon.size.lg");
-    let (rect, _) = ui.allocate_exact_size(Vec2::splat(side), egui::Sense::hover());
+    colour_well_sized(ui, value, id, state, Vec2::splat(size("icon.size.lg")), false)
+}
+
+pub fn colour_well_sized(ui: &mut Ui, value: WellValue, id: &str, state: &ControlState, dimensions: Vec2, outline: bool) -> Response {
+    let (rect, _) = ui.allocate_exact_size(dimensions, egui::Sense::hover());
     let sense = if state.enabled { egui::Sense::click() } else { egui::Sense::hover() };
     let response = ui.interact(rect, ui.make_persistent_id(("colour_well", id)), sense);
     if ui.is_rect_visible(rect) {
@@ -493,12 +506,17 @@ pub fn colour_well_with(ui: &mut Ui, value: WellValue, id: &str, state: &Control
         };
         let inner = rect.shrink(1.0);
         match value {
+            WellValue::Colour(fill) if outline => {
+                painter.rect_filled(inner, 0.0, color("panel.bg"));
+                let sample = inner.shrink(3.0);
+                painter.rect_stroke(sample, corner(radius("sm")), egui::Stroke::new(3.0, fill), egui::StrokeKind::Inside);
+            }
             WellValue::Colour(fill) => {
                 if fill.a() < 255 {
-                    let half = inner.width() * 0.5;
+                    let half = inner.size() * 0.5;
                     painter.rect_filled(inner, 0.0, egui::Color32::WHITE);
-                    for (dx, dy) in [(0.0, 0.0), (half, half)] {
-                        painter.rect_filled(egui::Rect::from_min_size(inner.min + Vec2::new(dx, dy), Vec2::splat(half)), 0.0, egui::Color32::from_gray(204));
+                    for offset in [Vec2::ZERO, half] {
+                        painter.rect_filled(egui::Rect::from_min_size(inner.min + offset, half), 0.0, egui::Color32::from_gray(204));
                     }
                 }
                 painter.rect_filled(inner, 0.0, fill);
@@ -698,6 +716,15 @@ pub fn menu_item(ui: &mut Ui, text: impl Into<WidgetText>) -> Response {
 
 pub fn tooltip(response: Response, text: impl Into<String>) -> Response {
     response.on_hover_text(text.into())
+}
+
+pub fn tooltip_at_pointer(response: &Response, text: &str) {
+    let tooltip = if response.enabled() {
+        egui::Tooltip::for_enabled(response)
+    } else {
+        egui::Tooltip::for_disabled(response)
+    };
+    tooltip.at_pointer().show(|ui| ui.label(text));
 }
 
 pub fn status_bar_frame<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> egui::InnerResponse<R> {

@@ -2,7 +2,7 @@ use dtool_core::grid::{Grid, GridKind};
 use dtool_core::grid::baseline::{Origin, Settings};
 use dtool_core::command::Session;
 use dtool_core::workspace::ContextId;
-use dtool_design::{button, dialog_frame, menu_item, panel_header};
+use dtool_design::{button, menu_item};
 use dtool_strings::text;
 use serde_json::json;
 
@@ -199,48 +199,42 @@ impl GridAndAxisDialog {
             return;
         }
         let mut close = false;
-        egui::Area::new(egui::Id::new("dtool.dialog.grid_and_axis"))
-            .order(egui::Order::Foreground)
-            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-            .show(ctx, |ui| {
-                dialog_frame(ui, |ui| {
-                    panel_header(ui, text("menu.view.grid_and_axis"));
-                    dtool_design::toggle(ui, &mut self.draft.show, get_menu_label_view_show_grid());
-                    grid_kind_picker(ui, &mut self.draft.kind);
-                    ui.horizontal(|ui| {
-                        ui.label(text("dialog.grid.spacing"));
-                        grid_number(ui, "spacing_x", &mut self.draft.spacing[0]);
-                        grid_number(ui, "spacing_y", &mut self.draft.spacing[1]);
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label(text("dialog.grid.subdivisions"));
-                        let mut value = f64::from(self.draft.subdivisions);
-                        grid_value(ui, "subdivisions", &mut value);
-                        self.draft.subdivisions = value.max(1.0) as u32;
-                    });
-                    dtool_design::toggle(ui, &mut self.draft.show_pixel, get_menu_label_view_show_pixel_grid());
-                    ui.horizontal(|ui| {
-                        optional_label(ui, "dialog.grid.origin");
-                        grid_number(ui, "origin_x", &mut self.origin[0]);
-                        grid_number(ui, "origin_y", &mut self.origin[1]);
-                    });
-                    if matches!(self.draft.kind, GridKind::Axonometric | GridKind::Custom) {
-                        ui.horizontal(|ui| {
-                            optional_label(ui, "dialog.grid.angles");
-                            grid_number(ui, "angle_a", &mut self.angles[0]);
-                            grid_number(ui, "angle_b", &mut self.angles[1]);
-                        });
-                    }
-                    ui.horizontal(|ui| {
-                        if button(ui, text("button.ok")).clicked() && self.apply(session) {
-                            close = true;
-                        }
-                        if button(ui, text("button.cancel")).clicked() {
-                            close = true;
-                        }
-                    });
-                });
+        crate::dialog_chrome::show_floating(ctx, "dtool.dialog.grid_and_axis", text("menu.view.grid_and_axis"), |ui| {
+            dtool_design::toggle(ui, &mut self.draft.show, get_menu_label_view_show_grid());
+            grid_kind_picker(ui, &mut self.draft.kind);
+            ui.horizontal(|ui| {
+                ui.label(text("dialog.grid.spacing"));
+                grid_number(ui, "spacing_x", &mut self.draft.spacing[0]);
+                grid_number(ui, "spacing_y", &mut self.draft.spacing[1]);
             });
+            ui.horizontal(|ui| {
+                ui.label(text("dialog.grid.subdivisions"));
+                let mut value = f64::from(self.draft.subdivisions);
+                grid_value(ui, "subdivisions", &mut value);
+                self.draft.subdivisions = value.max(1.0) as u32;
+            });
+            dtool_design::toggle(ui, &mut self.draft.show_pixel, get_menu_label_view_show_pixel_grid());
+            ui.horizontal(|ui| {
+                optional_label(ui, "dialog.grid.origin");
+                grid_number(ui, "origin_x", &mut self.origin[0]);
+                grid_number(ui, "origin_y", &mut self.origin[1]);
+            });
+            if matches!(self.draft.kind, GridKind::Axonometric | GridKind::Custom) {
+                ui.horizontal(|ui| {
+                    optional_label(ui, "dialog.grid.angles");
+                    grid_number(ui, "angle_a", &mut self.angles[0]);
+                    grid_number(ui, "angle_b", &mut self.angles[1]);
+                });
+            }
+            ui.horizontal(|ui| {
+                if button(ui, text("button.ok")).clicked() && self.apply(session) {
+                    close = true;
+                }
+                if button(ui, text("button.cancel")).clicked() {
+                    close = true;
+                }
+            });
+        });
         if close {
             self.open = false;
         }
@@ -284,37 +278,31 @@ impl BaselineGridDialog {
         }
         let mut close = ctx.input(|input| input.key_pressed(egui::Key::Escape));
         let units = dtool_core::commands::ruler_units::suffix(session.document.units);
-        egui::Area::new(egui::Id::new("dtool.dialog.baseline_grid"))
-            .order(egui::Order::Foreground)
-            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-            .show(ctx, |ui| {
-                dialog_frame(ui, |ui| {
-                    panel_header(ui, text("menu.view.baseline_grid"));
-                    dtool_design::toggle(ui, &mut self.settings.enabled, text("dialog.grid.baseline_use"));
-                    ui.add_enabled_ui(self.settings.enabled, |ui| {
-                        let origins = [Origin::Document, Origin::Spread, Origin::Page, Origin::Margin];
-                        let keys = ["dialog.grid.baseline_document", "dialog.grid.baseline_spread", "dialog.grid.baseline_page", "dialog.grid.baseline_margin"];
-                        let mut selected = origins.iter().position(|origin| *origin == self.settings.origin).unwrap_or(1);
-                        ui.horizontal(|ui| {
-                            ui.label(text("dialog.grid.baseline_relative"));
-                            dtool_design::dropdown(ui, "baseline-origin", &mut selected, &keys.map(text));
-                        });
-                        self.settings.origin = origins[selected];
-                        baseline_number(ui, "dialog.grid.baseline_start", &mut self.settings.offset, units, -1_000_000.0..=1_000_000.0);
-                        baseline_number(ui, "dialog.grid.spacing", &mut self.spacing, units, 0.000_001..=1_000_000.0);
-                    });
-                    dtool_design::toggle(ui, &mut self.show_baseline, get_menu_label_view_show_baseline_grid());
-                    baseline_number(ui, "dialog.grid.baseline_threshold", &mut self.settings.threshold_percent, "%", 0.0..=100_000.0);
-                    ui.horizontal(|ui| {
-                        if button(ui, text("button.ok")).clicked() && grid_set(session, json!({ "show_baseline": self.show_baseline, "baseline_spacing": self.spacing, "baseline": self.settings })) {
-                            close = true;
-                        }
-                        if button(ui, text("button.cancel")).clicked() {
-                            close = true;
-                        }
-                    });
+        crate::dialog_chrome::show_floating(ctx, "dtool.dialog.baseline_grid", text("menu.view.baseline_grid"), |ui| {
+            dtool_design::toggle(ui, &mut self.settings.enabled, text("dialog.grid.baseline_use"));
+            ui.add_enabled_ui(self.settings.enabled, |ui| {
+                let origins = [Origin::Document, Origin::Spread, Origin::Page, Origin::Margin];
+                let keys = ["dialog.grid.baseline_document", "dialog.grid.baseline_spread", "dialog.grid.baseline_page", "dialog.grid.baseline_margin"];
+                let mut selected = origins.iter().position(|origin| *origin == self.settings.origin).unwrap_or(1);
+                ui.horizontal(|ui| {
+                    ui.label(text("dialog.grid.baseline_relative"));
+                    dtool_design::dropdown(ui, "baseline-origin", &mut selected, &keys.map(text));
                 });
+                self.settings.origin = origins[selected];
+                baseline_number(ui, "dialog.grid.baseline_start", &mut self.settings.offset, units, -1_000_000.0..=1_000_000.0);
+                baseline_number(ui, "dialog.grid.spacing", &mut self.spacing, units, 0.000_001..=1_000_000.0);
             });
+            dtool_design::toggle(ui, &mut self.show_baseline, get_menu_label_view_show_baseline_grid());
+            baseline_number(ui, "dialog.grid.baseline_threshold", &mut self.settings.threshold_percent, "%", 0.0..=100_000.0);
+            ui.horizontal(|ui| {
+                if button(ui, text("button.ok")).clicked() && grid_set(session, json!({ "show_baseline": self.show_baseline, "baseline_spacing": self.spacing, "baseline": self.settings })) {
+                    close = true;
+                }
+                if button(ui, text("button.cancel")).clicked() {
+                    close = true;
+                }
+            });
+        });
         if close {
             self.open = false;
         }

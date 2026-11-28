@@ -593,9 +593,26 @@ fn text_ink_with_tolerance(doc: &Document, id: ObjectId, tolerance: Option<f64>)
     Some(ink)
 }
 
+fn label_outlines_shared(text: &str, size: f32) -> Vec<Vec<[f32; 2]>> {
+    let library = FontLibrary::shared();
+    let run = crate::shape::shape_run(&library, text, "sans-serif", "Regular", size);
+    let mut contours = Vec::new();
+    for (glyph, matrix) in run.glyphs.iter().zip(run.glyph_matrices([-run.width * 0.5, 0.0])) {
+        contours.extend(library.glyph_contours(glyph.font, glyph.gid, size)
+            .into_iter().map(|mut contour| {
+                for point in &mut contour {
+                    *point = dtool_core::geometry::apply_matrix(&matrix, [point[0], -point[1]]);
+                }
+                contour
+            }));
+    }
+    contours
+}
+
 pub fn install() -> bool {
     let lines = register_text_lines(text_lines_shared);
     let outlines = dtool_core::text_lines::register_text_outlines(text_outlines_shared);
+    let labels = dtool_core::text_lines::register_label_outlines(label_outlines_shared);
     let ink = dtool_core::text_lines::register_text_ink(text_ink_shared);
     let precise_ink = dtool_core::text_lines::register_precise_text_ink(precise_text_ink_shared);
     let tables = dtool_core::query::register_table_overflow(crate::table_layout::table_overflow_shared);
@@ -605,5 +622,5 @@ pub fn install() -> bool {
     let faces = crate::text_faces::install();
     let breaks = dtool_core::text_lines::register_text_break_marks(break_marks_shared);
     register_overset(overset_shared) && lines && tables && table_lines && table_fit && outlines
-        && ink && precise_ink && decorations && faces && breaks
+        && ink && precise_ink && decorations && faces && breaks && labels
 }

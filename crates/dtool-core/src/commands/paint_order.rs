@@ -23,7 +23,7 @@ fn targets(session: &Session, command: &Command) -> Result<(PaintOrder, Vec<Obje
         .unwrap_or_else(|| session.selection.ids.clone());
     ids.sort_by_key(|id| id.0);
     ids.dedup();
-    if ids.is_empty() || ids.iter().any(|id| !session.document.objects.iter().any(|object| object.id == *id && !object.locked)) {
+    if ids.is_empty() || ids.iter().any(|id| !session.document.get_object(*id).is_some_and(|object| !session.document.is_object_locked(object))) {
         return Err(CommandError::invalid_params());
     }
     Ok((args.order, ids))
@@ -62,7 +62,7 @@ fn well_targets(session: &Session, command: &Command) -> Result<(Vec<ObjectId>, 
         .unwrap_or_else(|| session.selection.ids.clone());
     ids.sort_by_key(|id| id.0);
     ids.dedup();
-    if ids.is_empty() || ids.iter().any(|id| !session.document.objects.iter().any(|object| object.id == *id && !object.locked)) {
+    if ids.is_empty() || ids.iter().any(|id| !session.document.get_object(*id).is_some_and(|object| !session.document.is_object_locked(object))) {
         return Err(CommandError::invalid_params());
     }
     match (command.name.as_str(), args.role) {
@@ -81,7 +81,7 @@ struct WellChange {
 
 fn change_wells(session: &mut Session, command: &Command) -> Result<(Vec<ObjectId>, WellChange), CommandError> {
     let (ids, role) = well_targets(session, command)?;
-    let defaults = super::defaults::current();
+    let defaults = super::defaults::for_document(&session.document);
     let default_stroke = defaults.stroke_for_document(&session.document);
     let mut old = WellChange::default();
     if matches!(role, Some(WellRole::TextFill | WellRole::TextStroke)) {

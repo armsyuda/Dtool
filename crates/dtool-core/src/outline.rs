@@ -18,6 +18,14 @@ pub fn object_outline(object: &Object) -> Option<BezPath> {
 }
 
 pub(crate) fn object_outline_with_tolerance(object: &Object, tolerance: f64) -> Option<BezPath> {
+    let path = base_object_outline(object, tolerance)?;
+    match object.contour.filter(|spec| spec.radius != 0.0 && spec.is_valid()) {
+        Some(spec) => Some(spec.outline(&path, object.fill_rule, crate::boolean::DEFAULT_TOLERANCE).unwrap_or(path)),
+        None => Some(path),
+    }
+}
+
+pub fn base_object_outline(object: &Object, tolerance: f64) -> Option<BezPath> {
     match &object.kind {
         ObjectKind::Curve(curve) => Some(cornered(curve).to_kurbo()),
         ObjectKind::Shape => match crate::commands::qr::payload(object) {

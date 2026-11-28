@@ -1151,7 +1151,8 @@ pub(crate) fn encode_pdf(
                             surface.set_stroke(Some(stroke));
                         } else {
                             let paint = crate::pdf_paint::bounded_gradient(&path.paint, bounds);
-                            let Some(mut fill) = crate::pdf_paint::fill_for_output(&mut surface, &paint, opacity, &output, doc) else { continue; };
+                            let path_bounds = kurbo::Shape::bounding_box(&path.path);
+                            let Some(mut fill) = crate::pdf_paint::fill_for_output_at(&mut surface, &paint, opacity, &output, doc, path_bounds) else { continue; };
                             fill.rule = if path.even_odd { FillRule::EvenOdd } else { FillRule::NonZero };
                             surface.set_stroke(None);
                             surface.set_fill(Some(fill));
@@ -1185,7 +1186,10 @@ pub(crate) fn encode_pdf(
                     ) {
                         stroke_style = Some(StrokeStyle { paint, ..obj.stroke.clone() });
                     }
-                    let fill = crate::pdf_paint::fill_for_output(&mut surface, &fill_paint, obj.opacity, &output, doc);
+                    let [x0, y0, x1, y1] = bounds.map(f64::from);
+                    let fill = crate::pdf_paint::fill_for_output_at(
+                        &mut surface, &fill_paint, obj.opacity, &output, doc, kurbo::Rect::new(x0, y0, x1, y1),
+                    );
                     let stroke = crate::pdf_paint::stroke_for_output(&mut surface, stroke_style.as_ref().unwrap_or(&obj.stroke), obj.opacity, &output, doc);
                     let stroke_under = matches!(obj.paint_order, PaintOrder::StrokeUnder);
                     if let Some(stroke) = stroke.as_ref().filter(|_| stroke_under) {
@@ -1372,27 +1376,28 @@ fn push_blend_range_mask(surface: &mut PageBuilder<'_>, mask: crate::blend_range
 }
 
 fn push_pixel_mask(surface: &mut PageBuilder<'_>, doc: &Document, object: &Object) -> bool {
-    let Some(mask) = dtool_core::raster_source::compositing_mask(doc, object) else { return false };
-    let [w, h] = object.size.map(f32::abs);
+    let Some(mask) = dtool_core::raster_source::compositing_layer_mask(doc, object) else { return false };
+    let [x, y, w, h] = mask.local_rect(object);
     let Some(extent) = krilla::geom::Size::from_wh(w, h) else { return false };
-    let transform = pdf_paint_transform(object);
+    let transform = pdf_paint_transform(object) * kurbo::Affine::translate((f64::from(x), f64::from(y)));
     let [a, b, c, d, e, f] = transform.as_coeffs().map(|v| v as f32);
     if dtool_core::geometry::invert_matrix(&[a, b, c, d, e, f]).is_none() {
         return false;
     }
-    if let Some(outline) = doc.layer_masks.iter().find(|layer| layer.object == object.id)
-        .and_then(|layer| layer.vector_outline.as_ref())
-    {
+    if let Some(outline) = &mask.vector_outline {
         let to_world = transform * kurbo::Affine::scale_non_uniform(f64::from(w), f64::from(h));
         if let Some(path) = pdf_bez_path(&(to_world * outline.to_kurbo())) {
             surface.push_clip_path(&path, &FillRule::EvenOdd);
             return true;
         }
     }
+    let mask = &mask.coverage;
     if mask.coverage.as_slice() == [255] {
-        // A single opaque sample covers exactly the transformed object rectangle.
-        // Use its path so PDF image sampling cannot move the clipping edge.
-        let quad = dtool_core::geometry::object_world_quad(object).map(|point| point.map(f64::from));
+        // Use a path so PDF image sampling cannot move the mask's clipping edge.
+        let quad = [[0.0, 0.0], [w, 0.0], [w, h], [0.0, h]].map(|[x, y]| {
+            let point = transform * kurbo::Point::new(f64::from(x), f64::from(y));
+            [point.x, point.y]
+        });
         if let Some(path) = region_path(&[quad.to_vec()]) {
             surface.push_clip_path(&path, &FillRule::NonZero);
             return true;
@@ -1424,18 +1429,14 @@ fn push_object_transparency(surface: &mut PageBuilder<'_>, doc: &Document, objec
     }
     let Transparency::Gradient { kind, stops, geom } = &object.transparency else { return false };
     let push_gradient = |surface: &mut PageBuilder<'_>, stops: &[dtool_core::paint::GradientStop], geom: &dtool_core::paint::GradientGeom| {
-        let mut geom = *geom;
-        if matches!(kind, GradientKind::Radial | GradientKind::Conical) {
-            geom.ratio = 1.0;
-        }
-        let matrix = (transform * kurbo::Affine::new(geom.to_matrix())).as_coeffs();
-        crate::pdf_paint::push_gradient_transparency(surface, kind, stops, &geom, matrix, bounds)
+        let matrix = (transform * kurbo::Affine::new(geom.gradient_matrix(*kind))).as_coeffs();
+        crate::pdf_paint::push_gradient_transparency(surface, kind, stops, geom, matrix, bounds)
     };
     if *kind != GradientKind::Conical && geom.spread.is_pad() {
         return push_gradient(surface, stops, geom);
     }
     if *kind == GradientKind::Conical && !stops.is_empty() {
-        let [dx, dy, ..] = geom.to_matrix();
+        let [dx, dy, ..] = geom.gradient_matrix(*kind);
         let axis = dx.hypot(dy);
         let determinant = transform.determinant();
         if axis.is_finite() && axis > 1e-14 && determinant.is_finite() && determinant != 0.0
@@ -1483,7 +1484,7 @@ fn pdf_paint_transform(object: &dtool_core::Object) -> kurbo::Affine {
 fn transform_pdf_paint(paint: &dtool_core::paint::Paint, matrix: [f64; 6]) -> Option<dtool_core::paint::Paint> {
     use dtool_core::paint::Paint;
     match paint {
-        Paint::Gradient { kind, stops, geom } => Some(Paint::Gradient { kind: *kind, stops: stops.clone(), geom: geom.transform(matrix) }),
+        Paint::Gradient { kind, stops, geom } => Some(Paint::Gradient { kind: *kind, stops: stops.clone(), geom: geom.transform_for_kind(*kind, matrix) }),
         Paint::Bitmap(bitmap) => {
             let mut bitmap = bitmap.clone();
             bitmap.matrix = (kurbo::Affine::new(matrix) * kurbo::Affine::new(bitmap.matrix)).as_coeffs();

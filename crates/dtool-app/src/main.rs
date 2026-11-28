@@ -41,8 +41,9 @@ impl App {
 }
 
 impl eframe::App for App {
-    #[cfg(windows)]
     fn raw_input_hook(&mut self, ctx: &eframe::egui::Context, input: &mut eframe::egui::RawInput) {
+        self.shell.intercept_pie_input(ctx, input);
+        #[cfg(windows)]
         windows_clipboard::forward_vector_paste(input, self.shell.accepts_vector_paste_shortcut(ctx));
     }
 

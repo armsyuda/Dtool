@@ -373,6 +373,9 @@ fn prepare_import(
         if let Some(colour) = source.master_pages.tag_colour(old) {
             document.master_pages.tag_colours.insert(pages[0].0, colour.to_owned());
         }
+        if let Some(setup) = source.master_pages.page_setup(old) {
+            document.master_pages.page_setup.insert(pages[0].0, setup.clone());
+        }
         if let Some(spread) = source.master_pages.spread(old) {
             document.master_pages.spreads.push(masters::MasterSpread { pages, spine: spread.spine });
         }

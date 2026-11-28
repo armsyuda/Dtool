@@ -196,6 +196,8 @@ pub struct ShortcutsPage {
     filter: String,
     capturing: Option<String>,
     status: Option<&'static str>,
+    pub(crate) pie_chords: Vec<(String, Modifiers)>,
+    pie_conflict: bool,
 }
 
 impl Default for ShortcutsPage {
@@ -211,6 +213,8 @@ impl Default for ShortcutsPage {
             filter: String::new(),
             capturing: None,
             status: None,
+            pie_chords: Vec::new(),
+            pie_conflict: false,
         }
     }
 }
@@ -280,9 +284,13 @@ impl ShortcutsPage {
                     alt: mods.alt,
                 }
             };
-            self.map.set(&command, &affinity_key_name(key), modifiers);
             self.capturing = None;
-            self.store();
+            let key = affinity_key_name(key);
+            self.pie_conflict = self.pie_chords.iter().any(|(owned, chord)| owned.eq_ignore_ascii_case(&key) && *chord == modifiers);
+            if !self.pie_conflict {
+                self.map.set(&command, &key, modifiers);
+                self.store();
+            }
         }
     }
 
@@ -331,6 +339,9 @@ impl ShortcutsPage {
         });
         if let Some(key) = self.status {
             ui.small(text(key));
+        }
+        if self.pie_conflict {
+            ui.small("이 키는 파이메뉴에서 사용 중입니다. 파이메뉴 설정에서 호출키를 먼저 변경하세요.");
         }
         ui.add(egui::TextEdit::singleline(&mut self.filter).hint_text(text("pref.shortcuts.filter")));
 

@@ -5,6 +5,17 @@ use serde_json::{json, Value};
 pub const QUERY: &str = "ui.context_toolbar.query";
 pub const OPTION_SET: &str = "ui.context_option.set";
 pub const OPTIONS_SET: &str = "ui.tool.options.set";
+pub const BLOB_BRUSH: &str = "tool.blob_brush";
+pub const BLOB_ERASE: &str = "tool.blob_erase";
+pub const VECTOR_FLOOD: &str = "tool.vector_flood";
+pub const BLOB_WIDTH: &str = "blob.width";
+pub const VECTOR_FLOOD_MODE: &str = "vector_flood.mode";
+pub const VECTOR_FLOOD_FIT: &str = "vector_flood.fit";
+pub const VECTOR_FLOOD_VISIBLE: &str = "vector_flood.visible";
+pub const VECTOR_FLOOD_BITMAP: &str = "vector_flood.bitmap";
+pub const VECTOR_FLOOD_GRADIENT_FIT: &str = "vector_flood.gradient_fit";
+pub const VECTOR_FLOOD_BITMAP_FIT: &str = "vector_flood.bitmap_fit";
+pub const VECTOR_FLOOD_INSERT: &str = "vector_flood.insert";
 
 pub fn is_advanced_shape_tool(id: &str) -> bool {
     id.strip_prefix("tool.shape.").is_some_and(|kind| {
@@ -29,6 +40,9 @@ pub const TOOL_IDS: &[&str] = &[
     "tool.pen.smart",
     "tool.pen.b_spline",
     "tool.pen.polyline",
+    BLOB_BRUSH,
+    BLOB_ERASE,
+    VECTOR_FLOOD,
     "tool.shapes",
     "tool.shape.rectangle",
     "tool.shape.ellipse",
@@ -75,6 +89,7 @@ pub const TOOL_IDS: &[&str] = &[
     "tool.slice",
     "tool.eyedropper",
     "tool.style_picker",
+    crate::commands::fill::TOOL,
     "tool.flood_fill",
     "tool.gradient",
     "tool.gradient.linear",
@@ -113,6 +128,10 @@ pub const TOOL_IDS: &[&str] = &[
     "tool.paint.calligraphy",
     "tool.paint.smudge",
     "tool.paint.clone",
+    HEAL_TOOL,
+    crate::commands::patch::TOOL,
+    crate::commands::blemish::TOOL,
+    UNDO_BRUSH_TOOL,
     "tool.marquee",
     "tool.marquee.rectangle",
     "tool.marquee.ellipse",
@@ -122,6 +141,7 @@ pub const TOOL_IDS: &[&str] = &[
     "tool.selection_brush",
     "tool.magic_wand",
     "tool.retouch",
+    crate::commands::inpaint::TOOL,
     crate::commands::red_eye::TOOL,
     "tool.perspective",
     "tool.deform",
@@ -162,6 +182,7 @@ const ALIASES: &[(&str, &str)] = &[
     ("smudge_brush", "tool.paint.smudge"),
     ("clone_brush", "tool.paint.clone"),
     ("tool.clone", "tool.paint.clone"),
+    ("tool.heal", HEAL_TOOL),
     ("lasso", "tool.marquee.freehand"),
     ("flood_select", "tool.magic_wand"),
     ("frame_text", "tool.text.frame"),
@@ -239,7 +260,10 @@ impl ToolOptionSpec {
                     return (digits.len() == 6 && digits.bytes().all(|byte| byte.is_ascii_hexdigit()))
                         .then(|| json!(text.to_ascii_uppercase()));
                 }
-                if matches!(self.id, "brush.mixer_colour" | "brush.tone_colour") {
+                if self.id == BRUSH_FOREGROUND && text.is_empty() {
+                    return Some(json!(text));
+                }
+                if matches!(self.id, "brush.mixer_colour" | "brush.tone_colour" | BRUSH_FOREGROUND) {
                     let digits = text.strip_prefix('#')?;
                     return (digits.len() == 8 && digits.bytes().all(|byte| byte.is_ascii_hexdigit()))
                         .then(|| json!(text.to_ascii_uppercase()));
@@ -421,6 +445,7 @@ pub const STROKE_WIDTH_OPTIONS: &[ToolOptionSpec] = &[
     toggle("stroke_width.lock_width", "context.stroke_width.lock_width", false),
     toggle("stroke_width.lock_order", "context.stroke_width.lock_order", true),
     toggle("stroke_width.snap_ends", "context.stroke_width.snap_ends", false),
+    toggle("stroke_width.snap_weights", "context.stroke_width.snap_weights", false),
     action("stroke_width.reset", "context.stroke_width.reset", "stroke.profile.reset"),
 ];
 
@@ -523,12 +548,16 @@ const BRUSH_SYMMETRY_LOCK: ToolOptionSpec = toggle("brush.symmetry_lock", "brush
 const BRUSH_SYMMETRY_X: ToolOptionSpec = number("brush.symmetry_x", "brush.symmetry_x", 0.0, 100.0, 0.1, 50.0);
 const BRUSH_SYMMETRY_Y: ToolOptionSpec = number("brush.symmetry_y", "brush.symmetry_y", 0.0, 100.0, 0.1, 50.0);
 
+pub const BRUSH_FOREGROUND: &str = "brush.foreground";
+const BRUSH_FOREGROUND_OPTION: ToolOptionSpec = text_field(BRUSH_FOREGROUND, "brush.mixer_colour", "");
+
 const PIXEL_PAINT_OPTIONS: &[ToolOptionSpec] = &[
     BRUSH_OPTIONS[0], BRUSH_OPTIONS[1], BRUSH_OPTIONS[2], BRUSH_OPTIONS[3],
     toggle("brush.pressure_size", "brush.pressure_size", false),
     toggle("brush.protect_alpha", "brush.protect_alpha", false),
     toggle("brush.wet_edges", "brush.wet_edges", false),
     BRUSH_SYMMETRY_COUNT, BRUSH_SYMMETRY_MIRROR, BRUSH_SYMMETRY_LOCK, BRUSH_SYMMETRY_X, BRUSH_SYMMETRY_Y,
+    BRUSH_FOREGROUND_OPTION,
 ];
 
 const PIXEL_ERASE_OPTIONS: &[ToolOptionSpec] = &[
@@ -536,7 +565,7 @@ const PIXEL_ERASE_OPTIONS: &[ToolOptionSpec] = &[
     BRUSH_SYMMETRY_COUNT, BRUSH_SYMMETRY_MIRROR, BRUSH_SYMMETRY_LOCK, BRUSH_SYMMETRY_X, BRUSH_SYMMETRY_Y,
 ];
 
-const SINGLE_PIXEL_BRUSH_OPTIONS: &[ToolOptionSpec] = &[BRUSH_OPTIONS[1], BRUSH_OPTIONS[2]];
+const SINGLE_PIXEL_BRUSH_OPTIONS: &[ToolOptionSpec] = &[BRUSH_OPTIONS[1], BRUSH_OPTIONS[2], BRUSH_FOREGROUND_OPTION];
 
 pub const CALLIGRAPHY_TOOL: &str = "tool.paint.calligraphy";
 pub const CALLIGRAPHY_ANGLE: &str = "brush.calligraphy.angle";
@@ -548,16 +577,64 @@ const CALLIGRAPHY_OPTIONS: &[ToolOptionSpec] = &[
     number(CALLIGRAPHY_ANGLE, CALLIGRAPHY_ANGLE, -180.0, 180.0, 1.0, CALLIGRAPHY_DEFAULT_ANGLE as f64),
     number(CALLIGRAPHY_ROUNDNESS, CALLIGRAPHY_ROUNDNESS, 1.0, 100.0, 1.0, CALLIGRAPHY_DEFAULT_ROUNDNESS as f64),
     BRUSH_OPTIONS[2], BRUSH_OPTIONS[3], PIXEL_PAINT_OPTIONS[4], PIXEL_PAINT_OPTIONS[5],
+    BRUSH_FOREGROUND_OPTION,
 ];
 
+pub const UNDO_BRUSH_TOOL: &str = "tool.undo_brush";
+const UNDO_BRUSH_OPTIONS: &[ToolOptionSpec] = &[
+    BRUSH_OPTIONS[0], BRUSH_OPTIONS[1], BRUSH_OPTIONS[2], BRUSH_OPTIONS[3],
+    PIXEL_PAINT_OPTIONS[4], PIXEL_PAINT_OPTIONS[5],
+    toggle("brush.undo.preserve_missing", "brush.undo.preserve_missing", true),
+    toggle("brush.stabilizer", "brush.stabilizer", false),
+    BRUSH_SYMMETRY_COUNT, BRUSH_SYMMETRY_MIRROR, BRUSH_SYMMETRY_LOCK, BRUSH_SYMMETRY_X, BRUSH_SYMMETRY_Y,
+];
+
+pub const HEAL_TOOL: &str = "tool.healing_brush";
 pub const CLONE_TOOL: &str = "tool.paint.clone";
 pub const CLONE_PICK_SOURCE: &str = "brush.clone.pick_source";
 pub const CLONE_ALIGNED: &str = "brush.clone.aligned";
+pub const CLONE_ROTATION: &str = "clone.rotation";
+pub const CLONE_SCALE: &str = "clone.scale";
+pub const CLONE_FLIP: &str = "clone.flip";
+pub const CLONE_SCOPE: &str = "clone.scope";
+pub const CLONE_ADD_SOURCE: &str = "clone.add_global_source";
+const ADD_SAMPLE_SOURCE: ToolOptionSpec =
+    action(CLONE_ADD_SOURCE, CLONE_ADD_SOURCE, crate::commands::pixel_brush::global_source::ADD);
+const SAMPLE_SCOPES: &[&str] = &["current", "current_and_below", "below", "all", "global"];
+const SAMPLE_ROTATION: ToolOptionSpec = number(CLONE_ROTATION, CLONE_ROTATION, -180.0, 180.0, 1.0, 0.0);
+const SAMPLE_SCALE: ToolOptionSpec = number(CLONE_SCALE, CLONE_SCALE, 10.0, 400.0, 1.0, 100.0);
+const SAMPLE_FLIP: ToolOptionSpec =
+    choice(CLONE_FLIP, CLONE_FLIP, &["none", "horizontal", "vertical", "both"], "none");
+
+pub fn uses_brush_source(tool: &str) -> bool {
+    matches!(tool, CLONE_TOOL | HEAL_TOOL)
+}
+
+const PREPARE_PHOTO: ToolOptionSpec = action(
+    crate::commands::pixel_brush::PREPARE_PHOTO, "pixel.retouch.prepare", crate::commands::pixel_brush::PREPARE_PHOTO,
+);
+
 const CLONE_BRUSH_OPTIONS: &[ToolOptionSpec] = &[
     toggle(CLONE_PICK_SOURCE, CLONE_PICK_SOURCE, false),
     BRUSH_OPTIONS[0], BRUSH_OPTIONS[1], BRUSH_OPTIONS[2], BRUSH_OPTIONS[3],
     PIXEL_PAINT_OPTIONS[4], PIXEL_PAINT_OPTIONS[5],
     toggle(CLONE_ALIGNED, CLONE_ALIGNED, true),
+    toggle("brush.stabilizer", "brush.stabilizer", false),
+    choice("clone.blend_mode", "clone.blend_mode", &["normal", "multiply", "screen", "overlay", "darken", "lighten"], "normal"),
+    ADD_SAMPLE_SOURCE,
+    choice(CLONE_SCOPE, CLONE_SCOPE, SAMPLE_SCOPES, "current_and_below"),
+    SAMPLE_ROTATION, SAMPLE_SCALE, SAMPLE_FLIP,
+];
+
+const HEAL_BRUSH_OPTIONS: &[ToolOptionSpec] = &[
+    toggle(CLONE_PICK_SOURCE, "brush.heal.pick_source", false),
+    BRUSH_OPTIONS[0], BRUSH_OPTIONS[1], BRUSH_OPTIONS[2], BRUSH_OPTIONS[3],
+    PIXEL_PAINT_OPTIONS[4],
+    toggle("brush.stabilizer", "brush.stabilizer", false),
+    toggle(CLONE_ALIGNED, CLONE_ALIGNED, true),
+    ADD_SAMPLE_SOURCE,
+    choice(CLONE_SCOPE, CLONE_SCOPE, SAMPLE_SCOPES, "current"),
+    SAMPLE_ROTATION, SAMPLE_SCALE, SAMPLE_FLIP,
 ];
 
 const BACKGROUND_ERASE_OPTIONS: &[ToolOptionSpec] = &[
@@ -590,7 +667,19 @@ const TONAL_BRUSH_OPTIONS: &[ToolOptionSpec] = &[
     toggle("brush.wet_edges", "brush.wet_edges", false),
 ];
 
+pub const ADJUSTMENT_TOOL: &str = "tool.paint.adjustment";
+pub const ADJUSTMENT_KIND: &str = "brush.adjustment";
+pub const ADJUSTMENT_AMOUNT: &str = "brush.adjustment_amount";
+pub const ADJUSTMENT_RANGE: &str = "brush.tonal_range";
 pub const TONE_TOOL: &str = "tool.paint.tone";
+
+const ADJUSTMENT_BRUSH_OPTIONS: &[ToolOptionSpec] = &[
+    BRUSH_OPTIONS[0], BRUSH_OPTIONS[1], BRUSH_OPTIONS[2], BRUSH_OPTIONS[3],
+    PIXEL_PAINT_OPTIONS[4],
+    choice(ADJUSTMENT_KIND, ADJUSTMENT_KIND, &["exposure", "contrast", "saturation"], "exposure"),
+    number(ADJUSTMENT_AMOUNT, ADJUSTMENT_AMOUNT, -3.0, 3.0, 0.01, 1.0),
+    choice(ADJUSTMENT_RANGE, ADJUSTMENT_RANGE, &["full", "shadows", "midtones", "highlights"], "full"),
+];
 const NONDESTRUCTIVE_TONE_OPTIONS: &[ToolOptionSpec] = &[
     number("brush.width", "context.brush.width", 1.0, 2048.0, 1.0, 1024.0),
     TONAL_BRUSH_OPTIONS[1], BRUSH_OPTIONS[2], BRUSH_OPTIONS[3],
@@ -608,6 +697,18 @@ const SPONGE_BRUSH_OPTIONS: &[ToolOptionSpec] = &[
     TONAL_BRUSH_OPTIONS[4],
     choice("brush.sponge_mode", "brush.sponge", &["saturate", "desaturate", "vibrance"], "saturate"),
     TONAL_BRUSH_OPTIONS[7],
+];
+
+pub const FILTER_BRUSH_TOOL: &str = "tool.paint.filter";
+pub const FILTER_BRUSH_KIND: &str = "brush.filter_kind";
+
+const FILTER_GROUP_OPTIONS: &[ToolOptionSpec] = &[
+    BRUSH_OPTIONS[0], BRUSH_OPTIONS[1], BRUSH_OPTIONS[2], BRUSH_OPTIONS[3],
+    PIXEL_PAINT_OPTIONS[4], TONAL_BRUSH_OPTIONS[4],
+    choice(FILTER_BRUSH_KIND, FILTER_BRUSH_KIND, &["gaussian", "unsharp", "clarity", "harsh", "median", "smudge"], "gaussian"),
+    choice("brush.tonal_range", "brush.tonal_range", &["full", "shadows", "midtones", "highlights"], "full"),
+    number("brush.strength", "brush.strength", 0.0, 100.0, 1.0, 50.0),
+    BRUSH_SYMMETRY_COUNT, BRUSH_SYMMETRY_MIRROR, BRUSH_SYMMETRY_LOCK, BRUSH_SYMMETRY_X, BRUSH_SYMMETRY_Y,
 ];
 
 const FILTER_BRUSH_OPTIONS: &[ToolOptionSpec] = &[
@@ -642,12 +743,20 @@ const PIXEL_PENCIL_OPTIONS: &[ToolOptionSpec] = &[
     BRUSH_OPTIONS[1], BRUSH_OPTIONS[2],
     toggle("brush.protect_alpha", "brush.protect_alpha", false),
     BRUSH_SYMMETRY_COUNT, BRUSH_SYMMETRY_MIRROR, BRUSH_SYMMETRY_LOCK, BRUSH_SYMMETRY_X, BRUSH_SYMMETRY_Y,
+    BRUSH_FOREGROUND_OPTION,
 ];
 
 const ONE_PIXEL_MARQUEE_OPTIONS: &[ToolOptionSpec] = &[
     choice("marquee.op", "context.marquee.op", SELECTION_OPS, "new"),
     number("marquee.feather", "context.marquee.feather", 0.0, 1000.0, 0.1, 0.0),
     action("selection.refine", "selection.refine_button", "selection.refine"),
+];
+
+const AREA_FILL_OPTIONS: &[ToolOptionSpec] = &[
+    toggle("fill.context_fill", "context.fill.context_fill", false),
+    choice("fill.fill_type", "context.fill.fill_type", &["solid", "transparent"], "solid"),
+    BRUSH_FOREGROUND_OPTION,
+    toggle("fill.pigment", "context.fill.pigment_blend", false),
 ];
 
 pub const FILL_OPTIONS: &[ToolOptionSpec] = &[
@@ -707,9 +816,45 @@ pub const ARTBOARD_OPTIONS: &[ToolOptionSpec] = &[
 
 pub const EMPTY_OPTIONS: &[ToolOptionSpec] = &[];
 
+const BLEMISH_OPTIONS: &[ToolOptionSpec] = &[number(
+    crate::commands::blemish::WIDTH, "blemish.width", 1.0,
+    crate::commands::blemish::MAX_WIDTH, 1.0, crate::commands::blemish::DEFAULT_WIDTH,
+)];
+
+const PATCH_OPTIONS: &[ToolOptionSpec] = &[
+    toggle(crate::commands::patch::SELECTION_IS_SOURCE, "patch.selection_source", false),
+    toggle(crate::commands::patch::TEXTURE_ONLY, "patch.texture_only", false),
+    toggle(crate::commands::patch::TRANSPARENT, "patch.transparent", false),
+    choice("patch.source", "inpaint.source", &["current_layer"], "current_layer"),
+];
+
+const INPAINT_OPTIONS: &[ToolOptionSpec] = &{
+    use crate::commands::inpaint as tool;
+    [
+        number(tool::WIDTH, "context.brush.width", 1.0, 2048.0, 1.0, 40.0),
+        number(tool::OPACITY, "context.brush.opacity", 0.0, 100.0, 1.0, 100.0),
+        choice(tool::SOURCE, "inpaint.source", &["current_layer", "layer_below", "all_layers"], "current_layer"),
+        action("inpaint.preview_button", "inpaint.preview_button", tool::PREVIEW),
+        action("inpaint.apply_button", "inpaint.apply_button", tool::APPLY),
+        action("inpaint.cancel_button", "button.cancel", tool::CANCEL),
+    ]
+};
+const BLOB_OPTIONS: &[ToolOptionSpec] = &[number(BLOB_WIDTH, "context.vector_brush.width", 0.5, 1000.0, 0.5, 12.0)];
+const VECTOR_FLOOD_OPTIONS: &[ToolOptionSpec] = &[
+    choice(VECTOR_FLOOD_INSERT, "context.vector_flood.insert", &["top", "inside", "between"], "top"),
+    choice(VECTOR_FLOOD_MODE, "context.vector_flood.mode", &["add", "refill", "knockout"], "add"),
+    choice(VECTOR_FLOOD_FIT, "context.vector_flood.fit", &["min", "max"], "min"),
+    toggle(VECTOR_FLOOD_VISIBLE, "context.vector_flood.visible", true),
+    text_field(VECTOR_FLOOD_BITMAP, "context.vector_flood.bitmap", ""),
+    choice(VECTOR_FLOOD_BITMAP_FIT, "context.vector_flood.bitmap_fit", &["max", "min", "stretch", "none"], "max"),
+    choice(VECTOR_FLOOD_GRADIENT_FIT, "context.vector_flood.gradient_fit", &["none", "max", "min", "stretch"], "none"),
+];
+
 pub fn options_for(tool: &str) -> &'static [ToolOptionSpec] {
     let Some(tool) = canonical_tool(tool) else { return EMPTY_OPTIONS };
     match tool {
+        BLOB_BRUSH | BLOB_ERASE => BLOB_OPTIONS,
+        VECTOR_FLOOD => VECTOR_FLOOD_OPTIONS,
         "tool.move" | "tool.select.object" => MOVE_OPTIONS,
         ARTBOARD_TOOL => ARTBOARD_OPTIONS,
         "tool.view" => VIEW_OPTIONS,
@@ -725,6 +870,7 @@ pub fn options_for(tool: &str) -> &'static [ToolOptionSpec] {
         "tool.knife" => KNIFE_OPTIONS,
         "tool.shape_builder" => SHAPE_BUILDER_OPTIONS,
         "tool.style_picker" => STYLE_PICKER_OPTIONS,
+        crate::commands::fill::TOOL => AREA_FILL_OPTIONS,
         "tool.flood_fill" => FILL_OPTIONS,
         "tool.eraser.flood" => FLOOD_ERASE_OPTIONS,
         "tool.eraser.background" => BACKGROUND_ERASE_OPTIONS,
@@ -732,12 +878,19 @@ pub fn options_for(tool: &str) -> &'static [ToolOptionSpec] {
         "tool.paint.brush" | "tool.paint_brush" => PIXEL_PAINT_OPTIONS,
         "tool.paint.pixel" => SINGLE_PIXEL_BRUSH_OPTIONS,
         CALLIGRAPHY_TOOL => CALLIGRAPHY_OPTIONS,
+        crate::commands::inpaint::TOOL => INPAINT_OPTIONS,
+        crate::commands::patch::TOOL => PATCH_OPTIONS,
+        crate::commands::blemish::TOOL => BLEMISH_OPTIONS,
         CLONE_TOOL => CLONE_BRUSH_OPTIONS,
+        HEAL_TOOL => HEAL_BRUSH_OPTIONS,
+        UNDO_BRUSH_TOOL => UNDO_BRUSH_OPTIONS,
         MIXER_TOOL => MIXER_OPTIONS,
-        "tool.paint.adjustment" | "tool.dodge" | "tool.burn" => TONAL_BRUSH_OPTIONS,
+        ADJUSTMENT_TOOL => ADJUSTMENT_BRUSH_OPTIONS,
+        "tool.dodge" | "tool.burn" => TONAL_BRUSH_OPTIONS,
         TONE_TOOL => NONDESTRUCTIVE_TONE_OPTIONS,
         "tool.paint.sponge" => SPONGE_BRUSH_OPTIONS,
-        "tool.paint.filter" | "tool.paint.blur" | "tool.paint.median" => FILTER_BRUSH_OPTIONS,
+        FILTER_BRUSH_TOOL => FILTER_GROUP_OPTIONS,
+        "tool.paint.blur" | "tool.paint.median" => FILTER_BRUSH_OPTIONS,
         "tool.sharpen" => SHARPEN_BRUSH_OPTIONS,
         "tool.paint.smudge" | "tool.eraser.smudge" => SMUDGE_BRUSH_OPTIONS,
         "tool.paint.colour_replace" => COLOUR_REPLACE_OPTIONS,
@@ -766,6 +919,15 @@ const BRUSH_EDITOR: ToolOptionSpec = action("brush.editor", "brush_editor.more",
 pub fn find_option(tool: &str, id: &str) -> Option<&'static ToolOptionSpec> {
     if id == BRUSH_EDITOR.id && crate::commands::pixel_presets::editor_tool(tool).is_some() {
         return Some(&BRUSH_EDITOR);
+    }
+    if id == PREPARE_PHOTO.id && matches!(canonical_tool(tool), Some(
+        CLONE_TOOL | HEAL_TOOL | FILTER_BRUSH_TOOL
+        | crate::commands::fill::TOOL | crate::commands::inpaint::TOOL
+        | crate::commands::patch::TOOL | crate::commands::blemish::TOOL | crate::commands::red_eye::TOOL
+        | "tool.paint.blur" | "tool.sharpen" | "tool.paint.median" | "tool.paint.smudge"
+        | "tool.dodge" | "tool.burn" | "tool.paint.sponge"
+    )) {
+        return Some(&PREPARE_PHOTO);
     }
     if id == ART_TEXT_VERTICAL && matches!(canonical_tool(tool), Some("tool.text.artistic" | "tool.text")) {
         return Some(&ART_TEXT_DIRECTION);
@@ -796,7 +958,7 @@ impl ToolOptionStore {
     }
 
     fn slot(tool: &str, id: &str) -> String {
-        if id == CURVE_ENERGY {
+        if matches!(id, CURVE_ENERGY | BRUSH_FOREGROUND) {
             return id.to_owned();
         }
         format!("{tool}|{id}")
@@ -873,7 +1035,8 @@ impl ToolOptionStore {
         };
         let editor = crate::commands::pixel_presets::editor_tool(tool).map(|_| &BRUSH_EDITOR);
         let direction = find_option(tool, ART_TEXT_VERTICAL);
-        let options = options_for(tool).iter().chain(editor).chain(direction);
+        let photo = find_option(tool, PREPARE_PHOTO.id);
+        let options = photo.into_iter().chain(options_for(tool)).chain(editor).chain(direction);
         let ids: Vec<&str> = options.clone().map(|spec| spec.id).collect();
         let described: Vec<Value> = options.map(|spec| spec.describe(&self.get(tool, spec))).collect();
         json!({ "tool": tool, "ids": ids, "options": described })

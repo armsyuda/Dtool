@@ -59,8 +59,14 @@ const LAYER_TAG_COLOURS: [(&str, &str); 8] = [
 ];
 
 pub(super) fn tag_colour_picker(ui: &mut egui::Ui, stored: Option<Option<&str>>) -> Option<Option<&'static str>> {
+    let change = tag_colour_choices(ui, stored);
+    if change.is_some() { ui.close(); }
+    change
+}
+
+pub(super) fn tag_colour_choices(ui: &mut egui::Ui, stored: Option<Option<&str>>) -> Option<Option<&'static str>> {
     let mut change = None;
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = 1.0;
         let colours = [(None, "layers.tag.none")].into_iter()
             .chain(LAYER_TAG_COLOURS.map(|(hex, label)| (Some(hex), label)));
@@ -88,7 +94,6 @@ pub(super) fn tag_colour_picker(ui: &mut egui::Ui, stored: Option<Option<&str>>)
             }
             if button.clicked() {
                 change = Some(hex);
-                ui.close();
             }
         }
     });
@@ -303,11 +308,15 @@ fn drop_zone_on_label(id: ObjectId, can_nest: bool, rect: egui::Rect, point: egu
 }
 
 pub fn drop_command(dragged: ObjectId, zone: DropZone, nodes: &[TreeNode]) -> Command {
+    move_layers_command(&[dragged], zone, nodes)
+}
+
+fn move_layers_command(ids: &[ObjectId], zone: DropZone, nodes: &[TreeNode]) -> Command {
     let parent = match zone {
         DropZone::Inside(id) => Some(id.0),
         DropZone::Above(id) | DropZone::Below(id) => nodes.iter().find(|node| node.id == id.0).and_then(|node| node.parent),
     };
-    let mut params = json!({ "ids": [dragged.0], "parent": parent });
+    let mut params = json!({ "ids": ids, "parent": parent });
     if let DropZone::Above(id) | DropZone::Below(id) = zone {
         params["relative_to"] = json!(id.0);
         params["placement"] = json!(if matches!(zone, DropZone::Above(_)) { "above" } else { "below" });
@@ -315,8 +324,23 @@ pub fn drop_command(dragged: ObjectId, zone: DropZone, nodes: &[TreeNode]) -> Co
     Command::with_params("node.reparent", params)
 }
 
+fn group_drop_target(document: &Document, id: ObjectId) -> bool {
+    document.get_object(id).is_some_and(|object| object.is_group() || object.kind == dtool_core::ObjectKind::Artboard)
+}
+
+fn dragged_layers(session: &dtool_core::Session, dragged: ObjectId) -> Vec<ObjectId> {
+    let selected = &session.selection.ids;
+    if !selected.contains(&dragged) {
+        return vec![dragged];
+    }
+    selected.iter().copied().filter(|&id| {
+        !selected.iter().any(|&ancestor| ancestor != id
+            && dtool_core::commands::arrange::would_cycle(session, ancestor, id))
+    }).collect()
+}
+
 pub fn thumb_drop_command(document: &Document, dragged: ObjectId, target: ObjectId) -> Command {
-    if document.get_object(target).is_some_and(|object| object.kind == dtool_core::ObjectKind::Artboard) {
+    if group_drop_target(document, target) {
         return Command::with_params("node.reparent", json!({ "id": dragged.0, "parent": target.0 }));
     }
     let vector = document.get_object(dragged).is_some_and(|object| matches!(object.kind, dtool_core::object::ObjectKind::Shape | dtool_core::object::ObjectKind::Curve(_) | dtool_core::object::ObjectKind::Compound(_)));
@@ -624,25 +648,20 @@ impl LayersPanel {
     }
 
     pub fn apply_drop(&mut self, workspace: &mut CoreWorkspace, dragged: ObjectId, zone: DropZone) -> bool {
-        let nodes = match workspace.session() {
-            Some(session) => document_nodes(&session.document),
-            None => {
-                self.last_error = Some(dtool_core::CommandError::no_document().message_key);
-                return false;
-            }
+        let Some(session) = workspace.session() else {
+            self.last_error = Some(dtool_core::CommandError::no_document().message_key);
+            return false;
         };
-        let command = drop_command(dragged, zone, &nodes);
-        let (_, result) = workspace.run(Scope::active(), command);
-        match result {
-            Ok(_) => {
-                self.last_error = None;
-                true
-            }
-            Err(error) => {
-                self.last_error = Some(error.message_key);
-                false
-            }
-        }
+        self.apply_layer_drop(workspace, &dragged_layers(session, dragged), zone)
+    }
+
+    fn apply_layer_drop(&mut self, workspace: &mut CoreWorkspace, ids: &[ObjectId], zone: DropZone) -> bool {
+        let Some(session) = workspace.session() else {
+            self.last_error = Some(dtool_core::CommandError::no_document().message_key);
+            return false;
+        };
+        let nodes = document_nodes(&session.document);
+        self.run_reported(workspace, move_layers_command(ids, zone, &nodes))
     }
 
     pub fn rename(&mut self, workspace: &mut CoreWorkspace, id: u64, name: &str) -> bool {
@@ -794,7 +813,7 @@ impl LayersPanel {
             session.selection.ids.iter().filter_map(move |id| session.document.get_object(*id))
         }).collect();
         let ids: Vec<_> = selected.iter().map(|object| object.id).collect();
-        let enabled = !selected.is_empty() && selected.iter().all(|object| !object.locked);
+        let enabled = !selected.is_empty() && workspace.session().is_some_and(|session| selected.iter().all(|object| !session.document.is_object_locked(object)));
         let all_groups = selected.iter().all(|object| matches!(object.kind, dtool_core::object::ObjectKind::Group));
         let current_opacity = selected.first().map(|object| object.opacity);
         let average = if selected.is_empty() { 100.0 } else {
@@ -892,11 +911,12 @@ impl LayersPanel {
     }
 
     fn action_icon(&mut self, ui: &mut egui::Ui, icon: &str, label: &str, enabled: bool) -> bool {
-        let state = dtool_design::ControlState::enabled(enabled).tooltip(label);
+        let state = dtool_design::ControlState::enabled(enabled);
         let response = match self.mask_icons.themed_texture(ui.ctx(), icon, dtool_design::icon_texture_px(ui)) {
             Some(texture) => dtool_design::icon_image_button(ui, &texture, &state),
             None => dtool_design::button_with(ui, label, &state),
         };
+        dtool_design::tooltip_at_pointer(&response, label);
         response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled && ui.is_enabled(), label));
         response.clicked()
     }
@@ -908,12 +928,13 @@ impl LayersPanel {
     ) -> Option<Result<serde_json::Value, dtool_core::CommandError>> {
         use crate::mask_actions::{self, MaskAction};
         let label = text("menu.layer.mask.actions");
-        let state = dtool_design::ControlState::default().tooltip(label);
+        let state = dtool_design::ControlState::default();
         let selected = mask_actions::mask_view_on(session);
         let response = match self.mask_icons.themed_texture(ui.ctx(), "layer-mask", dtool_design::icon_texture_px(ui)) {
             Some(texture) => dtool_design::icon_image_button_selected(ui, &texture, selected, &state),
             None => dtool_design::button_with(ui, label, &state),
         };
+        dtool_design::tooltip_at_pointer(&response, label);
         response.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, ui.is_enabled(), selected, label));
         egui::Popup::menu(&response).show(|ui| {
             mask_actions::show_mask_actions_with(ui, session, |ui, action, label, enabled, selected| {
@@ -1007,13 +1028,24 @@ impl LayersPanel {
             let rows_height = (ui.available_height() - footer_height).max(0.0);
             let (pressed, released) = crate::input::primary_button_positions(ui);
             let drag_id = ui.id().with(("layers-row-press", workspace.active()));
-            let mut pointer_drag = ui.data(|data| data.get_temp::<(ObjectId, egui::Pos2)>(drag_id));
+            let mut pointer_drag = ui.data(|data| data.get_temp::<(Vec<ObjectId>, egui::Pos2)>(drag_id));
             if pressed.is_some() {
                 pointer_drag = None;
             }
             let mut targets = Vec::new();
-            let valid_drop = |dragged, target| {
-                workspace.session().is_some_and(|session| !dtool_core::commands::arrange::would_cycle(session, dragged, target))
+            let valid_drop = |ids: &[ObjectId], target| {
+                workspace.session().is_some_and(|session| ids.iter().all(|&id| {
+                    !dtool_core::commands::arrange::would_cycle(session, id, target)
+                }))
+            };
+            let valid_thumb_drop = |ids: &[ObjectId], target, is_group| {
+                valid_drop(ids, target) && (is_group || workspace.session().is_some_and(|session| {
+                    let [dragged] = ids else { return false; };
+                    [*dragged, target].into_iter().all(|id| {
+                        session.document.get_object(id)
+                            .is_some_and(|object| !session.document.is_object_locked(object))
+                    })
+                }))
             };
             let thumbnails_deferred = self.prepare_thumbnails(ui.ctx(), workspace);
             let mut thumbnail_requests = Vec::new();
@@ -1152,6 +1184,14 @@ impl LayersPanel {
                         let painter = ui.painter().with_clip_rect(thumb_rect);
                         painter.rect_filled(thumb_rect, 1.0, tile);
                         if let Some(image) = &texture {
+                            let shade = dtool_design::color("layers.thumbnail.alt");
+                            let square = thumb_rect.size() / 4.0;
+                            for row in 0..4 {
+                                for col in (row % 2..4).step_by(2) {
+                                    let offset = egui::vec2(col as f32, row as f32) * square;
+                                    painter.rect_filled(egui::Rect::from_min_size(thumb_rect.min + offset, square), 0.0, shade);
+                                }
+                            }
                             let size = image.size_vec2();
                             painter.image(image.id(), egui::Rect::from_center_size(thumb_rect.center(), size * ((thumb - 2.0) / size.max_elem())),
                                 egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
@@ -1230,14 +1270,21 @@ impl LayersPanel {
                                 clicked = Some((row.id, select_op(row.selected, ui.input(|input| input.modifiers))));
                             }
                         }
-                        thumb_response.dnd_set_drag_payload(id);
+                        let drag_selection = || workspace.session().map_or_else(|| vec![id], |session| dragged_layers(session, id));
+                        let thumbnail_group = is_group || is_artboard;
                         if let Some(point) = pressed.filter(|point| thumb_response.interact_rect.contains(*point)) {
-                            pointer_drag = Some((id, point));
+                            pointer_drag = Some((drag_selection(), point));
                         }
-                        if let Some(payload) = thumb_response.dnd_hover_payload::<ObjectId>().filter(|payload| valid_drop(**payload, id)) {
+                        if thumb_response.drag_started() {
+                            let ids = pointer_drag.as_ref().map_or_else(drag_selection, |(ids, _)| ids.clone());
+                            egui::DragAndDrop::set_payload(ui.ctx(), ids);
+                        }
+                        if let Some(payload) = thumb_response.dnd_hover_payload::<Vec<ObjectId>>()
+                            .filter(|ids| valid_thumb_drop(ids, id, thumbnail_group))
+                        {
                             ui.painter().rect_stroke(thumb_response.rect, 2.0, egui::Stroke::new(1.5, accent), egui::StrokeKind::Inside);
-                            if thumb_response.dnd_release_payload::<ObjectId>().is_some() {
-                                thumb_dropped = Some((*payload, id));
+                            if thumb_response.dnd_release_payload::<Vec<ObjectId>>().is_some() {
+                                thumb_dropped = Some((payload.as_ref().clone(), id));
                             }
                         }
                         let name_size = egui::vec2((ui.available_width() - trailing_width).max(0.0), row_height);
@@ -1283,11 +1330,14 @@ impl LayersPanel {
                             }).inner)
                         };
                         if let Some(label) = &label {
-                            label.dnd_set_drag_payload(id);
                             if let Some(point) = pressed.filter(|point| label.interact_rect.contains(*point)) {
-                                pointer_drag = Some((id, point));
+                                pointer_drag = Some((drag_selection(), point));
                             }
-                            targets.push((id, can_nest, label.rect, label.interact_rect, thumb_response.interact_rect));
+                            if label.drag_started() {
+                                let ids = pointer_drag.as_ref().map_or_else(drag_selection, |(ids, _)| ids.clone());
+                                egui::DragAndDrop::set_payload(ui.ctx(), ids);
+                            }
+                            targets.push((id, can_nest, thumbnail_group, label.rect, label.interact_rect, thumb_response.interact_rect));
                             if label.clicked() {
                                 clicked = Some((row.id, select_op(row.selected, ui.input(|input| input.modifiers))));
                             }
@@ -1385,14 +1435,28 @@ impl LayersPanel {
                                 )),
                                 _ => None,
                             };
-                            if let Some((name, key)) = release
-                                && command_menu_item(ui, text(key), !row.locked).clicked()
-                            {
-                                row_command = Some(Command::with_params(name, json!({"id": id.0})));
-                                ui.close();
+                            if let Some((name, key)) = release {
+                                let command = Command::with_params(name, json!({"id": id.0}));
+                                if command_menu_item(ui, text(key), session.can_execute(&command)).clicked() {
+                                    row_command = Some(command);
+                                    ui.close();
+                                }
                             }
                             let editable = selected().all(|object| !object.locked);
                             let groups = selected().all(|object| object.kind == dtool_core::ObjectKind::Group);
+                            for (step, key) in [
+                                ("to_front", "menu.arrange.to_front"),
+                                ("forward", "menu.arrange.forward"),
+                                ("backward", "menu.arrange.backward"),
+                                ("to_back", "menu.arrange.to_back"),
+                            ] {
+                                let command = Command::with_params("node.arrange", json!({"ids": ids, "step": step}));
+                                if command_menu_item(ui, text(key), editable && session.can_execute(&command)).clicked() {
+                                    row_command = Some(command);
+                                    ui.close();
+                                }
+                            }
+                            ui.separator();
                             let promote = Command::with_params("node.folder.promote", json!({"ids": ids}));
                             let can_promote = session.can_execute(&promote);
                             for (name, key, enabled) in [
@@ -1411,7 +1475,7 @@ impl LayersPanel {
                                 ui.close();
                             }
                             ui.separator();
-                            if command_menu_item(ui, text("menu.layer.layer_effects"), !row.locked).clicked() {
+                            if command_menu_item(ui, text("menu.layer.layer_effects"), document.zip(object).is_some_and(|(doc, object)| !doc.is_object_locked(object))).clicked() {
                                 requested_effects = Some(row.id);
                                 ui.close();
                             }
@@ -1445,21 +1509,21 @@ impl LayersPanel {
                             }
                         }));
                         if has_effects {
-                            if self.action_icon(ui, "layer-effects", text("menu.layer.layer_effects"), !row.locked)
+                            if self.action_icon(ui, "layer-effects", text("menu.layer.layer_effects"), document.zip(object).is_some_and(|(doc, object)| !doc.is_object_locked(object)))
                             {
                                 requested_effects = Some(row.id);
                             }
                         }
                         if let Some(label) = label.as_ref()
-                            && let Some(payload) = label.dnd_hover_payload::<ObjectId>()
+                            && let Some(payload) = label.dnd_hover_payload::<Vec<ObjectId>>()
                         {
-                            if valid_drop(*payload, id)
+                            if valid_drop(&payload, id)
                                 && let Some(point) = ui.input(|input| input.pointer.interact_pos())
                             {
                                 let zone = drop_zone_on_label(id, can_nest, label.rect, point);
                                 indicator = Some(zone);
-                                if label.dnd_release_payload::<ObjectId>().is_some() {
-                                    dropped = Some((*payload, zone));
+                                if label.dnd_release_payload::<Vec<ObjectId>>().is_some() {
+                                    dropped = Some((payload.as_ref().clone(), zone));
                                 }
                             }
                         }
@@ -1510,14 +1574,16 @@ impl LayersPanel {
             // has installed its drag payload. Resolve from the recorded row hitboxes.
             if let Some(point) = released {
                 if dropped.is_none() && thumb_dropped.is_none() {
-                    if let Some((dragged, start)) = pointer_drag.filter(|(_, start)| start.distance(point) >= 4.0) {
-                        for (id, can_nest, label, label_hitbox, thumbnail) in targets {
-                            if thumbnail.contains(point) && valid_drop(dragged, id) {
-                                thumb_dropped = Some((dragged, id));
+                    if let Some((ids, start)) = pointer_drag.as_ref()
+                        && start.distance(point) >= 4.0
+                    {
+                        for (id, can_nest, thumbnail_group, label, label_hitbox, thumbnail) in targets {
+                            if thumbnail.contains(point) && valid_thumb_drop(ids, id, thumbnail_group) {
+                                thumb_dropped = Some((ids.clone(), id));
                                 break;
                             }
-                            if label_hitbox.contains(point) && valid_drop(dragged, id) {
-                                dropped = Some((dragged, drop_zone_on_label(id, can_nest, label, point)));
+                            if label_hitbox.contains(point) && valid_drop(ids, id) {
+                                dropped = Some((ids.clone(), drop_zone_on_label(id, can_nest, label, point)));
                                 break;
                             }
                         }
@@ -1529,7 +1595,7 @@ impl LayersPanel {
                 if let Some(gesture) = pointer_drag {
                     data.insert_temp(drag_id, gesture);
                 } else {
-                    data.remove::<(ObjectId, egui::Pos2)>(drag_id);
+                    data.remove::<(Vec<ObjectId>, egui::Pos2)>(drag_id);
                 }
             });
             if let Some((id, visible)) = visibility { self.set_visible(workspace, id, visible); }
@@ -1537,8 +1603,15 @@ impl LayersPanel {
             if let Some(id) = toggled {
                 self.toggle_collapsed(workspace, id);
             }
-            if let Some((dragged, target)) = thumb_dropped {
-                self.apply_thumb_drop(workspace, dragged, target);
+            if thumb_dropped.is_some() || dropped.is_some() {
+                clicked = None;
+            }
+            if let Some((ids, target)) = thumb_dropped {
+                if workspace.session().is_some_and(|session| group_drop_target(&session.document, target)) {
+                    self.apply_layer_drop(workspace, &ids, DropZone::Inside(target));
+                } else if let [dragged] = ids.as_slice() {
+                    self.apply_thumb_drop(workspace, *dragged, target);
+                }
             }
             if let Some(id) = requested_effects { self.request_effects(workspace, id); }
             if let Some(id) = mask_view {
@@ -1565,8 +1638,8 @@ impl LayersPanel {
                 self.begin_rename(owner, &session.document, id);
                 ui.ctx().request_repaint();
             }
-            if let Some((dragged, zone)) = dropped {
-                self.apply_drop(workspace, dragged, zone);
+            if let Some((ids, zone)) = dropped {
+                self.apply_layer_drop(workspace, &ids, zone);
             }
             let footer_top = ui.cursor().min.y;
             let mut footer_effects = None;
@@ -1579,7 +1652,7 @@ impl LayersPanel {
                 }
                 let ids = &session.selection.ids;
                 let editable = !ids.is_empty() && ids.iter().all(|id| session.document.get_object(*id).is_some_and(|object| !object.locked));
-                if self.action_icon(ui, "layer-effects", text("menu.layer.layer_effects"), editable && ids.len() == 1) {
+                if self.action_icon(ui, "layer-effects", text("menu.layer.layer_effects"), ids.len() == 1 && ids.first().and_then(|id| session.document.get_object(*id)).is_some_and(|object| !session.document.is_object_locked(object))) {
                     footer_effects = ids.first().map(|id| id.0);
                 }
                 let groups = ids.iter().all(|id| session.document.get_object(*id).is_some_and(|object| matches!(object.kind, dtool_core::object::ObjectKind::Group)));

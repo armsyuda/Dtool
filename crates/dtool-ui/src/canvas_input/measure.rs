@@ -137,12 +137,16 @@ impl Measure {
             let decimals = readout_decimals(value.units, false);
             let mut known = self.known_length.filter(|(units, _)| *units == value.units)
                 .map_or(value.length, |(_, length)| length);
-            ui.add(
-                egui::DragValue::new(&mut known)
-                    .range(0.000001..=1e9)
-                    .max_decimals(decimals + 1)
-                    .suffix(format!(" {}", value.units)),
-            );
+            let label = dtool_strings::text("ctx.measure.known_distance");
+            let suffix = format!(" {}", value.units);
+            let spec = dtool_design::NumericSpec::new(label)
+                .range(0.000001..=1e9)
+                .step(10_f64.powi(-(decimals as i32)))
+                .decimals(decimals + 1)
+                .suffix(&suffix)
+                .reset_to(value.length)
+                .width(92.0);
+            dtool_design::numeric_value(ui, ui.id().with("measure.known_distance"), &mut known, &spec);
             self.known_length = Some((value.units, known));
             if dtool_design::button(ui, dtool_strings::text("ctx.measure.set_distance")).clicked() {
                 action = Some(Command::with_params(

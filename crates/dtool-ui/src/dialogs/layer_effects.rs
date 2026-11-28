@@ -68,6 +68,11 @@ pub fn add_command(id: u64, kind: &str) -> Command {
     Command::with_params("effect.add", json!({ "id": id, "kind": kind, "params": {} }))
 }
 
+pub(crate) fn editable_target(session: &Session) -> Option<dtool_core::ObjectId> {
+    crate::mask_actions::target(session).filter(|id| session.document.get_object(*id)
+        .is_some_and(|object| !session.document.is_object_locked(object)))
+}
+
 impl LayerEffectsDialog {
     pub fn open_for(&mut self, id: u64) {
         *self = Self::default(); self.open = true; self.object_id = Some(id);
@@ -274,7 +279,14 @@ impl LayerEffectsDialog {
         use crate::dialog_chrome::DialogResult;
         use egui::{vec2, Align, Layout, ScrollArea};
 
-        if !self.open || !self.load(session) { return; }
+        if !self.open { return; }
+        if self.object_id.and_then(|id| session.document.get_object(dtool_core::ObjectId(id)))
+            .is_none_or(|object| session.document.is_object_locked(object))
+        {
+            self.cancel(session);
+            return;
+        }
+        if !self.load(session) { return; }
         let size = self.object_id.and_then(|id| session.document.get_object(dtool_core::ObjectId(id))).map(|o| o.size).unwrap_or([1.0, 1.0]);
         let width = (ctx.content_rect().width() - 32.0).clamp(240.0, 640.0);
         let height = (ctx.content_rect().height() - 120.0).clamp(120.0, 356.0);

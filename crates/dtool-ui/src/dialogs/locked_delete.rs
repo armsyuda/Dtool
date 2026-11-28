@@ -95,29 +95,23 @@ impl LockedDeleteDialog {
         }
         let mut picked: Option<LockedDeleteAnswer> = None;
         let message = self.message();
-        egui::Window::new(message.clone())
-            .title_bar(false)
-            .collapsible(false)
-            .resizable(false)
-            .show(ui.ctx(), |ui| {
-                dtool_design::dialog_frame(ui, |ui| {
-                    ui.label(message.as_str());
-                    ui.add_space(dtool_design::space("md"));
-                    ui.horizontal(|ui| {
-                        if dtool_design::button(ui, text("button.yes")).clicked() {
-                            picked = Some(LockedDeleteAnswer::Yes);
-                        }
-                        if dtool_design::button(ui, text("button.no")).clicked() {
-                            picked = Some(LockedDeleteAnswer::No);
-                        }
-                    });
-                    match dtool_design::dialog_keys(ui) {
-                        Some(dtool_design::DialogKey::Cancel) => picked = Some(LockedDeleteAnswer::No),
-                        Some(dtool_design::DialogKey::Confirm) => picked = Some(LockedDeleteAnswer::Yes),
-                        None => {}
-                    }
-                });
+        crate::dialog_chrome::show_floating(ui.ctx(), "dtool.dialog.locked_delete", text("menu.edit.delete"), |ui| {
+            ui.label(message.as_str());
+            ui.add_space(dtool_design::space("md"));
+            ui.horizontal(|ui| {
+                if dtool_design::button(ui, text("button.yes")).clicked() {
+                    picked = Some(LockedDeleteAnswer::Yes);
+                }
+                if dtool_design::button(ui, text("button.no")).clicked() {
+                    picked = Some(LockedDeleteAnswer::No);
+                }
             });
+            match dtool_design::dialog_keys(ui) {
+                Some(dtool_design::DialogKey::Cancel) => picked = Some(LockedDeleteAnswer::No),
+                Some(dtool_design::DialogKey::Confirm) => picked = Some(LockedDeleteAnswer::Yes),
+                None => {}
+            }
+        });
         match picked {
             Some(answer) => self.resolve(session, answer),
             None => None,

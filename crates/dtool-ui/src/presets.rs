@@ -1,5 +1,5 @@
 use crate::dock::{side_tree, DockColumns, DockSide, Layout, LayoutPreset, PanelId, PanelState};
-use dtool_design::{button, dialog_frame, menu_item, panel_header};
+use dtool_design::{button, menu_item};
 use dtool_protocol::CommandError;
 use dtool_strings::text;
 use serde::{Deserialize, Serialize};
@@ -528,28 +528,22 @@ impl AddPresetDialog {
             return;
         }
         let mut close = false;
-        egui::Area::new(egui::Id::new("dtool.dialog.add_preset"))
-            .order(egui::Order::Foreground)
-            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-            .show(ctx, |ui| {
-                dialog_frame(ui, |ui| {
-                    panel_header(ui, text("menu.window.panels.add_preset"));
-                    ui.horizontal(|ui| {
-                        ui.label(text("dialog.preset.name"));
-                        ui.text_edit_singleline(&mut self.name);
-                    });
-                    ui.horizontal(|ui| {
-                        let ok = ui.add_enabled_ui(!self.name.trim().is_empty(), |ui| button(ui, text("button.ok"))).inner;
-                        if ok.clicked() && store.save(&self.name, layout) {
-                            let _ = store.persist(&PresetStore::persisted_path());
-                            close = true;
-                        }
-                        if button(ui, text("button.cancel")).clicked() {
-                            close = true;
-                        }
-                    });
-                });
+        crate::dialog_chrome::show_floating(ctx, "dtool.dialog.add_preset", text("menu.window.panels.add_preset"), |ui| {
+            ui.horizontal(|ui| {
+                ui.label(text("dialog.preset.name"));
+                ui.text_edit_singleline(&mut self.name);
             });
+            ui.horizontal(|ui| {
+                let ok = ui.add_enabled_ui(!self.name.trim().is_empty(), |ui| button(ui, text("button.ok"))).inner;
+                if ok.clicked() && store.save(&self.name, layout) {
+                    let _ = store.persist(&PresetStore::persisted_path());
+                    close = true;
+                }
+                if button(ui, text("button.cancel")).clicked() {
+                    close = true;
+                }
+            });
+        });
         if close {
             self.open = false;
         }
@@ -575,51 +569,45 @@ impl ManagePresetsDialog {
             return;
         }
         let mut close = false;
-        egui::Area::new(egui::Id::new("dtool.dialog.manage_presets"))
-            .order(egui::Order::Foreground)
-            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-            .show(ctx, |ui| {
-                dialog_frame(ui, |ui| {
-                    panel_header(ui, text("menu.window.panels.manage_presets"));
-                    let names = store.list();
-                    for (index, name) in names.iter().enumerate() {
-                        let selected = self.selected == Some(index);
-                        if ui.selectable_label(selected, name.as_str()).clicked() {
-                            self.selected = Some(index);
-                            self.rename_to = name.clone();
+        crate::dialog_chrome::show_floating(ctx, "dtool.dialog.manage_presets", text("menu.window.panels.manage_presets"), |ui| {
+            let names = store.list();
+            for (index, name) in names.iter().enumerate() {
+                let selected = self.selected == Some(index);
+                if ui.selectable_label(selected, name.as_str()).clicked() {
+                    self.selected = Some(index);
+                    self.rename_to = name.clone();
+                }
+            }
+            let current = self.selected.and_then(|index| names.get(index).cloned());
+            ui.horizontal(|ui| {
+                ui.label(text("dialog.preset.name"));
+                ui.add_enabled(current.is_some(), egui::TextEdit::singleline(&mut self.rename_to));
+            });
+            ui.horizontal(|ui| {
+                let has_selection = current.is_some();
+                let rename = ui.add_enabled_ui(has_selection, |ui| button(ui, text("button.rename"))).inner;
+                if rename.clicked() {
+                    if let Some(name) = current.as_deref() {
+                        if store.rename(name, &self.rename_to) {
+                            let _ = store.persist(&PresetStore::persisted_path());
                         }
                     }
-                    let current = self.selected.and_then(|index| names.get(index).cloned());
-                    ui.horizontal(|ui| {
-                        ui.label(text("dialog.preset.name"));
-                        ui.add_enabled(current.is_some(), egui::TextEdit::singleline(&mut self.rename_to));
-                    });
-                    ui.horizontal(|ui| {
-                        let has_selection = current.is_some();
-                        let rename = ui.add_enabled_ui(has_selection, |ui| button(ui, text("button.rename"))).inner;
-                        if rename.clicked() {
-                            if let Some(name) = current.as_deref() {
-                                if store.rename(name, &self.rename_to) {
-                                    let _ = store.persist(&PresetStore::persisted_path());
-                                }
-                            }
+                }
+                let delete = ui.add_enabled_ui(has_selection, |ui| button(ui, text("button.delete"))).inner;
+                if delete.clicked() {
+                    if let Some(name) = current.as_deref() {
+                        if store.delete(name) {
+                            let _ = store.persist(&PresetStore::persisted_path());
                         }
-                        let delete = ui.add_enabled_ui(has_selection, |ui| button(ui, text("button.delete"))).inner;
-                        if delete.clicked() {
-                            if let Some(name) = current.as_deref() {
-                                if store.delete(name) {
-                                    let _ = store.persist(&PresetStore::persisted_path());
-                                }
-                                self.selected = None;
-                                self.rename_to.clear();
-                            }
-                        }
-                        if button(ui, text("button.close")).clicked() {
-                            close = true;
-                        }
-                    });
-                });
+                        self.selected = None;
+                        self.rename_to.clear();
+                    }
+                }
+                if button(ui, text("button.close")).clicked() {
+                    close = true;
+                }
             });
+        });
         if close {
             self.open = false;
         }

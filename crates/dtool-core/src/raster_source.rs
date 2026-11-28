@@ -9,22 +9,41 @@ pub struct LayerMask {
     /// Original hard boundary in normalized mask coordinates, when available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vector_outline: Option<crate::curve::Curve>,
+    /// Mask rectangle in normalized object coordinates. Omitted for the full object.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame: Option<[f32; 4]>,
 }
 
 impl LayerMask {
     pub fn new(object: ObjectId, coverage: PixelSelection) -> Self {
-        Self { object, coverage, vector_outline: None }
+        Self { object, coverage, vector_outline: None, frame: None }
+    }
+
+    pub fn relative_frame(&self) -> [f32; 4] {
+        self.frame.filter(|rect| rect.iter().all(|value| value.is_finite())
+            && rect[2] > 0.0 && rect[3] > 0.0).unwrap_or([0.0, 0.0, 1.0, 1.0])
+    }
+
+    /// Left, top, width and height before the object's rotation, shear and reflection.
+    pub fn local_rect(&self, object: &Object) -> [f32; 4] {
+        let [x, y, w, h] = self.relative_frame();
+        let [width, height] = object.size.map(f32::abs);
+        [x * width, y * height, w * width, h * height]
     }
 }
 
 /// Masks on raster sources are applied while decoding their pixels.
 pub fn compositing_mask<'a>(document: &'a Document, object: &Object) -> Option<&'a PixelSelection> {
+    compositing_layer_mask(document, object).map(|mask| &mask.coverage)
+}
+
+pub fn compositing_layer_mask<'a>(document: &'a Document, object: &Object) -> Option<&'a LayerMask> {
     if dimensions(document, object).is_some() {
         return None;
     }
-    let mask = &document.layer_masks.iter().find(|mask| mask.object == object.id)?.coverage;
-    let length = (mask.width as usize).checked_mul(mask.height as usize)?;
-    (length > 0 && length == mask.coverage.len()).then_some(mask)
+    let mask = document.layer_masks.iter().find(|mask| mask.object == object.id)?;
+    let length = (mask.coverage.width as usize).checked_mul(mask.coverage.height as usize)?;
+    (length > 0 && length == mask.coverage.coverage.len()).then_some(mask)
 }
 
 pub fn dimensions(document: &Document, object: &Object) -> Option<[usize; 2]> {

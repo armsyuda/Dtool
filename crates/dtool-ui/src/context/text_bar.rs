@@ -497,7 +497,7 @@ impl TextBarState {
 
 fn style_toggle(ui: &mut egui::Ui, icons: &mut IconCache, icon: &str, key: &str, selected: bool) -> egui::Response {
     let label = text(key);
-    let colour = if selected { ui.visuals().selection.stroke.color } else { dtool_design::icons::current_icon_colour() };
+    let colour = if selected { dtool_design::selected_icon_ink(ui) } else { dtool_design::icons::current_icon_colour() };
     let state = dtool_design::ControlState::default().tooltip(label);
     let response = if let Some(texture) = icons.texture(ui.ctx(), icon, colour, dtool_design::icon_texture_px(ui)) {
         dtool_design::icon_image_button_selected(ui, &texture, selected, &state)

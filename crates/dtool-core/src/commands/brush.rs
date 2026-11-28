@@ -7,6 +7,9 @@ use crate::paint::{Cap, Colour, Join, Paint, StrokeStyle, validate_stroke};
 use dtool_protocol::{Command, CommandError, CommandResult};
 use kurbo::BezPath;
 
+mod flood_gradient;
+mod flood_replace;
+
 const SYMMETRY_KEY: &str = "dtool.symmetry";
 const TIP_KEY: &str = "dtool.vector_brush_tip";
 const BLENDS_KEY: &str = "dtool.blends";
@@ -57,6 +60,10 @@ pub fn active_preset_is_shared(doc: &crate::Document) -> bool {
 mod live_blend;
 pub use live_blend::{blend_for_object, linked_blend_path, refresh_blends, BlendInfo, BlendLayout, BLEND_SPACING, DEFAULT_BLEND_STEPS, MAX_BLEND_STEPS};
 pub(crate) use live_blend::refresh_saved_blend_appearance;
+
+pub fn has_live_blends(document: &crate::Document) -> bool {
+    live_blend::entries(document).iter().any(|entry| entry["live"].as_bool() == Some(true))
+}
 
 fn ours(command: &Command) -> bool {
     matches!(
@@ -136,12 +143,15 @@ fn with_undo(
     let value = match op(session, command) {
         Ok(value) => value,
         Err(error) => {
-            if command.name == APPLY_SHARED_PRESET {
+            if matches!(command.name.as_str(), APPLY_SHARED_PRESET | "flood.vector") {
                 session.document = before;
             }
             return Err(error);
         }
     };
+    if command.name == "flood.vector" && value["changed"] == false {
+        return Ok(value);
+    }
     let after = session.document.clone();
     let mut undo = serde_json::json!({"document": before});
     let mut redo = serde_json::json!({"document": after});
@@ -269,7 +279,7 @@ fn applied_tip_style(session: &Session) -> StrokeStyle {
     if let Some(stroke) = current_tip(session).get("stroke").and_then(|value| parse_stroke(value).ok()) {
         return stroke;
     }
-    let defaults = super::defaults::current();
+    let defaults = super::defaults::for_document(&session.document);
     let paint = session.selection.ids.first().and_then(|id| session.document.get_object(*id))
         .map(|object| &object.stroke.paint).filter(|paint| **paint != Paint::None).cloned()
         .unwrap_or(defaults.stroke.paint);
@@ -324,11 +334,18 @@ fn reflect_point(point: [f64; 2], centre: [f64; 2], axis: f64) -> [f64; 2] {
     rotate_point(flipped, centre, axis)
 }
 
-fn symmetry_copies(points: &[[f64; 2]], spec: &serde_json::Value) -> Vec<Vec<[f64; 2]>> {
-    let count = spec.get("count").and_then(|v| v.as_u64()).unwrap_or(1).max(1) as usize;
-    if count <= 1 {
-        return vec![points.to_vec()];
-    }
+pub fn vector_symmetry(session: &Session) -> serde_json::Value {
+    session.document.export_defaults.get(SYMMETRY_KEY).cloned().unwrap_or_else(|| {
+        let [x, y, width, height] = crate::scene::page_rects(&session.document)
+            .first().copied().unwrap_or([0.0; 4]);
+        serde_json::json!({"count": 1, "centre": [x + width * 0.5, y + height * 0.5], "mirror": false, "lock": false})
+    })
+}
+
+pub fn symmetry_copies(points: &[[f64; 2]], spec: &serde_json::Value) -> Vec<Vec<[f64; 2]>> {
+    let count = spec.get("count").and_then(|v| v.as_u64()).unwrap_or(1).clamp(1, 32) as usize;
+    let mirror = spec.get("mirror").and_then(|v| v.as_bool()).unwrap_or(false);
+    if count == 1 && !mirror { return vec![points.to_vec()]; }
     let centre = spec
         .get("centre")
         .and_then(|v| v.as_array())
@@ -340,7 +357,10 @@ fn symmetry_copies(points: &[[f64; 2]], spec: &serde_json::Value) -> Vec<Vec<[f6
             }
         })
         .unwrap_or([0.0, 0.0]);
-    let mirror = spec.get("mirror").and_then(|v| v.as_bool()).unwrap_or(false);
+    if count == 1 {
+        let reflected = points.iter().map(|point| [centre[0] * 2.0 - point[0], point[1]]).collect();
+        return vec![points.to_vec(), reflected];
+    }
     let mut copies = Vec::with_capacity(count);
     for i in 0..count {
         let angle = (i as f64) * std::f64::consts::TAU / (count as f64);
@@ -353,6 +373,7 @@ fn symmetry_copies(points: &[[f64; 2]], spec: &serde_json::Value) -> Vec<Vec<[f6
     copies
 }
 
+#[cfg(test)]
 fn make_curve_object(points: &[[f64; 2]], closed: bool, fitted: bool, fill: Paint, stroke: StrokeStyle, opacity: f32) -> Object {
     let contour = contour_from_points(points, closed, fitted);
     let (pos, size) = bounds_of(points);
@@ -363,13 +384,14 @@ fn make_curve_object(points: &[[f64; 2]], closed: bool, fitted: bool, fill: Pain
     object.stroke = stroke;
     object.opacity = opacity;
     object.kind = ObjectKind::Curve(Curve {
-        contour,
+        contour: super::curve_edit::offset_contour(&contour, pos.map(|value| -f64::from(value))),
         holes: Vec::new(),
         source_object: None,
     });
     object
 }
 
+#[cfg(test)]
 fn commit_curve(
     session: &mut Session,
     points: &[[f64; 2]],
@@ -578,12 +600,7 @@ fn vector_stroke(session: &mut Session, command: &Command) -> CommandResult {
     let tip = current_tip(session);
     let texture = validate_texture(session, command.params.get("texture").or_else(|| tip.get("texture"))
         .map(parse_texture).transpose()?.flatten())?;
-    let spec = session
-        .document
-        .export_defaults
-        .get(SYMMETRY_KEY)
-        .cloned()
-        .unwrap_or_else(|| serde_json::json!({"count": 1}));
+    let spec = vector_symmetry(session);
     let copies = symmetry_copies(&points, &spec).into_iter().map(|copy| {
         let contour = contour_from_points(&copy, false, true);
         let (pos, size, local) = super::curve_edit::placement(&contour)?;
@@ -596,6 +613,7 @@ fn vector_stroke(session: &mut Session, command: &Command) -> CommandResult {
             kind: ObjectKind::Curve(Curve::from_contour_and_holes(local, Vec::new())),
             ..Object::default()
         };
+        object.effects = super::defaults::effects_for_creation(&session.document, size, &command.params)?;
         let start = copy[0].map(|coordinate| coordinate as f32);
         crate::artboard::edit::assign_new_object(&session.document, &mut object, start);
         Ok(object)
@@ -645,39 +663,6 @@ fn thicken(points: &[[f64; 2]], width: f64) -> Vec<[f64; 2]> {
     }
     left.extend(right.into_iter().rev());
     left
-}
-
-fn point_in_bounds(point: [f64; 2], poly: &[[f64; 2]]) -> bool {
-    let (pos, size) = bounds_of(poly);
-    let min_x = pos[0] as f64;
-    let min_y = pos[1] as f64;
-    let max_x = min_x + size[0] as f64;
-    let max_y = min_y + size[1] as f64;
-    point[0] >= min_x && point[0] <= max_x && point[1] >= min_y && point[1] <= max_y
-}
-
-fn point_in_poly(point: [f64; 2], poly: &[[f64; 2]]) -> bool {
-    if poly.len() < 3 {
-        return false;
-    }
-    let (x, y) = (point[0], point[1]);
-    let mut inside = false;
-    let mut j = poly.len() - 1;
-    for i in 0..poly.len() {
-        let (xi, yi) = (poly[i][0], poly[i][1]);
-        let (xj, yj) = (poly[j][0], poly[j][1]);
-        if (yi > y) != (yj > y) {
-            let denom = yj - yi;
-            if denom != 0.0 {
-                let xint = (xj - xi) * (y - yi) / denom + xi;
-                if x < xint {
-                    inside = !inside;
-                }
-            }
-        }
-        j = i;
-    }
-    inside || point_in_bounds(point, poly)
 }
 
 fn bounds_overlap(a: &[[f64; 2]], b: &[[f64; 2]]) -> bool {
@@ -750,29 +735,16 @@ fn union_rings(rings: &[Vec<[f64; 2]>]) -> Option<Curve> {
         .and_then(|mut curves| curves.pop())
 }
 
-fn commit_blob_curve(session: &mut Session, curve: Curve, fill: Paint) -> ObjectId {
-    let points: Vec<[f64; 2]> = curve.contour.points.iter().map(|point| point.pos).collect();
-    let (pos, size) = if points.is_empty() {
-        ([0.0, 0.0], [0.0, 0.0])
-    } else {
-        bounds_of(&points)
-    };
+fn blob_object(curve: Curve, fill: Paint, stroke: StrokeStyle) -> Result<Object, CommandError> {
     let mut object = Object::default();
-    object.pos = pos;
-    object.size = size;
+    super::path_nodes::reframe(&mut object, curve)?;
     object.fill = fill;
-    object.stroke = StrokeStyle::default();
-    object.opacity = 1.0;
-    object.kind = ObjectKind::Curve(curve);
-    session.document.create_object(object)
+    object.stroke = stroke;
+    Ok(object)
 }
 
 fn contour_points(curve: &Curve) -> Vec<[f64; 2]> {
     curve.contour.points.iter().map(|p| p.pos).collect()
-}
-
-fn same_fill(a: &Paint, b: &Paint) -> bool {
-    a == b
 }
 
 fn erase_requested(command: &Command) -> bool {
@@ -796,18 +768,6 @@ fn selected_target_ids(session: &Session, params: &serde_json::Value) -> Result<
         return Ok(ids);
     }
     Ok(session.selection.ids.clone())
-}
-
-fn contour_to_path(contour: &Contour) -> BezPath {
-    ring_to_path(&contour.points.iter().map(|point| point.pos).collect::<Vec<_>>())
-}
-
-fn curve_to_paths(curve: &Curve) -> Vec<BezPath> {
-    let mut paths = vec![contour_to_path(&curve.contour)];
-    for hole in &curve.holes {
-        paths.push(contour_to_path(hole));
-    }
-    paths
 }
 
 fn ring_centroid(ring: &[[f64; 2]]) -> Option<[f64; 2]> {
@@ -875,18 +835,6 @@ fn is_filled_curve(object: &Object) -> bool {
     object.curve().is_some_and(|curve| curve.contour.closed && curve.contour.points.len() >= 3)
 }
 
-fn apply_curve(object: &mut Object, curve: Curve) {
-    let points = contour_points(&curve);
-    let (pos, size) = if points.is_empty() {
-        ([0.0, 0.0], [0.0, 0.0])
-    } else {
-        bounds_of(&points)
-    };
-    object.pos = pos;
-    object.size = size;
-    object.kind = ObjectKind::Curve(curve);
-}
-
 fn blob_erase(session: &mut Session, command: &Command) -> CommandResult {
     let spine = parse_points(&command.params)?;
     let width = blob_width(command);
@@ -895,7 +843,7 @@ fn blob_erase(session: &mut Session, command: &Command) -> CommandResult {
         return Err(CommandError::invalid_params());
     }
     let ids = selected_target_ids(session, &command.params)?;
-    if session.document.objects.iter().any(|object| ids.contains(&object.id) && object.locked && is_filled_curve(object)) {
+    if session.document.objects.iter().any(|object| ids.contains(&object.id) && session.document.is_object_locked(object) && is_filled_curve(object)) {
         return Err(CommandError::invalid_params());
     }
     let targets: Vec<ObjectId> = session
@@ -908,23 +856,33 @@ fn blob_erase(session: &mut Session, command: &Command) -> CommandResult {
     if targets.is_empty() {
         return Err(CommandError::invalid_params());
     }
-    let cutter_paths = vec![ring_to_path(&cutter)];
-    let mut updates: Vec<(ObjectId, Vec<Curve>)> = Vec::new();
+    let cutter = ring_to_path(&cutter);
+    let mut updates = Vec::new();
     for id in &targets {
         let object = session.document.objects.iter().find(|object| object.id == *id).unwrap();
         let curve = object.curve().unwrap();
+        let (frame, _) = crate::outline::object_outline_transform(object).ok_or_else(CommandError::invalid_params)?;
+        let cutter_paths = [frame.inverse() * &cutter];
+        let paths = [crate::outline::cornered(curve).to_kurbo()];
+        if boolean(&paths, &cutter_paths, BoolOp::Intersect, object.fill_rule, DEFAULT_TOLERANCE)?.is_empty() {
+            continue;
+        }
         let remainders = boolean(
-            &curve_to_paths(curve),
+            &paths,
             &cutter_paths,
             BoolOp::Subtract,
-            FillRule::NonZero,
+            object.fill_rule,
             DEFAULT_TOLERANCE,
         )?;
-        let pieces: Vec<Curve> = remainders
+        let pieces = remainders
             .into_iter()
             .flat_map(split_disjoint_pieces)
             .filter(|curve| curve.contour.points.len() >= 3)
-            .collect();
+            .map(|curve| {
+                let mut piece = object.clone();
+                super::path_nodes::reframe(&mut piece, curve)?;
+                Ok(piece)
+            }).collect::<Result<Vec<_>, CommandError>>()?;
         updates.push((*id, pieces));
     }
     let mut kept = Vec::new();
@@ -938,18 +896,11 @@ fn blob_erase(session: &mut Session, command: &Command) -> CommandResult {
         }
         let mut extra = pieces.into_iter();
         let first = extra.next().unwrap();
-        if let Some(object) = session.document.objects.iter_mut().find(|object| object.id == id) {
-            apply_curve(object, first);
-        }
+        *session.document.find_object_mut(id.0).ok_or_else(CommandError::not_found)? = first;
         kept.push(id.0);
-        let template = session.document.objects.iter().find(|object| object.id == id).cloned();
-        if let Some(template) = template {
-            for piece in extra {
-                let mut object = template.clone();
-                object.id = ObjectId(0);
-                apply_curve(&mut object, piece);
-                created.push(session.document.create_object(object).0);
-            }
+        for mut piece in extra {
+            piece.id = ObjectId(0);
+            created.push(session.document.create_object(piece).0);
         }
     }
     session.selection.ids.retain(|id| session.document.get_object(*id).is_some());
@@ -968,17 +919,36 @@ fn blob_paint(session: &mut Session, command: &Command) -> CommandResult {
     let spine = parse_points(&command.params)?;
     let width = blob_width(command);
     let outline = thicken(&spine, width);
+    let defaults = super::defaults::for_document(&session.document);
+    let stroke = command.params.get("stroke").filter(|value| value.get("paint").is_some())
+        .map(parse_stroke).transpose()?
+        .unwrap_or_else(|| defaults.stroke_for_document(&session.document));
     let fill = command
         .params
         .get("fill")
         .map(parse_paint)
         .transpose()?
-        .unwrap_or_else(Paint::default);
+        .unwrap_or(defaults.fill);
+    let curve = curve_from_ring(&outline).ok_or_else(CommandError::invalid_params)?;
+    let mut fresh = blob_object(curve, fill, stroke)?;
+    let start = spine[0].map(|value| value as f32);
+    crate::artboard::edit::assign_new_object(&session.document, &mut fresh, start);
+    fresh.effects = super::defaults::effects_for_creation(&session.document, fresh.size, &command.params)?;
     let mut candidates: Vec<(ObjectId, Vec<[f64; 2]>)> = Vec::new();
     for object in &session.document.objects {
-        if let Some(curve) = object.curve() {
-            let pts = contour_points(curve);
-            if pts.len() >= 3 && same_fill(&object.fill, &fill) && bounds_overlap(&outline, &pts) {
+        if let Some(curve) = object.curve()
+            && curve.contour.closed && curve.holes.is_empty()
+            && object.parent_id == fresh.parent_id && object.page_id == fresh.page_id
+            && !session.document.is_object_locked(object)
+            && object.opacity == fresh.opacity && object.fill == fresh.fill && object.stroke == fresh.stroke
+            && object.effects == fresh.effects && object.path_brush.is_none()
+            && !super::appearance::has_layers(object)
+        {
+            if let Some((points, _)) = crate::scene::doc_contours(object, &crate::geometry::object_matrix(object))
+                .into_iter().find(|(points, closed)| *closed && points.len() >= 3)
+            {
+                let pts: Vec<_> = points.into_iter().map(|point| point.map(f64::from)).collect();
+                if !bounds_overlap(&outline, &pts) { continue; }
                 candidates.push((object.id, pts));
             }
         }
@@ -1001,12 +971,21 @@ fn blob_paint(session: &mut Session, command: &Command) -> CommandResult {
         }
         remaining = leftover;
     }
-    let id = if let Some(curve) = union_rings(&rings) {
+    let object = if let Some(curve) = union_rings(&rings) {
+        let mut object = blob_object(curve, fresh.fill, fresh.stroke)?;
+        object.parent_id = fresh.parent_id;
+        object.page_id = fresh.page_id;
+        object.effects = super::defaults::effects_for_creation(&session.document, object.size, &command.params)?;
         session.document.objects.retain(|o| !merge_ids.contains(&o.id));
-        commit_blob_curve(session, curve, fill)
+        object
     } else {
-        commit_curve(session, &outline, true, false, fill, StrokeStyle::default(), 1.0)
+        merge_ids.clear();
+        fresh
     };
+    let id = session.document.create_object(object);
+    if command.params["select"] == true {
+        session.selection.set(vec![id], crate::selection::SelectOp::Replace);
+    }
     Ok(serde_json::json!({"id": id.0, "merged": merge_ids.iter().map(|i| i.0).collect::<Vec<_>>()}))
 }
 
@@ -1210,77 +1189,207 @@ fn parse_at(params: &serde_json::Value) -> Result<[f64; 2], CommandError> {
     Err(CommandError::invalid_params())
 }
 
-fn contour_area(points: &[[f64; 2]]) -> f64 {
-    if points.len() < 3 {
-        return 0.0;
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FloodMode {
+    Add,
+    Refill,
+    Replace,
+}
+
+impl FloodMode {
+    fn from_command(command: &Command) -> Self {
+        let value = command.params["mode"].as_str().unwrap_or("add").to_ascii_lowercase();
+        if value.contains("knock") {
+            Self::Replace
+        } else if value.contains("smart") || value.contains("refill") {
+            Self::Refill
+        } else {
+            Self::Add
+        }
     }
-    let mut area = 0.0;
-    let mut j = points.len() - 1;
-    for i in 0..points.len() {
-        area += (points[j][0] + points[i][0]) * (points[j][1] - points[i][1]);
-        j = i;
+
+    fn result(self) -> &'static str {
+        match self {
+            Self::Add => "add",
+            Self::Refill => "smart_refill",
+            Self::Replace => "knockout",
+        }
     }
-    area.abs() * 0.5
 }
 
 fn flood_vector(session: &mut Session, command: &Command) -> CommandResult {
+    let mode = FloodMode::from_command(command);
     let at = parse_at(&command.params)?;
-    let fit = command
-        .params
-        .get("fit")
-        .and_then(|v| v.as_str())
-        .unwrap_or("min")
-        .to_ascii_lowercase();
-    let mode = command
-        .params
-        .get("mode")
-        .and_then(|v| v.as_str())
-        .unwrap_or("add")
-        .to_ascii_lowercase();
-    let fill = command
-        .params
-        .get("fill")
-        .map(parse_paint)
-        .transpose()?
-        .unwrap_or_else(Paint::default);
-    let mut candidates: Vec<(ObjectId, Vec<[f64; 2]>, f64)> = Vec::new();
-    for object in &session.document.objects {
-        let Some(curve) = object.curve() else { continue };
-        if !curve.contour.closed {
-            continue;
+    let defaults = super::defaults::for_document(&session.document);
+    let fill = command.params.get("fill").map(parse_paint).transpose()?.unwrap_or_else(|| defaults.fill.clone());
+    // Explicit insertion creates a separate layer. The normal Add path stacks
+    // translucent paint on an existing face while keeping solid Add behavior.
+    let stack = mode != FloodMode::Add || (command.params["visible_boundaries"] == true
+        && command.params["insert"].as_str().unwrap_or("top") == "top"
+        && ((!matches!(fill, Paint::None) && !matches!(&fill, Paint::Solid { colour } if colour.a == 255))
+            || (command.params.get("fill").is_none()
+                && session.tool_options.choice(crate::context_toolbar::VECTOR_FLOOD, crate::context_toolbar::VECTOR_FLOOD_BITMAP)
+                    .is_some_and(|path| !path.is_empty()))));
+    let visible = command.params["visible_boundaries"] == true;
+    let (source, curve) = if visible {
+        let crate::boolean::VisibleFloodRegion { curve, replacements } =
+            crate::boolean::visible_boundary_region(session, at, mode == FloodMode::Replace)?
+                .ok_or_else(CommandError::not_found)?;
+        let object = match mode {
+            FloodMode::Replace => crate::boolean::flood_replace_container(session, at),
+            _ if stack => crate::boolean::flood_container(session, at),
+            _ => None,
+        };
+        let id = object.map(|object| object.id);
+        if !replacements.is_empty() {
+            return flood_replace::apply_connected(session, command, id, curve, replacements, fill);
         }
-        let pts = contour_points(curve);
-        if pts.len() >= 3 && point_in_poly(at, &pts) {
-            candidates.push((object.id, pts, contour_area(&contour_points(curve))));
-        }
-    }
-    if candidates.is_empty() {
-        return Err(CommandError::new("NOT_FOUND"));
-    }
-    candidates.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap());
-    let chosen = if fit.contains("max") {
-        candidates.last().unwrap().clone()
-    } else {
-        candidates.first().unwrap().clone()
-    };
-    if mode.contains("smart") || mode.contains("refill") {
-        if let Some(existing) = session.document.objects.iter_mut().find(|o| o.id == chosen.0) {
-            existing.fill = fill;
-            return Ok(serde_json::json!({"id": chosen.0.0, "mode": "smart_refill"}));
-        }
-    }
-    if mode.contains("knock") {
-        if let Some(existing) = session.document.objects.iter_mut().find(|o| o.id == chosen.0) {
-            if let Some(curve) = existing.curve_mut() {
-                curve.holes.push(contour_from_points(&chosen.1, true, false));
-                return Ok(serde_json::json!({"id": chosen.0.0, "mode": "knockout"}));
+        if let Some(object) = object
+            && !crate::boolean::flood_region_matches(&session.document, object, &curve)
+        {
+            if mode == FloodMode::Replace
+                && super::appearance::visible_fills(object, &object.fill).any(|paint| !matches!(paint, Paint::None))
+                && let Some(mask) = crate::boolean::flood_remainder_mask(&session.document, object, &curve)?
+            {
+                return flood_replace::apply_partial(session, command, object.id, curve, mask, fill);
             }
+            (None, curve)
+        } else {
+            (id, curve)
         }
+    } else {
+        let largest = command.params["fit"].as_str().is_some_and(|value| value.eq_ignore_ascii_case("max"));
+        let (id, curve) = crate::boolean::closed_flood_region(session, at, largest).ok_or_else(CommandError::not_found)?;
+        (Some(id), curve)
+    };
+
+    if stack && let Some(object) = source.and_then(|id| session.document.get_object(id)) {
+        return apply_flood_to_existing(session, command, object.id, fill, mode);
     }
-    let id = commit_curve(session, &chosen.1, true, false, fill, StrokeStyle::default(), 1.0);
-    Ok(serde_json::json!({"id": id.0, "mode": "add", "source": chosen.0.0}))
+
+    let stroke = command.params.get("stroke").map(parse_stroke).transpose()?
+        .unwrap_or_else(|| defaults.stroke_for_document(&session.document));
+    let mut result = insert_flood_region(session, command, at, curve, fill, stroke, source)?;
+    result["mode"] = serde_json::json!(mode.result());
+    Ok(result)
 }
 
+fn apply_flood_to_existing(session: &mut Session, command: &Command, id: ObjectId, fallback: Paint, mode: FloodMode) -> CommandResult {
+    use super::appearance::{AppearanceSlots, Kind};
+
+    let existing = session.document.get_object(id).ok_or_else(CommandError::not_found)?;
+    if session.document.is_object_locked(existing) {
+        return Err(CommandError::new("CANNOT_EXECUTE"));
+    }
+    let mut appearance = existing.appearance();
+    let previous = appearance.clone();
+    let fill = flood_fill_paint(session, command, fallback, existing.size)?;
+    if mode == FloodMode::Refill && appearance.fills.iter().enumerate().any(|(index, paint)| {
+        let slot = super::appearance::PaintSlot { kind: Kind::Fill, index };
+        appearance.hidden.is_visible(slot) && appearance.blends.get(slot).is_normal() && *paint == fill
+    }) {
+        return Ok(serde_json::json!({"id": id.0, "mode": mode.result(), "changed": false}));
+    }
+
+    let replace = mode == FloodMode::Replace || matches!(&fill, Paint::Solid { colour } if colour.a == 255)
+        || fill == Paint::None || appearance.fills.as_slice() == [Paint::None];
+    if replace {
+        appearance.replace_fill_stack(fill)?;
+    } else {
+        appearance.add_fill(fill);
+    }
+    let changed = appearance != previous;
+    if changed {
+        let object = session.document.find_object_mut(id.0).ok_or_else(CommandError::not_found)?;
+        object.set_appearance(&appearance)?;
+        if command.params["select"] == true {
+            session.selection.set(vec![id], crate::selection::SelectOp::Replace);
+        }
+    }
+    Ok(serde_json::json!({"id": id.0, "mode": mode.result(), "changed": changed}))
+}
+
+fn insert_flood_region(session: &mut Session, command: &Command, at: [f64; 2], curve: Curve, fill: Paint, stroke: StrokeStyle, source: Option<ObjectId>) -> CommandResult {
+    let mut object = blob_object(curve, Paint::None, stroke)?;
+    object.effects = super::defaults::effects_for_creation(&session.document, object.size, &command.params)?;
+    crate::artboard::edit::assign_new_object(&session.document, &mut object, at.map(|coordinate| coordinate as f32));
+    let insertion = command.params.get("insert").and_then(|value| value.as_str()).unwrap_or("top");
+    let upper = match insertion {
+        "inside" | "between" => crate::boolean::flood_container(session, at),
+        "top" => None,
+        _ => return Err(CommandError::invalid_params()),
+    };
+    let mut before = None;
+    if let Some(upper) = upper {
+        if insertion == "inside" {
+            if session.document.is_object_locked(upper) { return Err(CommandError::new("LOCKED")); }
+            object.parent_id = Some(upper.id);
+            object.clip_role = crate::object::ClipRole::Clip;
+        } else {
+            object.parent_id = upper.parent_id;
+            if let Some(parent) = object.parent_id.and_then(|id| session.document.get_object(id))
+                && session.document.is_object_locked(parent) { return Err(CommandError::new("LOCKED")); }
+            object.clip_role = upper.clip_role;
+            before = session.document.objects.iter().position(|item| item.id == upper.id);
+        }
+        object.page_id = upper.page_id.or(object.page_id);
+    }
+    object.fill = flood_fill_paint(session, command, fill, object.size)?;
+    let id = session.document.create_object(object);
+    if let Some(index) = before {
+        let inserted = session.document.objects.pop().expect("new flood region");
+        session.document.objects.insert(index, inserted);
+    }
+    if command.params["select"] == true {
+        session.selection.set(vec![id], crate::selection::SelectOp::Replace);
+    }
+    Ok(serde_json::json!({"id": id.0, "mode": "add", "source": source.map(|id| id.0)}))
+}
+
+
+fn flood_fill_paint(session: &mut Session, command: &Command, mut fallback: Paint, size: [f32; 2]) -> Result<Paint, CommandError> {
+    use crate::context_toolbar::{VECTOR_FLOOD, VECTOR_FLOOD_BITMAP, VECTOR_FLOOD_BITMAP_FIT, VECTOR_FLOOD_GRADIENT_FIT};
+
+    // Explicit paint geometry already describes the requested object-local coordinates.
+    if command.params.get("fill").is_some() {
+        return Ok(fallback);
+    }
+    let size = size.map(|side| f64::from(side.abs()));
+    let Some(path) = session.tool_options.choice(VECTOR_FLOOD, VECTOR_FLOOD_BITMAP).filter(|path| !path.is_empty()) else {
+        if let Paint::Gradient { kind, geom, .. } = &mut fallback {
+            let fit = session.tool_options.choice(VECTOR_FLOOD, VECTOR_FLOOD_GRADIENT_FIT);
+            flood_gradient::fit_gradient(kind, geom, size, fit.as_deref().unwrap_or("none"));
+        }
+        return Ok(fallback);
+    };
+    let decoded = super::image_place::decode_path(std::path::Path::new(&path))?;
+    let image = super::image_place::embedded_bitmap(decoded)?;
+    let [width, height] = image.pixel_size.map(f64::from);
+    let [w, h] = size;
+    let scale_x = w / width;
+    let scale_y = h / height;
+    let fit = session.tool_options.choice(VECTOR_FLOOD, VECTOR_FLOOD_BITMAP_FIT);
+    let [sx, sy] = match fit.as_deref().unwrap_or("max") {
+        "min" => [scale_x.min(scale_y); 2],
+        "stretch" => [scale_x, scale_y],
+        "none" => {
+            let unit = crate::units::units_per_point(session.document.units, session.document.dpi);
+            let [native_width, native_height] = image.native_size_pt().map(|side| f64::from(side * unit));
+            [native_width / width, native_height / height]
+        }
+        _ => [scale_x.max(scale_y); 2],
+    };
+    if ![sx, sy].iter().all(|scale| scale.is_finite() && *scale > 0.0) {
+        return Err(CommandError::invalid_params());
+    }
+    let resource = crate::path_brush::import_snapshot(&mut session.document, &image);
+    Ok(Paint::Bitmap(crate::paint::BitmapPaint {
+        resource_id: resource.0.to_string(),
+        matrix: [sx, 0.0, 0.0, sy, (w - width * sx) * 0.5, (h - height * sy) * 0.5],
+        seed: None,
+        single_image: true,
+    }))
+}
 
 #[cfg(test)]
 mod tests {
@@ -1383,7 +1492,8 @@ mod tests {
             .objects
             .iter()
             .filter(|object| object.is_curve() && object.curve().unwrap().contour.closed)
-            .map(|object| contour_points(object.curve().unwrap()))
+            .filter_map(super::super::curve_edit::world_contour)
+            .map(|contour| contour.points.into_iter().map(|point| point.pos).collect())
             .collect()
     }
 
@@ -1601,9 +1711,9 @@ mod tests {
         session
             .document
             .get_object(id)
-            .and_then(Object::curve)
-            .filter(|curve| curve.contour.closed)
-            .map(contour_points)
+            .and_then(super::super::curve_edit::world_contour)
+            .filter(|contour| contour.closed)
+            .map(|contour| contour.points.into_iter().map(|point| point.pos).collect())
     }
 
     #[test]

@@ -578,7 +578,7 @@ impl FillStrokeWells {
         let mut updates = Vec::new();
         for id in ids {
             let Some(object) = document.get_object(*id) else { return Vec::new(); };
-            if object.locked { continue; }
+            if document.is_object_locked(object) { continue; }
             let original = if role == PaintRole::Edge { &object.stroke.paint } else { &object.fill };
             let mut paint = paint.clone();
             if let Paint::Gradient { geom, .. } = &mut paint

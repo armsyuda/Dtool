@@ -43,6 +43,7 @@ fn merged_document() -> (Document, dtool_core::ObjectId) {
         format: None,
         frame_local: TableFrameFormat::default(),
         frame_mask: FrameFormatMask::default(),
+        text_defaults: None,
     };
     let id = doc.create_object(Object { kind: ObjectKind::Table(table), size: [90.0, 25.0], ..Object::default() });
     (doc, id)

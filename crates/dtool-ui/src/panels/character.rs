@@ -83,6 +83,7 @@ pub fn active_range(session: &Session) -> Option<(u64, usize, usize)> {
 
 pub fn selection_at(session: &Session, story: u64, start: usize, end: usize) -> Option<CharSelection> {
     let found = session.document.stories.iter().find(|s| s.id.0 == story)?;
+    let found = dtool_core::table::resolve::effective_story(&session.document, found);
     let (low, high) = if start < end { (start, end) } else { (start.saturating_sub(1), start.max(1)) };
     let segments = if found.text.is_empty() {
         let style = found.ranges.iter().rev().find(|range| range.get("frame").is_none()).and_then(Value::as_object).cloned().unwrap_or_default();
@@ -91,6 +92,43 @@ pub fn selection_at(session: &Session, story: u64, start: usize, end: usize) -> 
         segments(&found.ranges, low, high)
     };
     Some(CharSelection { story, start, end, segments })
+}
+
+pub(crate) fn table_colour_ranges(session: &Session) -> Vec<CharSelection> {
+    if let Some(edit) = &session.text_edit {
+        let selection = dtool_core::table::selection::for_format(session);
+        let table = selection.table.and_then(|id| session.document.get_object(id));
+        if !table.is_some_and(|object| !object.locked && matches!(&object.kind,
+            dtool_core::ObjectKind::Table(table) if table.cells.iter().any(|cell| cell.story == edit.story))) {
+            return Vec::new();
+        }
+        let Some((story, mut start, mut end)) = active_range(session) else { return Vec::new(); };
+        if start == end {
+            let Some(found) = session.document.stories.iter().find(|item| item.id.0 == story) else { return Vec::new(); };
+            start = 0;
+            end = found.text.chars().count();
+        }
+        return selection_at(session, story, start, end).into_iter().collect();
+    }
+    session.selected_table_stories().into_iter().filter_map(|id| {
+        let story = session.document.stories.iter().find(|story| story.id == id)?;
+        selection_at(session, id.0, 0, story.text.chars().count())
+    }).collect()
+}
+
+pub(crate) fn table_text_paint(ranges: &[CharSelection]) -> crate::fill_stroke::WellState {
+    let mut paints = ranges.iter().flat_map(|range| range.segments.iter()).map(|segment| {
+        segment.style.get("fill").and_then(dtool_core::paint::paint_from_legacy_value)
+            .unwrap_or(dtool_core::paint::Paint::Solid { colour: dtool_core::paint::Colour::new(0, 0, 0, 255) })
+    });
+    let Some(first) = paints.next() else { return crate::fill_stroke::WellState::None; };
+    if paints.all(|paint| paint == first) { crate::fill_stroke::WellState::Single(first) }
+    else { crate::fill_stroke::WellState::Mixed }
+}
+
+pub(crate) fn table_text_colour_command(ranges: &[CharSelection], paint: &dtool_core::paint::Paint) -> Option<Command> {
+    let value = dtool_core::paint::paint_to_json_value(paint);
+    batched(ranges.iter().filter_map(|range| range.set("fill", value.clone())).collect())
 }
 
 pub fn read_selection(session: &Session) -> Option<CharSelection> {

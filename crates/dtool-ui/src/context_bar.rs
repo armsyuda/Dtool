@@ -119,7 +119,9 @@ impl ContextBarModel {
             .and_then(Value::as_array)
             .map(|options| {
                 options.iter().filter_map(parse_item).filter(|item| {
-                    !matches!(item.id.as_str(), "fill.context_fill" | "fill.fill_type" | "fill.pigment_blend")
+                    tool.as_deref() == Some(dtool_core::commands::fill::TOOL)
+                        || !matches!(item.id.as_str(), "fill.context_fill" | "fill.fill_type" | "fill.pigment_blend"
+                            | dtool_core::context_toolbar::BRUSH_FOREGROUND)
                 }).collect()
             })
             .unwrap_or_default();
@@ -390,6 +392,7 @@ fn show_item_with_icons(ui: &mut egui::Ui, item: &ContextItem, icons: &mut IconC
             "view.zoom.fit" => Some("ctx-zoom-fit"),
             "view.zoom.actual" => Some("ctx-zoom-actual"),
             "path.close" => Some("ctx-close-curve"),
+            dtool_core::commands::pixel_brush::global_source::ADD => Some("edit-duplicate"),
             _ => align::action_icon(command),
         };
         if let Some(icon) = icon {
@@ -470,7 +473,8 @@ fn show_control(ui: &mut egui::Ui, item: &ContextItem) -> Option<ContextEdit> {
                 return edit(json!(value));
             }
         }
-        ContextControl::Number { value, min, max, step, integer, default } if is_shape_recipe_item(item) => {
+        ContextControl::Number { value, min, max, step, integer, default }
+            if is_shape_recipe_item(item) || item.id == dtool_core::context_toolbar::ADJUSTMENT_AMOUNT => {
             use dtool_design::{NumericEvent, NumericSpec, NumericValue};
             let id = ui.make_persistent_id(&item.id);
             let mut spec = NumericSpec::new(label).range(*min..=*max).step(*step)
@@ -502,6 +506,12 @@ fn show_control(ui: &mut egui::Ui, item: &ContextItem) -> Option<ContextEdit> {
             }
             let mut value = *value;
             let caption = ui.label(label).id;
+            if item.id == dtool_core::commands::blemish::WIDTH {
+                let field = egui::DragValue::new(&mut value).range(*min..=*max).speed(*step)
+                    .fixed_decimals(0).suffix(" px");
+                let response = ui.add(field).labelled_by(caption).on_hover_text(text("blemish.width.tooltip"));
+                return response.changed().then(|| ContextEdit { id: item.id.clone(), value: json!(value) });
+            }
             if item.id == dtool_core::context_toolbar::SHAPE_CORNER_RADIUS {
                 use dtool_design::{NumericEvent, NumericSpec, NumericValue};
                 let id = ui.make_persistent_id(&item.id);
@@ -516,10 +526,13 @@ fn show_control(ui: &mut egui::Ui, item: &ContextItem) -> Option<ContextEdit> {
                 };
             }
             let field = egui::DragValue::new(&mut value).range(*min..=*max).speed(*step);
-            let field = if item.id == "wand.tolerance" {
+            let field = if item.id == dtool_core::context_toolbar::CLONE_ROTATION {
+                field.suffix("°")
+            } else if matches!(item.id.as_str(), "wand.tolerance" | dtool_core::context_toolbar::CLONE_SCALE) {
                 field.suffix("%")
             } else if matches!(item.id.as_str(), "shape.stroke_width" | "pen.stroke_width")
                 || (item.id == "brush.width" && item.key == "context.vector_brush.width")
+                || item.id == dtool_core::context_toolbar::BLOB_WIDTH
             {
                 field.suffix(" pt").max_decimals(2).clamp_existing_to_range(false).update_while_editing(false)
             } else {
@@ -535,6 +548,17 @@ fn show_control(ui: &mut egui::Ui, item: &ContextItem) -> Option<ContextEdit> {
                 return edit(json!(value));
             }
         }
+        ContextControl::Choice { value, values } if item.id == dtool_core::context_toolbar::VECTOR_FLOOD_GRADIENT_FIT => {
+            ui.label(label);
+            let mut current = value.as_str();
+            for choice in values {
+                let caption = choice_label(&item.key, choice);
+                dtool_design::choice_value(ui, &mut current, choice.as_str(), caption);
+            }
+            if current != value {
+                return edit(json!(current));
+            }
+        }
         ContextControl::Choice { value, values } => {
             ui.label(label);
             let labels: Vec<String> = values.iter().map(|choice| choice_label(&item.key, choice)).collect();
@@ -543,6 +567,32 @@ fn show_control(ui: &mut egui::Ui, item: &ContextItem) -> Option<ContextEdit> {
             let response = dtool_design::dropdown_value(ui, &format!("context_bar.{}", item.id), &mut current, &options, &dtool_design::ControlState::default());
             if response.changed() && current != *value {
                 return edit(json!(current));
+            }
+        }
+        ContextControl::Text(value) if item.id == dtool_core::context_toolbar::BRUSH_FOREGROUND => {
+            let Some(dtool_core::paint::Paint::Solid { colour }) = dtool_core::paint::paint_from_legacy_str(value) else {
+                return None;
+            };
+            let mut rgba = [colour.r, colour.g, colour.b, colour.a];
+            ui.label(label);
+            if crate::tools::fill_tool_bar::colour_editor(ui, &mut rgba, "area-fill-colour") {
+                let [r, g, b, a] = rgba;
+                return edit(json!(format!("#{r:02X}{g:02X}{b:02X}{a:02X}")));
+            }
+        }
+        ContextControl::Text(value) if item.id == dtool_core::context_toolbar::VECTOR_FLOOD_BITMAP => {
+            let choose = dtool_design::tooltip(dtool_design::button(ui, label), text("ctx.gradient.bitmap.open"));
+            if choose.clicked() {
+                return edit(Value::Null);
+            }
+            if !value.is_empty() {
+                let filename = std::path::Path::new(value).file_name().and_then(|name| name.to_str()).unwrap_or(value);
+                let filename_label = ui.add_sized([96.0, ui.spacing().interact_size.y], egui::Label::new(filename).truncate());
+                dtool_design::tooltip(filename_label, value);
+                let clear = text("context.vector_flood.bitmap.clear");
+                if dtool_design::button(ui, clear).clicked() {
+                    return edit(json!(""));
+                }
             }
         }
         ContextControl::Text(value) => {
@@ -567,7 +617,12 @@ fn show_control(ui: &mut egui::Ui, item: &ContextItem) -> Option<ContextEdit> {
             }
         }
         ContextControl::Action { command } => {
-            let response = dtool_design::tooltip(dtool_design::button(ui, label), label);
+            let tip = if command == dtool_core::commands::pixel_brush::PREPARE_PHOTO {
+                text("pixel.retouch.prepare.tooltip")
+            } else {
+                label
+            };
+            let response = dtool_design::tooltip(dtool_design::button(ui, label), tip);
             if response.clicked() {
                 remember_alignment_origin(ui, &response, command);
                 return edit(Value::Null);
@@ -608,7 +663,9 @@ pub(crate) fn show_bound_with_icons(ui: &mut egui::Ui, model: &ContextBarModel, 
 }
 
 fn starts_option_group(item: &ContextItem) -> bool {
-    matches!(item.id.as_str(), "move.align" | "move.convert_to_curves" | "shape.convert_to_curves" | "zoom.level" | "zoom.in")
+    matches!(item.id.as_str(), "move.align" | "move.convert_to_curves" | "shape.convert_to_curves"
+        | "zoom.level" | "zoom.in" | "stroke_width.snap_ends" | "stroke_width.reset"
+        | dtool_core::context_toolbar::CLONE_ROTATION)
 }
 
 pub(crate) fn show_vector_brush_tip(ui: &mut egui::Ui, session: &Session) -> Option<Command> {
@@ -643,6 +700,47 @@ pub(crate) fn show_vector_brush_tip(ui: &mut egui::Ui, session: &Session) -> Opt
         }
     });
     tip.map(|tip| Command::with_params("brush.vector.tip.apply", json!({"tip": tip})))
+}
+
+pub(crate) fn show_vector_symmetry(ui: &mut egui::Ui, session: &Session) -> Option<Command> {
+    use dtool_design::{NumericEvent, NumericSpec, NumericValue, numeric_field};
+
+    let mut settings = dtool_core::commands::brush::vector_symmetry(session);
+    let mut changed = false;
+    ui.menu_button(text("brush.symmetry"), |ui| {
+        let spec = NumericSpec::new(text("context.vector_symmetry.count"))
+            .range(1.0..=32.0).decimals(0).width(64.0);
+        let count = settings["count"].as_f64().unwrap_or(1.0);
+        if let (_, NumericEvent::Commit(value)) = numeric_field(
+            ui, ui.id().with("vector_symmetry_count"), NumericValue::Value(count), &spec,
+        ) {
+            settings["count"] = json!(value.round() as u32);
+            changed = true;
+        }
+        let mut mirror = settings["mirror"].as_bool().unwrap_or(false);
+        if dtool_design::toggle(ui, &mut mirror, text("brush.mirror")).changed() {
+            settings["mirror"] = json!(mirror);
+            changed = true;
+        }
+        ui.separator();
+        let mut locked = settings["lock"].as_bool().unwrap_or(false);
+        if dtool_design::toggle(ui, &mut locked, text("brush.symmetry_lock")).changed() {
+            settings["lock"] = json!(locked);
+            changed = true;
+        }
+        let mut centre: [f64; 2] = serde_json::from_value(settings["centre"].clone()).unwrap_or_default();
+        for (axis, key) in ["context.vector_symmetry.x", "context.vector_symmetry.y"].into_iter().enumerate() {
+            let spec = NumericSpec::new(text(key)).width(74.0).enabled(!locked);
+            if let (_, NumericEvent::Commit(value)) = numeric_field(
+                ui, ui.id().with(key), NumericValue::Value(centre[axis]), &spec,
+            ) {
+                centre[axis] = value;
+                settings["centre"] = json!(centre);
+                changed = true;
+            }
+        }
+    });
+    changed.then(|| Command::with_params("symmetry.set", settings))
 }
 
 pub(crate) const MORE_WIDTH: f32 = 28.0;

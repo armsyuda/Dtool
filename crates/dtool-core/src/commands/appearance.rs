@@ -43,10 +43,24 @@ pub fn vector_paths(doc: &crate::Document, object: &Object, primary_fill: &Paint
 pub fn vector_paths_with_tolerance(doc: &crate::Document, object: &Object, primary_fill: &Paint,
     native_strokes: bool, tolerance: f64,
 ) -> Option<Vec<AppearancePath>> {
+    build_vector_paths(Some(doc), object, primary_fill, native_strokes, tolerance)
+}
+
+pub(crate) fn unwarped_vector_ink_bounds(object: &Object) -> Option<kurbo::Rect> {
+    use kurbo::Shape as _;
+    build_vector_paths(None, object, &object.fill, false, crate::outline::OUTLINE_TOLERANCE)?
+        .into_iter().filter(|row| !row.path.elements().is_empty()).map(|row| row.path.bounding_box())
+        .reduce(|a, b| a.union(b))
+}
+
+fn build_vector_paths(doc: Option<&crate::Document>, object: &Object, primary_fill: &Paint,
+    native_strokes: bool, tolerance: f64,
+) -> Option<Vec<AppearancePath>> {
     let world = crate::outline::object_outline_world_with_tolerance(object, tolerance)?;
     let [x, y] = object.pos.map(f64::from);
     let matrix = kurbo::Affine::new(crate::geometry::object_matrix(object).map(f64::from)) * kurbo::Affine::translate((x, y));
-    let world = crate::commands::warp::live_warp_outline_with_tolerance(doc, object.id, &world, tolerance).unwrap_or(world);
+    let world = doc.and_then(|doc| crate::commands::warp::live_warp_outline_with_tolerance(doc, object.id, &world, tolerance))
+        .unwrap_or(world);
     let stroke_tolerance = tolerance.min(crate::boolean::DEFAULT_TOLERANCE);
     let mut closed = kurbo::BezPath::new();
     let mut start = 0;
@@ -58,7 +72,7 @@ pub fn vector_paths_with_tolerance(doc: &crate::Document, object: &Object, prima
         }
     }
     let mapped = |paint: &Paint| match paint {
-        Paint::Gradient { kind, stops, geom } => Paint::Gradient { kind: *kind, stops: stops.clone(), geom: geom.transform(matrix.as_coeffs()) },
+        Paint::Gradient { kind, stops, geom } => Paint::Gradient { kind: *kind, stops: stops.clone(), geom: geom.transform_for_kind(*kind, matrix.as_coeffs()) },
         Paint::Bitmap(bitmap) => Paint::Bitmap(crate::paint::BitmapPaint {
             matrix: (matrix * kurbo::Affine::new(bitmap.matrix)).as_coeffs(),
             ..bitmap.clone()
@@ -274,7 +288,7 @@ impl Focus {
     pub fn active(self, session: &Session) -> bool {
         session.selection.ids.as_slice() == [self.node]
             && self.generation == session.generation
-            && session.document.get_object(self.node).is_some_and(|object| !object.locked && self.slot.paint(object).is_some())
+            && session.document.get_object(self.node).is_some_and(|object| !session.document.is_object_locked(object) && self.slot.paint(object).is_some())
     }
 }
 
@@ -346,6 +360,20 @@ impl AppearanceList {
         self.fills.push(paint);
         self.append_slot(Kind::Fill);
         self.fills.len() - 1
+    }
+
+    pub(crate) fn replace_fill_stack(&mut self, paint: Paint) -> Result<(), CommandError> {
+        if self.fills.is_empty() {
+            self.add_fill(paint);
+        } else {
+            for index in (1..self.fills.len()).rev() {
+                self.remove(Kind::Fill, index)?;
+            }
+            self.fills[0] = paint;
+            self.hidden.fills.remove(&0);
+            self.blends.fills.remove(&0);
+        }
+        Ok(())
     }
 
     pub fn add_stroke(&mut self, stroke: StrokeStyle) -> usize {
@@ -570,7 +598,7 @@ pub fn can_execute(session: &Session, cmd: &Command) -> Option<bool> {
         return None;
     }
     Some(session.has_document && (cmd.name == "appearance.focus" && cmd.params["clear"] == true
-        || node_param(cmd).is_ok_and(|id| session.document.objects.iter().any(|object| object.id.0 == id))))
+        || node_param(cmd).is_ok_and(|id| session.document.get_object(crate::ObjectId(id)).is_some_and(|object| cmd.name == "appearance.query" || !session.document.is_object_locked(object)))))
 }
 
 pub fn run(session: &mut Session, cmd: &Command) -> Option<CommandResult> {
@@ -587,7 +615,7 @@ pub fn run(session: &mut Session, cmd: &Command) -> Option<CommandResult> {
         if cmd.name == "appearance.query" {
             return Ok(query_json(node_id, &old.appearance(), old.paint_order));
         }
-        if old.locked { return Err(CommandError::invalid_params()); }
+        if session.document.is_object_locked(&old) { return Err(CommandError::invalid_params()); }
         if cmd.name == "appearance.focus" {
             let slot = PaintSlot { kind: kind_param(cmd)?, index: index_param(cmd, "index")? };
             if !supports_multiple(&old) || slot.paint(&old).is_none()
@@ -654,7 +682,9 @@ pub fn apply(session: &mut Session, cmd: &Command) -> Option<Result<(), CommandE
     }
     Some((|| {
         let node_id = node_param(cmd)?;
-        let obj = session.document.objects.iter_mut().find(|o| o.id.0 == node_id).ok_or_else(CommandError::not_found)?;
+        let object = session.document.get_object(crate::ObjectId(node_id)).ok_or_else(CommandError::not_found)?;
+        if session.document.is_object_locked(object) { return Err(CommandError::invalid_params()); }
+        let obj = session.document.find_object_mut(node_id).ok_or_else(CommandError::not_found)?;
         let mut list = obj.appearance();
         if cmd.name == "appearance.move" {
             list.move_slot(obj.paint_order, index_param(cmd, "from")?, index_param(cmd, "to")?)?;

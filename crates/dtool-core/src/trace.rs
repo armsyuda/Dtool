@@ -1,15 +1,17 @@
 use crate::raster_view::RasterView;
-use kurbo::{BezPath, CurveFitSample, ParamCurveFit, Point, Vec2};
+use kurbo::{BezPath, Point, Vec2};
+
+mod trace_analysis;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet, VecDeque};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all="snake_case")]
-pub enum TraceMode { Color, Grayscale, BlackWhite }
+pub enum TraceMode { Color, Grayscale, BlackWhite, FlatLogo }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all="snake_case")]
-pub enum PaletteKind { Automatic, Limited(u8), FullTone }
+pub enum PaletteKind { Automatic, Limited(u16), FullTone, Document(u16) }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all="snake_case")]
@@ -29,20 +31,47 @@ pub struct TraceSettings {
     pub strokes:bool,
     pub stroke_max_width:f32,
     pub ignore_white:bool,
+    pub ignore_color: Option<[u8; 3]>,
+    pub snap_lines: bool,
+    pub color_detail: u8,
+    pub library: Vec<[u8; 3]>,
+    pub recognize_shapes: bool,
+    pub auto_group: bool,
+    pub gradients: bool,
 }
 
 impl Default for TraceSettings {
-    fn default()->Self { Self { mode:TraceMode::BlackWhite,palette:PaletteKind::Automatic,threshold:128,tolerance:1.0,min_area_px:4,corner_angle:60.0,method:TraceMethod::Abutting,fills:true,strokes:false,stroke_max_width:10.0,ignore_white:false } }
+    fn default()->Self { Self { mode:TraceMode::BlackWhite,palette:PaletteKind::Automatic,threshold:128,tolerance:1.0,min_area_px:4,corner_angle:60.0,method:TraceMethod::Abutting,fills:true,strokes:false,stroke_max_width:10.0,ignore_white:false,ignore_color:None,snap_lines:false,color_detail:100,library:Vec::new(),recognize_shapes:false,auto_group:false,gradients:false } }
 }
 
 #[derive(Debug, Clone)]
-pub struct TracedPath { pub path:BezPath,pub fill:Option<[u8;4]>,pub stroke:Option<([u8;4],f32)> }
+pub struct TracedPath {
+    pub path: BezPath,
+    pub fill: Option<[u8; 4]>,
+    pub stroke: Option<([u8; 4], f32)>,
+    pub shape: Option<crate::shape::ShapeKind>,
+    gradient: Option<trace_analysis::LinearGradient>,
+}
+
+impl TracedPath {
+    pub fn fill_paint(&self, scale: [f64; 2]) -> crate::paint::Paint {
+        self.gradient.as_ref().map(|gradient| gradient.paint(scale)).or_else(|| self.fill.map(|[r, g, b, a]| {
+            crate::paint::Paint::Solid { colour: crate::paint::Colour::new(r, g, b, a) }
+        })).unwrap_or(crate::paint::Paint::None)
+    }
+
+    pub fn colors(&self) -> impl Iterator<Item = [u8; 4]> {
+        self.fill.into_iter().chain(self.gradient.iter().flat_map(|gradient| gradient.colors))
+            .chain(self.stroke.map(|(color, _)| color))
+    }
+}
 
 pub fn validate_settings(settings:&TraceSettings)->bool {
     settings.tolerance.is_finite() && settings.tolerance>=0.0
         && settings.corner_angle.is_finite() && settings.corner_angle>0.0 && settings.corner_angle<=180.0
         && settings.stroke_max_width.is_finite() && settings.stroke_max_width>0.0
-        && !matches!(settings.palette,PaletteKind::Limited(n) if !(2..=30).contains(&n))
+        && settings.color_detail <= 100
+        && !matches!(settings.palette,PaletteKind::Limited(n) | PaletteKind::Document(n) if !(2..=256).contains(&n))
 }
 
 type Vertex=(u32,u32);
@@ -113,7 +142,13 @@ fn simplify_open(points:&[Point],tolerance:f64)->Vec<Point> {
     if points.len()<3 {return points.to_vec();}
     let mut keep=vec![false;points.len()];keep[0]=true;keep[points.len()-1]=true;
     let mut stack=vec![(0,points.len()-1)];
+    let mut comparison_budget = points.len().saturating_mul(32);
     while let Some((start,end))=stack.pop() {
+        if end - start > comparison_budget {
+            keep[start..=end].fill(true);
+            continue;
+        }
+        comparison_budget -= end - start;
         let farthest=(start+1..end).map(|at|(at,segment_distance(points[at],points[start],points[end]))).max_by(|a,b|a.1.total_cmp(&b.1));
         if let Some((at,distance))=farthest {if distance>tolerance {keep[at]=true;stack.push((start,at));stack.push((at,end));}}
     }
@@ -128,47 +163,51 @@ fn simplify_closed(points:&[Point],tolerance:f64)->Vec<Point> {
     if first.len()<3 || area(&first)*area(points)<=0.0 {points.to_vec()} else {first}
 }
 
-struct Polyline {points:Vec<Point>,lengths:Vec<f64>,corners:Vec<f64>}
+fn append_fitted(path: &mut BezPath, points: &[Point], settings: &TraceSettings) {
+    if points.len() < 3 { return; }
+    let tolerance = (f64::from(settings.tolerance) * 0.5).max(0.05);
+    let points = simplify_closed(points, tolerance);
+    append_segments(path, &points, settings, true);
+}
 
-impl Polyline {
-    fn new(mut points:Vec<Point>,corner_angle:f64,closed:bool)->Self {
-        if closed { points.push(points[0]); }
-        let count=points.len();let mut corners=Vec::new();let mut lengths=vec![0.0];
-        for i in 0..count-1 {lengths.push(lengths[i]+points[i].distance(points[i+1]));}
-        let total=*lengths.last().unwrap();
-        for i in 1..count-1 {
-            let before=points[i]-points[i-1];let after=points[i+1]-points[i];
-            let denominator=before.x.hypot(before.y)*after.x.hypot(after.y);
-            if denominator>0.0 {
-                let angle=((before.x*after.x+before.y*after.y)/denominator).clamp(-1.0,1.0).acos().to_degrees();
-                if angle>=corner_angle {corners.push(lengths[i]/total);}
-            }
+fn append_segments(path: &mut BezPath, points: &[Point], settings: &TraceSettings, closed: bool) {
+    let Some(&first) = points.first() else { return; };
+    path.move_to(first);
+    let count = points.len();
+    let max_turn = f64::from(settings.corner_angle).to_radians().cos();
+    let tangent = |index: usize| {
+        if !closed && (index == 0 || index + 1 == count) { return None; }
+        let before = points[index] - points[(index + count - 1) % count];
+        let after = points[(index + 1) % count] - points[index];
+        let product = before.hypot() * after.hypot();
+        if product <= 1e-9 || before.dot(after) < max_turn * product { return None; }
+        let average = before / before.hypot() + after / after.hypot();
+        (average.hypot() > 1e-9).then(|| average / average.hypot())
+    };
+    let limit = (f64::from(settings.tolerance) * 0.5).max(0.24);
+    for index in 0..(if closed { count } else { count.saturating_sub(1) }) {
+        let next = (index + 1) % count;
+        let [start, end] = [points[index], points[next]];
+        let chord = end - start;
+        let distance = chord.hypot();
+        if distance <= 1e-9 { continue; }
+        let direction = chord / distance;
+        let handle = |dir: Vec2| {
+            let deviation = direction.cross(dir).abs();
+            dir * (distance / 3.0).min(limit / deviation.max(1e-9))
+        };
+        let a = start + handle(tangent(index).unwrap_or(direction));
+        let b = end - handle(tangent(next).unwrap_or(direction));
+        let snap = if settings.snap_lines { limit } else { 0.02 };
+        if segment_distance(a, start, end).max(segment_distance(b, start, end)) <= snap {
+            path.line_to(end);
+        } else {
+            path.curve_to(a, b, end);
         }
-        Self {points,lengths,corners}
     }
-    fn sample(&self,t:f64,sign:f64)->(Point,Vec2) {
-        let total=*self.lengths.last().unwrap();let distance=t.clamp(0.0,1.0)*total;
-        let index=self.lengths.partition_point(|&v|if sign<0.0 {v<distance} else {v<=distance}).saturating_sub(1).min(self.points.len()-2);
-        let length=self.lengths[index+1]-self.lengths[index];
-        let delta=self.points[index+1]-self.points[index];
-        let offset=if length>0.0 {(distance-self.lengths[index])/length} else {0.0};
-        (self.points[index]+delta*offset,if length>0.0 {delta*(total/length)} else {Vec2::ZERO})
-    }
+    if closed { path.close_path(); }
 }
 
-impl ParamCurveFit for Polyline {
-    fn sample_pt_tangent(&self,t:f64,sign:f64)->CurveFitSample {let (p,tangent)=self.sample(t,sign);CurveFitSample {p,tangent}}
-    fn sample_pt_deriv(&self,t:f64)->(Point,Vec2) {self.sample(t,1.0)}
-    fn break_cusp(&self,range:std::ops::Range<f64>)->Option<f64> {self.corners.iter().copied().find(|&t|t>range.start+1e-10 && t<range.end-1e-10)}
-}
-
-fn append_fitted(path:&mut BezPath,points:&[Point],settings:&TraceSettings) {
-    let tolerance=(f64::from(settings.tolerance)*0.5).max(1e-6);
-    let simplified=simplify_closed(points,tolerance);
-    let source=Polyline::new(simplified,f64::from(settings.corner_angle),true);
-    let fitted=kurbo::fit_to_bezpath(&source,tolerance);
-    path.extend(fitted.elements().iter().copied());path.close_path();
-}
 
 fn luminance(r:u8,g:u8,b:u8)->f32 { (54.0*r as f32 + 183.0*g as f32 + 19.0*b as f32) / 256.0 }
 
@@ -203,61 +242,113 @@ fn median_cut(pixels:&[[u8;4]],max_colors:usize)->Vec<[u8;4]> {
     }).collect()
 }
 
-pub fn quantize(src:&RasterView,s:&TraceSettings)->(Vec<u8>,Vec<[u8;4]>) {
-    let count=src.width as usize * src.height as usize;
-    if count==0 || src.rgba.len()<count*4 { return (vec![],vec![]); }
-    
-    let pixels:Vec<[u8;4]>=src.rgba[..count*4].chunks_exact(4).map(|c|[c[0],c[1],c[2],c[3]]).collect();
-    
-    let max_colors = match s.palette {
-        PaletteKind::Automatic => 16,
-        PaletteKind::Limited(n @ 2..=30) => usize::from(n),
-        PaletteKind::Limited(_) => return (vec![], vec![]),
-        PaletteKind::FullTone => 256,
-    };
-    let visible: Vec<_> = pixels.iter().copied().filter(|p| p[3] > 0).collect();
-    let mut unique = visible.clone();
-    unique.sort_by_key(|p| [p[0], p[1], p[2], 255 - p[3]]);
-    unique.dedup_by_key(|p| [p[0], p[1], p[2]]);
-    let palette = if unique.len() <= max_colors { unique } else { median_cut(&visible, max_colors) };
-    
-    if palette.is_empty() { return (vec![],vec![]); }
-    
-    let mut indices=Vec::with_capacity(count);
-    for p in &pixels {
-        let mut best_idx=0;let mut best_dist=f32::MAX;
-        for (i,c) in palette.iter().enumerate() {
-            let dr=p[0] as f32-c[0] as f32;
-            let dg=p[1] as f32-c[1] as f32;
-            let db=p[2] as f32-c[2] as f32;
-            let dist=dr*dr+dg*dg+db*db;
-            if dist<best_dist {best_dist=dist;best_idx=i;}
-        }
-        indices.push(best_idx as u8);
+fn included(pixel: &[u8], settings: &TraceSettings) -> bool {
+    if pixel[3] == 0 { return false; }
+    if let Some(color) = settings.ignore_color {
+        return !pixel[..3].iter().zip(color).all(|(a, b)| a.abs_diff(b) <= 12);
     }
-    
-    (indices,palette)
+    !settings.ignore_white || !pixel[..3].iter().all(|&channel| channel > 240)
 }
 
-pub fn trace_image(source:&RasterView,settings:&TraceSettings)->Vec<TracedPath> {
-    if !validate_settings(settings) || source.width==0 || source.height==0 || source.width==u32::MAX || source.height==u32::MAX || (!settings.fills && !settings.strokes) {return Vec::new();}
+pub fn quantize(src: &RasterView, settings: &TraceSettings) -> (Vec<u8>, Vec<[u8; 4]>) {
+    let Some(count) = (src.width as usize).checked_mul(src.height as usize) else { return Default::default() };
+    let Some(bytes) = count.checked_mul(4).filter(|&bytes| bytes <= src.rgba.len()) else { return Default::default() };
+    let pixels = src.rgba[..bytes].as_chunks::<4>().0;
+    let max_colors = match settings.palette {
+        PaletteKind::Automatic => 2 + 62 * usize::from(settings.color_detail) / 100,
+        PaletteKind::FullTone => 2 + 254 * usize::from(settings.color_detail) / 100,
+        PaletteKind::Limited(n @ 2..=256) | PaletteKind::Document(n @ 2..=256) => usize::from(n),
+        _ => return Default::default(),
+    };
+    let max_colors = if settings.mode == TraceMode::FlatLogo { max_colors.min(10) } else { max_colors };
+    let palette: Vec<[u8; 4]> = if matches!(settings.palette, PaletteKind::Document(_)) {
+        settings.library.iter().take(max_colors).map(|&[r, g, b]| [r, g, b, 255]).collect()
+    } else {
+        let mut unique = BTreeMap::new();
+        for &[r, g, b, a] in pixels.iter().filter(|pixel| included(pixel.as_slice(), settings)) {
+            unique.entry([r, g, b]).and_modify(|alpha: &mut u8| *alpha = (*alpha).max(a)).or_insert(a);
+            if unique.len() > max_colors { break; }
+        }
+        if unique.len() <= max_colors {
+            unique.into_iter().map(|([r, g, b], a)| [r, g, b, a]).collect()
+        } else {
+            let sample = (pixels.len() / 65_536).max(1);
+            let mut sampled = Vec::with_capacity(pixels.len().div_ceil(sample).min(131_072));
+            let mut visible = 0;
+            for pixel in pixels.iter().filter(|pixel| included(pixel.as_slice(), settings)) {
+                if visible % sample == 0 { sampled.push(*pixel); }
+                visible += 1;
+            }
+            median_cut(&sampled, max_colors)
+        }
+    };
+    if palette.is_empty() { return Default::default(); }
+    const UNKNOWN: u16 = 256;
+    let mut cache = vec![UNKNOWN; 1 << 15];
+    let indices = pixels.iter().map(|pixel| {
+        if !included(pixel, settings) { return 0; }
+        let [r, g, b] = [pixel[0], pixel[1], pixel[2]].map(|channel| usize::from(channel >> 3));
+        let slot = r << 10 | g << 5 | b;
+        if palette.len() <= 16 {
+            return closest_color([pixel[0], pixel[1], pixel[2]], &palette);
+        }
+        if cache[slot] == UNKNOWN {
+            cache[slot] = u16::from(closest_color([r, g, b].map(|channel| (channel * 8 + 4) as u8), &palette));
+        }
+        cache[slot] as u8
+    }).collect();
+    (indices, palette)
+}
+
+fn closest_color(pixel: [u8; 3], palette: &[[u8; 4]]) -> u8 {
+    palette.iter().enumerate().min_by_key(|(_, color)| {
+        pixel.into_iter().zip(color[..3].iter().copied()).map(|(a, b)| i32::from(a).abs_diff(i32::from(b)).pow(2)).sum::<u32>()
+    }).map_or(0, |(index, _)| index as u8)
+}
+
+pub fn trace_image(source: &RasterView, settings: &TraceSettings) -> Vec<TracedPath> {
+    trace_watched(source, settings, |_, _| true).unwrap_or_default()
+}
+
+pub fn trace_watched(
+    source: &RasterView, settings: &TraceSettings, mut report: impl FnMut(u32, &'static str) -> bool,
+) -> Option<Vec<TracedPath>> {
+    if !validate_settings(settings) || source.width==0 || source.height==0 || source.width==u32::MAX || source.height==u32::MAX || (!settings.fills && !settings.strokes) {return Some(Vec::new());}
+    if !report(4, "trace.progress.palette") { return None; }
     
-    let Some(count)=(source.width as usize).checked_mul(source.height as usize) else {return Vec::new();};
-    let Some(bytes)=count.checked_mul(4) else {return Vec::new();};if source.rgba.len()<bytes {return Vec::new();}
+    let count=(source.width as usize).checked_mul(source.height as usize)?;
+    let bytes=count.checked_mul(4)?;
+    if source.rgba.len()<bytes {return Some(Vec::new());}
     if settings.strokes && !settings.fills {
-        return centreline(source, settings);
+        if !report(28, "trace.progress.contours") { return None; }
+        let result = centreline(source, settings);
+        return report(96, "trace.progress.curves").then_some(result);
     }
     
+    if settings.gradients && matches!(settings.mode, TraceMode::Color | TraceMode::Grayscale)
+        && settings.fills && !settings.strokes
+        && let Some(gradient) = trace_analysis::detect_gradient(source, settings)
+    {
+        let mask = source.rgba[..bytes].as_chunks::<4>().0.iter().map(|pixel| included(pixel, settings)).collect::<Vec<_>>();
+        let rings = boundaries(&mask, source.width, source.height);
+        let mut path = BezPath::new();
+        for ring in &rings { append_fitted(&mut path, ring, settings); }
+        if !path.elements().is_empty() && report(97, "trace.progress.curves") {
+            return Some(vec![TracedPath { path, fill: None, stroke: None, shape: None, gradient: Some(gradient) }]);
+        }
+        return None;
+    }
     let mut result=Vec::new();
     
     match settings.mode {
         TraceMode::BlackWhite => {
             for black in [false,true] {
-                if !black && settings.ignore_white {continue;}
+                if !black && settings.ignore_white && settings.ignore_color.is_none() {continue;}
+                if !report(if black { 56 } else { 15 }, "trace.progress.contours") { return None; }
                 let colour=if black {[0,0,0,255]} else {[255,255,255,255]};
                 let mut mask:Vec<bool>=source.rgba[..bytes].chunks_exact(4).map(|pixel| {
                     let lum=luminance(pixel[0],pixel[1],pixel[2]);
-                    pixel[3]>0 && (lum<f32::from(settings.threshold))==black
+                    included(pixel, settings) && (lum<f32::from(settings.threshold))==black
                 }).collect();
                 remove_small(&mut mask,source.width as usize,source.height as usize,settings.min_area_px as usize);
                 let rings=boundaries(&mask,source.width,source.height);
@@ -267,43 +358,46 @@ pub fn trace_image(source:&RasterView,settings:&TraceSettings)->Vec<TracedPath> 
                 for (index,outer) in outers.iter().enumerate() {
                     let mut path=BezPath::new();append_fitted(&mut path,outer,settings);
                     for (hole,owner) in holes.iter().zip(&owners) {if *owner==Some(index) {append_fitted(&mut path,hole,settings);}}
-                    result.push(TracedPath {path,fill:settings.fills.then_some(colour),stroke:settings.strokes.then_some((colour,settings.stroke_max_width))});
+                    result.push(TracedPath {path,fill:settings.fills.then_some(colour),stroke:settings.strokes.then_some((colour,settings.stroke_max_width)),shape:None,gradient:None});
                 }
             }
         },
         TraceMode::Grayscale => {
             let levels=match settings.palette {
                 PaletteKind::Automatic=>16,
-                PaletteKind::Limited(n)=>n as usize,
+                PaletteKind::Limited(n) | PaletteKind::Document(n)=>n as usize,
                 PaletteKind::FullTone=>256,
             };
-            let mut masks:Vec<Vec<bool>>=vec![vec![false;count];levels];
-            for i in 0..count {
-                let pixel=&source.rgba[i*4..i*4+4];
-                if pixel[3]==0 {continue;}
-                let lum=luminance(pixel[0],pixel[1],pixel[2]);
-                let level=((lum/256.0)*levels as f32).floor() as usize;
-                if level<levels {masks[level][i]=true;}
+            let labels: Vec<_> = source.rgba[..bytes].as_chunks::<4>().0.iter().map(|pixel| {
+                if !included(pixel, settings) { 256 } else {
+                    (luminance(pixel[0], pixel[1], pixel[2]) / 256.0 * levels as f32) as u16
+                }
+            }).collect();
+            let mut used = [false; 256];
+            for &label in &labels {
+                if label < 256 { used[label as usize] = true; }
             }
-            for (level_idx,mask) in masks.iter_mut().enumerate() {
-                remove_small(mask,source.width as usize,source.height as usize,settings.min_area_px as usize);
-                let rings=boundaries(mask,source.width,source.height);
+            for level_idx in (0..levels).filter(|&level| used[level]) {
+                if !report(18 + 72 * level_idx as u32 / levels as u32, "trace.progress.contours") { return None; }
+                let mut mask: Vec<_> = labels.iter().map(|&label| usize::from(label) == level_idx).collect();
+                remove_small(&mut mask,source.width as usize,source.height as usize,settings.min_area_px as usize);
+                let rings=boundaries(&mask,source.width,source.height);
                 let outers:Vec<_>=rings.iter().filter(|ring|area(ring)>0.0).collect();
                 let holes:Vec<_>=rings.iter().filter(|ring|area(ring)<0.0).collect();
                 let owners:Vec<_>=holes.iter().map(|hole|outers.iter().enumerate().filter(|(_,outer)|contains(outer,hole[0])).min_by(|(_,a),(_,b)|area(a).abs().total_cmp(&area(b).abs())).map(|(i,_)|i)).collect();
                 let grey=((level_idx as f32+0.5)/levels as f32*255.0) as u8;
                 let colour=[grey,grey,grey,255];
-                if settings.ignore_white && grey>240 {continue;}
+                if settings.ignore_white && settings.ignore_color.is_none() && grey>240 {continue;}
                 for (index,outer) in outers.iter().enumerate() {
                     let mut path=BezPath::new();append_fitted(&mut path,outer,settings);
                     for (hole,owner) in holes.iter().zip(&owners) {if *owner==Some(index) {append_fitted(&mut path,hole,settings);}}
-                    result.push(TracedPath {path,fill:settings.fills.then_some(colour),stroke:settings.strokes.then_some((colour,settings.stroke_max_width))});
+                    result.push(TracedPath {path,fill:settings.fills.then_some(colour),stroke:settings.strokes.then_some((colour,settings.stroke_max_width)),shape:None,gradient:None});
                 }
             }
         },
-        TraceMode::Color => {
+        TraceMode::Color | TraceMode::FlatLogo => {
             let (indices,palette)=quantize(source,settings);
-            if palette.is_empty() {return Vec::new();}
+            if palette.is_empty() {return Some(Vec::new());}
             
             let mut order: Vec<_> = (0..palette.len()).collect();
             order.sort_by(|&a, &b| {
@@ -316,13 +410,14 @@ pub fn trace_image(source:&RasterView,settings:&TraceSettings)->Vec<TracedPath> 
                 ranks[index] = rank;
             }
             for (rank, color_idx) in order.into_iter().enumerate() {
+                if !report(22 + 71 * rank as u32 / palette.len() as u32, "trace.progress.contours") { return None; }
                 let colour = palette[color_idx];
-                let is_white = |[r, g, b, _]: [u8; 4]| r > 240 && g > 240 && b > 240;
-                if settings.ignore_white && is_white(colour) { continue; }
+                if !included(&colour, settings) { continue; }
                 let mut mask: Vec<_> = indices.iter().zip(source.rgba.chunks_exact(4)).map(|(&index, pixel)| {
                     let index = usize::from(index);
-                    pixel[3] > 0 && (!settings.ignore_white || !is_white(palette[index]))
-                        && (index == color_idx || settings.method == TraceMethod::Overlapping && ranks[index] > rank)
+                    included(pixel, settings) && included(&palette[index], settings)
+                        && (index == color_idx || settings.mode != TraceMode::FlatLogo
+                            && settings.method == TraceMethod::Overlapping && ranks[index] > rank)
                 }).collect();
                 remove_small(&mut mask, source.width as usize, source.height as usize, settings.min_area_px as usize);
                 let rings = boundaries(&mask, source.width, source.height);
@@ -342,13 +437,21 @@ pub fn trace_image(source:&RasterView,settings:&TraceSettings)->Vec<TracedPath> 
                         path,
                         fill: settings.fills.then_some(colour),
                         stroke: settings.strokes.then_some((colour, settings.stroke_max_width)),
+                        shape: None, gradient: None,
                     });
                 }
             }
         },
     }
     
-    result
+    if settings.recognize_shapes {
+        for traced in &mut result {
+            if traced.stroke.is_none() {
+                traced.shape = trace_analysis::recognize_shape(&mut traced.path, settings.tolerance);
+            }
+        }
+    }
+    report(97, "trace.progress.curves").then_some(result)
 }
 
 fn zhang_suen_thin(mask:&mut [bool],width:usize,height:usize) {
@@ -423,8 +526,7 @@ fn walk_skeleton(component:&[usize],width:usize,settings:&TraceSettings)->BezPat
                 continue;
             }
             let points = simplify_open(&points, tolerance);
-            let source = Polyline::new(points, f64::from(settings.corner_angle), false);
-            path.extend(kurbo::fit_to_bezpath(&source, tolerance).elements().iter().copied());
+            append_segments(&mut path, &points, settings, false);
         }
     }
     path
@@ -453,7 +555,7 @@ pub fn centreline(source:&RasterView,settings:&TraceSettings)->Vec<TracedPath> {
     
     let mut mask:Vec<bool>=source.rgba[..bytes].chunks_exact(4).map(|pixel| {
         let lum=luminance(pixel[0],pixel[1],pixel[2]);
-        pixel[3]>0 && lum<f32::from(settings.threshold)
+        included(pixel, settings) && lum<f32::from(settings.threshold)
     }).collect();
     
     remove_small(&mut mask,source.width as usize,source.height as usize,settings.min_area_px as usize);
@@ -503,7 +605,7 @@ pub fn centreline(source:&RasterView,settings:&TraceSettings)->Vec<TracedPath> {
             
             let path=walk_skeleton(&component,width,settings);
             
-            result.push(TracedPath {path,fill:None,stroke:Some(([0,0,0,255],stroke_width))});
+            result.push(TracedPath {path,fill:None,stroke:Some(([0,0,0,255],stroke_width)),shape:None,gradient:None});
         }
     }
     
@@ -514,28 +616,51 @@ pub fn centreline(source:&RasterView,settings:&TraceSettings)->Vec<TracedPath> {
 #[derive(serde::Serialize,serde::Deserialize)]
 pub struct TracePreset { pub name:String, pub builtin:bool, pub settings:TraceSettings }
 
-pub fn builtin_presets()->Vec<TracePreset> {
-    vec![
-        TracePreset {name:"Auto Color".to_string(),builtin:true,settings:TraceSettings{mode:TraceMode::Color,palette:PaletteKind::Automatic,threshold:128,tolerance:1.0,min_area_px:4,corner_angle:60.0,method:TraceMethod::Abutting,fills:true,strokes:false,stroke_max_width:10.0,ignore_white:false}},
-        TracePreset {name:"High Color".to_string(),builtin:true,settings:TraceSettings{mode:TraceMode::Color,palette:PaletteKind::Limited(30),threshold:128,tolerance:1.0,min_area_px:4,corner_angle:60.0,method:TraceMethod::Abutting,fills:true,strokes:false,stroke_max_width:10.0,ignore_white:false}},
-        TracePreset {name:"Low Color".to_string(),builtin:true,settings:TraceSettings{mode:TraceMode::Color,palette:PaletteKind::Limited(6),threshold:128,tolerance:1.0,min_area_px:4,corner_angle:60.0,method:TraceMethod::Abutting,fills:true,strokes:false,stroke_max_width:10.0,ignore_white:false}},
-        TracePreset {name:"Grayscale".to_string(),builtin:true,settings:TraceSettings{mode:TraceMode::Grayscale,palette:PaletteKind::Automatic,threshold:128,tolerance:1.0,min_area_px:4,corner_angle:60.0,method:TraceMethod::Abutting,fills:true,strokes:false,stroke_max_width:10.0,ignore_white:false}},
-        TracePreset {name:"Black and White".to_string(),builtin:true,settings:TraceSettings{mode:TraceMode::BlackWhite,palette:PaletteKind::Automatic,threshold:128,tolerance:1.0,min_area_px:4,corner_angle:60.0,method:TraceMethod::Abutting,fills:true,strokes:false,stroke_max_width:10.0,ignore_white:false}},
-        TracePreset {name:"Outline".to_string(),builtin:true,settings:TraceSettings{mode:TraceMode::BlackWhite,palette:PaletteKind::Automatic,threshold:128,tolerance:1.0,min_area_px:4,corner_angle:60.0,method:TraceMethod::Abutting,fills:false,strokes:true,stroke_max_width:10.0,ignore_white:true}},
-        TracePreset {name:"High Fidelity Photo".to_string(),builtin:true,settings:TraceSettings{mode:TraceMode::Color,palette:PaletteKind::Automatic,threshold:128,tolerance:1.0,min_area_px:4,corner_angle:60.0,method:TraceMethod::Abutting,fills:true,strokes:false,stroke_max_width:10.0,ignore_white:false}},
-        TracePreset {name:"Low Fidelity Photo".to_string(),builtin:true,settings:TraceSettings{mode:TraceMode::Color,palette:PaletteKind::Limited(8),threshold:128,tolerance:1.0,min_area_px:4,corner_angle:60.0,method:TraceMethod::Abutting,fills:true,strokes:false,stroke_max_width:10.0,ignore_white:false}},
-        TracePreset {name:"3 Colors".to_string(),builtin:true,settings:TraceSettings{mode:TraceMode::Color,palette:PaletteKind::Limited(3),threshold:128,tolerance:1.0,min_area_px:4,corner_angle:60.0,method:TraceMethod::Abutting,fills:true,strokes:false,stroke_max_width:10.0,ignore_white:false}},
-        TracePreset {name:"6 Colors".to_string(),builtin:true,settings:TraceSettings{mode:TraceMode::Color,palette:PaletteKind::Limited(6),threshold:128,tolerance:1.0,min_area_px:4,corner_angle:60.0,method:TraceMethod::Abutting,fills:true,strokes:false,stroke_max_width:10.0,ignore_white:false}},
-        TracePreset {name:"16 Colors".to_string(),builtin:true,settings:TraceSettings{mode:TraceMode::Color,palette:PaletteKind::Limited(16),threshold:128,tolerance:1.0,min_area_px:4,corner_angle:60.0,method:TraceMethod::Abutting,fills:true,strokes:false,stroke_max_width:10.0,ignore_white:false}},
-        TracePreset {name:"Shades of Gray".to_string(),builtin:true,settings:TraceSettings{mode:TraceMode::Grayscale,palette:PaletteKind::Automatic,threshold:128,tolerance:1.0,min_area_px:4,corner_angle:60.0,method:TraceMethod::Abutting,fills:true,strokes:false,stroke_max_width:10.0,ignore_white:false}},
-        TracePreset {name:"Black and White Logo".to_string(),builtin:true,settings:TraceSettings{mode:TraceMode::BlackWhite,palette:PaletteKind::Automatic,threshold:128,tolerance:1.0,min_area_px:4,corner_angle:60.0,method:TraceMethod::Abutting,fills:true,strokes:false,stroke_max_width:10.0,ignore_white:true}},
-        TracePreset {name:"Sketched Art".to_string(),builtin:true,settings:TraceSettings{mode:TraceMode::BlackWhite,palette:PaletteKind::Automatic,threshold:128,tolerance:1.0,min_area_px:4,corner_angle:60.0,method:TraceMethod::Abutting,fills:false,strokes:true,stroke_max_width:10.0,ignore_white:true}},
-        TracePreset {name:"Silhouettes".to_string(),builtin:true,settings:TraceSettings{mode:TraceMode::BlackWhite,palette:PaletteKind::Automatic,threshold:128,tolerance:1.0,min_area_px:4,corner_angle:60.0,method:TraceMethod::Abutting,fills:true,strokes:false,stroke_max_width:10.0,ignore_white:true}},
-        TracePreset {name:"Line Art".to_string(),builtin:true,settings:TraceSettings{mode:TraceMode::BlackWhite,palette:PaletteKind::Automatic,threshold:128,tolerance:1.0,min_area_px:4,corner_angle:60.0,method:TraceMethod::Abutting,fills:false,strokes:true,stroke_max_width:10.0,ignore_white:true}},
-        TracePreset {name:"Technical Drawing".to_string(),builtin:true,settings:TraceSettings{mode:TraceMode::BlackWhite,palette:PaletteKind::Automatic,threshold:128,tolerance:1.0,min_area_px:4,corner_angle:60.0,method:TraceMethod::Abutting,fills:false,strokes:true,stroke_max_width:10.0,ignore_white:true}},
-    ]
-}
+pub fn builtin_presets() -> Vec<TracePreset> {
+    use TraceMethod::{Abutting, Overlapping};
 
+    let geometry = |paths: f32, corners: f32, noise| TraceSettings {
+        tolerance: 10.0 - paths * 0.099,
+        corner_angle: 180.0 - corners * 1.79,
+        min_area_px: noise,
+        ..TraceSettings::default()
+    };
+    let color = |palette, paths, corners, noise, method| TraceSettings {
+        mode: TraceMode::Color,
+        palette,
+        method,
+        ..geometry(paths, corners, noise)
+    };
+    let limited = |count, noise| color(PaletteKind::Limited(count), 50.0, 50.0, noise, Abutting);
+    let black_white = |threshold, corners, noise, snap_lines| TraceSettings {
+        threshold,
+        snap_lines,
+        ignore_white: true,
+        ..geometry(50.0, corners, noise)
+    };
+
+    [
+        ("Default", geometry(50.0, 75.0, 25)),
+        ("Auto Color", TraceSettings { color_detail: 85, ..color(PaletteKind::Automatic, 65.0, 60.0, 16, Abutting) }),
+        ("High Fidelity Photo", TraceSettings { color_detail: 85, ..color(PaletteKind::FullTone, 50.0, 50.0, 5, Abutting) }),
+        ("Low Fidelity Photo", color(PaletteKind::Limited(20), 50.0, 50.0, 10, Overlapping)),
+        ("3 Colors", limited(3, 15)),
+        ("6 Colors", limited(6, 8)),
+        ("16 Colors", limited(16, 8)),
+        ("Shades of Gray", TraceSettings { mode: TraceMode::Grayscale, palette: PaletteKind::Limited(8), method: Overlapping, ..geometry(50.0, 50.0, 15) }),
+        ("Black and White Logo", black_white(128, 75.0, 5, true)),
+        ("Sketched Art", black_white(150, 50.0, 20, false)),
+        ("Silhouettes", black_white(200, 50.0, 90, false)),
+        ("Line Art", black_white(128, 75.0, 20, false)),
+        ("Technical Drawing", black_white(128, 100.0, 1, true)),
+        ("Outline", TraceSettings { fills: false, strokes: true, ..black_white(128, 75.0, 20, false) }),
+        ("Flat Logo", TraceSettings { mode: TraceMode::FlatLogo, palette: PaletteKind::Limited(8), snap_lines: true, ..geometry(60.0, 50.0, 6) }),
+        ("High Color", TraceSettings { mode: TraceMode::Color, palette: PaletteKind::Limited(30), ..TraceSettings::default() }),
+        ("Low Color", TraceSettings { mode: TraceMode::Color, palette: PaletteKind::Limited(6), ..TraceSettings::default() }),
+        ("Grayscale", TraceSettings { mode: TraceMode::Grayscale, palette: PaletteKind::Limited(16), ..TraceSettings::default() }),
+        ("Black and White", TraceSettings::default()),
+    ].into_iter().map(|(name, settings)| TracePreset { name: name.into(), builtin: true, settings }).collect()
+}
 #[cfg(test)]
 mod contracts {
     use super::*;
@@ -580,7 +705,7 @@ mod contracts {
         if let Some((_,width))=paths[0].stroke {assert!((width-3.0).abs()<1.0);} else {panic!("expected stroke");}
     }
     #[test]
-    fn limited_3_gives_3_colors_limited_31_rejected() {
+    fn limited_3_gives_3_colors_limited_257_rejected() {
         let mut bytes=opaque(4,4,[255,255,255,255]);
         for y in 0..2 {for x in 0..4 {let at=(y*4+x)*4;bytes[at..at+4].copy_from_slice(&[255,0,0,255]);}}
         for y in 2..3 {for x in 0..4 {let at=(y*4+x)*4;bytes[at..at+4].copy_from_slice(&[0,255,0,255]);}}
@@ -590,7 +715,7 @@ mod contracts {
         let paths=trace_image(&RasterView::new(4,4,&bytes),&settings);
         assert_eq!(paths.len(),3);
         
-        let settings_bad=TraceSettings{mode:TraceMode::Color,palette:PaletteKind::Limited(31),min_area_px:1,..Default::default()};
+        let settings_bad=TraceSettings{mode:TraceMode::Color,palette:PaletteKind::Limited(257),min_area_px:1,..Default::default()};
         let paths_bad=trace_image(&RasterView::new(4,4,&bytes),&settings_bad);
         assert!(paths_bad.is_empty());
     }

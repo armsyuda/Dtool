@@ -42,8 +42,20 @@ pub fn query_snapshot(version: u64, document: &Document) -> Result<serde_json::V
     }))
 }
 
+pub(crate) type ArtworkRevision = (u64, u64);
+
+#[derive(Debug, Clone)]
+pub struct CanvasDamage {
+    pub(crate) before: ArtworkRevision,
+    pub(crate) after: ArtworkRevision,
+    pub objects: Vec<crate::ObjectId>,
+    pub translation_only: bool,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ChangeLog {
+    pub(crate) shape_canvas_transition: Option<(ArtworkRevision, ArtworkRevision)>,
+    pub(crate) canvas_damage: Option<CanvasDamage>,
     base: Option<u64>,
     entries: std::collections::VecDeque<(u64, String)>,
 }

@@ -116,11 +116,21 @@ pub fn selection_marquee(
 
 pub fn selection_marquee_with_flags(
     doc: &Document,
-    [rx, ry, rw, rh]: [f32; 4],
+    rect: [f32; 4],
     mode: MarqueeMode,
     op: SelectOp,
     current: &Selection,
     flags: &crate::CanvasFlags,
+) -> Selection {
+    selection_marquee_projected(doc, MarqueeArgs { rect, mode, op }, current, flags, |point| point)
+}
+
+pub fn selection_marquee_projected(
+    doc: &Document,
+    MarqueeArgs { rect: [rx, ry, rw, rh], mode, op }: MarqueeArgs,
+    current: &Selection,
+    flags: &crate::CanvasFlags,
+    project: impl Fn([f32; 2]) -> [f32; 2],
 ) -> Selection {
     use crate::geometry::{clip_convex_polygon, object_world_quad, rect_quad, IDENTITY};
     let right = rx + rw;
@@ -134,7 +144,7 @@ pub fn selection_marquee_with_flags(
         let intersects = |[left, top, end_x, end_y]: [f32; 4]| {
             left < right && end_x > rx && top < bottom && end_y > ry
         };
-        let Some(bounds) = crate::geometry::points_bounds(&quad) else { continue };
+        let Some(bounds) = crate::geometry::points_bounds(&quad.map(&project)) else { continue };
         let [left, top, end_x, end_y] = bounds;
         if left > right || end_x < rx || top > bottom || end_y < ry
             || !crate::scene_hit::canvas_candidate(doc, obj)
@@ -161,6 +171,9 @@ pub fn selection_marquee_with_flags(
         }
         if visible.is_empty() {
             continue;
+        }
+        for point in &mut visible {
+            *point = project(*point);
         }
         let hit = match mode {
             MarqueeMode::Touch => crate::geometry::points_bounds(&visible).is_some_and(intersects)

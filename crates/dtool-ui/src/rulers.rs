@@ -1148,20 +1148,17 @@ fn paint_bleed(ui: &Ui, session: &Session, view: &ViewState, canvas: Rect) {
 
 pub(crate) fn paint_margins(ui: &Ui, session: &Session, view: &ViewState, canvas: Rect, colour: &str) {
     let doc = &session.document;
-    let margins = doc.setup.margins;
     let flags = &view.canvas_flags;
-    if !session.has_document || !flags.show_margins || flags.preview_mode || !margins.enabled {
+    if !session.has_document || !flags.show_margins || flags.preview_mode {
         return;
     }
-    let offsets = [margins.left, margins.top, margins.right, margins.bottom];
-    if offsets.iter().any(|side| !side.is_finite() || *side < 0.0) || offsets == [0.0; 4] {
-        return;
-    }
-    let [left, top, right, bottom] = offsets;
     let painter = ui.painter().with_clip_rect(canvas);
-    let colour = egui::Color32::from_hex(colour).unwrap_or(dtool_design::color("smart_guide"));
-    let draw = |[x, y, w, h]: [f32; 4], matrix: Option<[f32; 6]>| {
-        if w <= left + right || h <= top + bottom {
+    let fallback = egui::Color32::from_hex(colour).unwrap_or(dtool_design::color("smart_guide"));
+    let draw = |[x, y, w, h]: [f32; 4], matrix: Option<[f32; 6]>, margins: dtool_core::document::SetupMargins, colour| {
+        let [left, top, right, bottom] = [margins.left, margins.top, margins.right, margins.bottom];
+        let offsets = [left, top, right, bottom];
+        if !margins.enabled || offsets == [0.0; 4] || offsets.iter().any(|side| !side.is_finite() || *side < 0.0)
+            || w <= left + right || h <= top + bottom {
             return;
         }
         let [x0, y0, x1, y1] = [x + left, y + top, x + w - right, y + h - bottom];
@@ -1173,11 +1170,15 @@ pub(crate) fn paint_margins(ui: &Ui, session: &Session, view: &ViewState, canvas
     };
     for (index, rect) in dtool_core::scene::page_rects(doc).into_iter().enumerate() {
         if !dtool_core::artboard::edit::is_backing_page(doc, index) {
-            draw(rect, None);
+            draw(rect, None, doc.setup.margins, fallback);
         }
     }
     for board in dtool_core::view::ViewTarget::artboards(doc) {
+        let setup = doc.master_pages.page_setup(board.id);
+        let margins = setup.map_or(doc.setup.margins, |setup| setup.margins);
+        let colour = setup.and_then(|setup| setup.margin_colour.as_deref())
+            .and_then(|hex| egui::Color32::from_hex(hex).ok()).unwrap_or(fallback);
         draw([board.pos[0], board.pos[1], board.size[0].abs(), board.size[1].abs()],
-            Some(dtool_core::geometry::object_matrix(board)));
+            Some(dtool_core::geometry::object_matrix(board)), margins, colour);
     }
 }

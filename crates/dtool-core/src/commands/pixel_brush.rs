@@ -1,5 +1,5 @@
 use crate::brush::{self, BrushOp, BrushSettings, MixerLoad, OpParams, SharpenMode, SpongeMode, StrokePoint, TipTransform, TonalRange};
-use crate::context_toolbar::{MIXER_TOOL, TONE_TOOL};
+use crate::context_toolbar::{ADJUSTMENT_TOOL, FILTER_BRUSH_KIND, FILTER_BRUSH_TOOL, MIXER_TOOL, TONE_TOOL};
 use crate::tone::{Mode as ToneMode, Range as ToneRange, ToneLayer};
 use crate::geometry::{apply_matrix, invert_matrix, object_matrix};
 use crate::object::Object;
@@ -11,7 +11,15 @@ use serde::Deserialize;
 use serde_json::json;
 use std::borrow::Cow;
 
+pub(super) mod adjustment;
+mod clone_sampling;
+pub mod global_source;
+mod live;
+pub use clone_sampling::CloneTransform;
+pub use live::LiveStroke;
+
 pub const STROKE: &str = "pixel.brush.stroke";
+pub const PREPARE_PHOTO: &str = "pixel.retouch.prepare";
 pub const MAX_POINTS: usize = 16_384;
 const MIXER_LOAD: &str = "pixel.brush.mixer.load";
 const MIXER_CLEAN: &str = "pixel.brush.mixer.clean";
@@ -27,6 +35,7 @@ struct StrokeArgs {
     #[serde(default)]
     invert: bool,
     clone_source: Option<[f32; 2]>,
+    clone_global_offset: Option<[f32; 2]>,
 }
 
 impl StrokeArgs {
@@ -35,6 +44,7 @@ impl StrokeArgs {
         let unit = |v: &f32| (0.0..=1.0).contains(v);
         count != 0 && count <= MAX_POINTS && self.points.iter().flatten().all(|v| v.is_finite())
             && self.clone_source.is_none_or(|point| point.iter().all(|v| v.is_finite()))
+            && self.clone_global_offset.is_none_or(|point| point.iter().all(|v| v.is_finite()))
             && self.pressure.as_ref().is_none_or(|values| values.len() == count && values.iter().all(unit))
             && self.velocity.as_ref().is_none_or(|values| values.len() == count && values.iter().all(unit))
             && self.tilt.as_ref().is_none_or(|values| values.len() == count
@@ -63,17 +73,29 @@ pub fn operation(tool: &str) -> Option<BrushOp> {
         "tool.eraser.background" => Some(BrushOp::BackgroundErase),
         "tool.paint.colour_replace" => Some(BrushOp::ColourReplace),
         crate::context_toolbar::CLONE_TOOL => Some(BrushOp::Clone),
+        crate::context_toolbar::HEAL_TOOL => Some(BrushOp::Heal),
+        crate::context_toolbar::UNDO_BRUSH_TOOL => Some(BrushOp::Undo),
         MIXER_TOOL => Some(BrushOp::Mixer),
-        TONE_TOOL => Some(BrushOp::Tone),
-        "tool.paint.adjustment" | "tool.dodge" => Some(BrushOp::Dodge),
+        TONE_TOOL | ADJUSTMENT_TOOL => Some(BrushOp::Tone),
+        "tool.dodge" => Some(BrushOp::Dodge),
         "tool.burn" => Some(BrushOp::Burn),
         "tool.paint.sponge" => Some(BrushOp::Sponge),
-        "tool.paint.filter" | "tool.paint.blur" => Some(BrushOp::Blur),
+        FILTER_BRUSH_TOOL | "tool.paint.blur" => Some(BrushOp::Blur),
         "tool.sharpen" => Some(BrushOp::Sharpen),
         "tool.paint.median" => Some(BrushOp::Median),
         "tool.paint.smudge" | "tool.eraser.smudge" => Some(BrushOp::Smudge),
         _ => None,
     }
+}
+
+fn operation_for(session: &Session) -> Option<BrushOp> {
+    if session.active_tool != FILTER_BRUSH_TOOL { return operation(&session.active_tool); }
+    Some(match session.tool_options.choice(FILTER_BRUSH_TOOL, FILTER_BRUSH_KIND).as_deref() {
+        Some("unsharp" | "clarity" | "harsh") => BrushOp::Sharpen,
+        Some("median") => BrushOp::Median,
+        Some("smudge") => BrushOp::Smudge,
+        _ => BrushOp::Blur,
+    })
 }
 
 pub fn settings(session: &Session, op: BrushOp) -> BrushSettings {
@@ -83,6 +105,7 @@ pub fn settings(session: &Session, op: BrushOp) -> BrushSettings {
 pub(super) fn settings_for(session: &Session, tool: &str, op: BrushOp) -> BrushSettings {
     let number = |key, fallback| session.tool_options.number(tool, key).unwrap_or(fallback) as f32;
     let colour_option = match op {
+        BrushOp::Paint | BrushOp::Pixel => crate::context_toolbar::BRUSH_FOREGROUND,
         BrushOp::Mixer => "brush.mixer_colour",
         BrushOp::Tone => "brush.tone_colour",
         _ => "brush.replacement_colour",
@@ -92,7 +115,7 @@ pub(super) fn settings_for(session: &Session, tool: &str, op: BrushOp) -> BrushS
         .or_else(|| session.selection.ids.first()
         .and_then(|id| session.document.get_object(*id))
         .and_then(|object| match object.fill { Paint::Solid { colour } => Some(colour), _ => None }))
-        .or_else(|| match super::defaults::current().fill { Paint::Solid { colour } => Some(colour), _ => None });
+        .or_else(|| match super::defaults::for_document(&session.document).fill { Paint::Solid { colour } => Some(colour), _ => None });
     use crate::context_toolbar::{CALLIGRAPHY_ANGLE, CALLIGRAPHY_DEFAULT_ANGLE, CALLIGRAPHY_DEFAULT_ROUNDNESS,
         CALLIGRAPHY_ROUNDNESS, CALLIGRAPHY_TOOL};
     let calligraphy = tool == CALLIGRAPHY_TOOL;
@@ -105,7 +128,7 @@ pub(super) fn settings_for(session: &Session, tool: &str, op: BrushOp) -> BrushS
         texture: tip.and_then(|tip| tip.texture.clone()),
         sub_brushes: tip.map_or_else(Vec::new, |tip| tip.sub_brushes.clone()),
         stamp_colour: op == BrushOp::Paint,
-        spacing: tip.map_or(0.1, |tip| tip.spacing),
+        spacing: session.tool_options.raster_tip(tool).map_or(0.1, |tip| tip.spacing),
         rotation: if calligraphy { number(CALLIGRAPHY_ANGLE, f64::from(CALLIGRAPHY_DEFAULT_ANGLE)) }
             else { tip.map_or(0.0, |tip| tip.rotation) },
         dynamics: tip.map(|tip| tip.dynamics.clone()).unwrap_or_default(),
@@ -132,15 +155,21 @@ pub(super) fn settings_for(session: &Session, tool: &str, op: BrushOp) -> BrushS
 }
 
 pub(super) fn can_execute(session: &Session, command: &Command) -> Option<bool> {
+    if let Some(result) = global_source::can_execute(session, command) { return Some(result); }
     match command.name.as_str() {
-        STROKE => Some(session.has_document && operation(&session.active_tool)
+        STROKE => Some(session.has_document && operation_for(session)
             .is_some_and(|op| {
-                if op == BrushOp::Clone {
+                if op.uses_sample_source() {
                     clone_layer(session).is_some()
+                } else if op == BrushOp::Undo {
+                    clone_layer(session).is_some() && session.history.brush_source.is_some()
+                } else if op == BrushOp::Tone {
+                    !session.quick_mask.active && tone_source(session).is_ok()
                 } else {
                     !session.quick_mask.active || supports_quick_mask(op)
                 }
             })),
+        PREPARE_PHOTO => Some(placed_photo(session).is_some_and(|object| editable(&session.document, object))),
         TONE_ADD => Some(session.has_document && session.active_tool == TONE_TOOL && !session.quick_mask.active
             && tone_source(session).is_ok()),
         MIXER_LOAD | MIXER_CLEAN => Some(session.has_document && session.active_tool == MIXER_TOOL && !session.quick_mask.active),
@@ -153,12 +182,51 @@ fn supports_quick_mask(op: BrushOp) -> bool {
 }
 
 pub(super) fn run(session: &mut Session, command: &Command) -> Option<CommandResult> {
+    if let Some(result) = global_source::run(session, command) { return Some(result); }
     match command.name.as_str() {
         STROKE => Some(apply_stroke(session, command)),
+        PREPARE_PHOTO => Some(prepare_photo(session)),
         TONE_ADD => Some(tone_brush(session, None)),
         MIXER_LOAD | MIXER_CLEAN => Some(set_mixer_load(session, command)),
         _ => None,
     }
+}
+
+pub(super) fn placed_photo(session: &Session) -> Option<&Object> {
+    if !session.has_document || session.quick_mask.active { return None; }
+    let &[id] = session.selection.ids.as_slice() else { return None; };
+    let document = &session.document;
+    let object = document.get_object(id)?;
+    (matches!(object.kind, crate::ObjectKind::Image)
+        && object.clip_role != crate::object::ClipRole::Mask
+        && document.placed_resource(id).is_some()
+        && crate::raster_source::dimensions(document, object).is_some()).then_some(object)
+}
+
+fn prepare_photo(session: &mut Session) -> CommandResult {
+    let source = placed_photo(session).ok_or_else(CommandError::invalid_params)?;
+    if !editable(&session.document, source) { return Err(CommandError::new("LOCKED")); }
+    let original = source.id;
+    let name = format!("{} ({})", source.name, dtool_strings::text("pixel.retouch.copy_suffix"));
+    let parent = source.parent_id;
+    let mut document = session.document.clone();
+    let subtree = document.subtree_ids(original);
+    let after = document.objects.iter().rposition(|object| subtree.contains(&object.id))
+        .ok_or_else(CommandError::not_found)?;
+    let bundle = crate::clipboard::collect_bundle_members(&document, &subtree);
+    let original_count = document.objects.len();
+    let mapping = crate::clipboard::copy_bundle_in_document(&mut document, &bundle, [0.0; 2]);
+    let copy = *mapping.get(&original).ok_or_else(CommandError::not_found)?;
+    let objects = document.objects.split_off(original_count);
+    document.objects.splice(after + 1..after + 1, objects);
+    document.placed_images.retain(|image| image.object_id != copy);
+    document.find_object_mut(original.0).ok_or_else(CommandError::not_found)?.pickable = false;
+    let edited = document.find_object_mut(copy.0).ok_or_else(CommandError::not_found)?;
+    edited.parent_id = parent;
+    edited.name = name;
+    super::document_change::commit(session, PREPARE_PHOTO, document, vec![copy], json!({
+        "id": copy, "source": original,
+    }))
 }
 
 fn set_mixer_load(session: &mut Session, command: &Command) -> CommandResult {
@@ -187,7 +255,7 @@ fn editable(document: &Document, object: &Object) -> bool {
 
 fn apply_stroke(session: &mut Session, command: &Command) -> CommandResult {
     if !session.has_document { return Err(CommandError::no_document()); }
-    let op = operation(&session.active_tool).ok_or_else(CommandError::invalid_params)?;
+    let op = operation_for(session).ok_or_else(CommandError::invalid_params)?;
     let args: StrokeArgs = serde_json::from_value(command.params.clone()).map_err(|_| CommandError::invalid_params())?;
     if !args.valid() {
         return Err(CommandError::invalid_params());
@@ -206,25 +274,36 @@ fn apply_stroke(session: &mut Session, command: &Command) -> CommandResult {
 type RasterDraft = Option<(Document, crate::ObjectId)>;
 
 fn raster_stroke(session: &Session, args: &StrokeArgs, op: BrushOp) -> Result<(RasterDraft, Option<MixerLoad>), CommandError> {
-    if op == BrushOp::Clone && args.clone_source.is_none() {
-        return Err(CommandError::invalid_params());
+    let clone_options = clone_sampling::Options::current(session);
+    if op.uses_sample_source() {
+        let has_source = if clone_options.scope == clone_sampling::Scope::Global {
+            clone_options.global.is_some()
+        } else {
+            args.clone_source.is_some()
+        };
+        if !has_source { return Err(CommandError::new("NO_CLONE_SOURCE")); }
     }
     let settings = settings(session, op);
     let options = &session.tool_options;
     let tool = &session.active_tool;
+    let tonal_range = match options.choice(tool, "brush.tonal_range").as_deref() {
+        Some("shadows") => Some(TonalRange::Shadows),
+        Some("midtones") => Some(TonalRange::Midtones),
+        Some("highlights") => Some(TonalRange::Highlights),
+        _ => None,
+    };
+    let filter_group = tool == FILTER_BRUSH_TOOL;
+    let sharpen_option = if filter_group { FILTER_BRUSH_KIND } else { "brush.sharpen_mode" };
     let params = OpParams {
-        tonal_range: match options.choice(tool, "brush.tonal_range").as_deref() {
-            Some("shadows") => TonalRange::Shadows,
-            Some("highlights") => TonalRange::Highlights,
-            _ => TonalRange::Midtones,
-        },
+        tonal_range: tonal_range.unwrap_or(TonalRange::Midtones),
+        filter_tonal_range: if filter_group { tonal_range } else { None },
         protect_hue: options.flag(tool, "brush.protect_hue").unwrap_or(false),
         sponge_mode: match options.choice(tool, "brush.sponge_mode").as_deref() {
             Some("desaturate") => SpongeMode::Desaturate,
             Some("vibrance") => SpongeMode::Vibrance,
             _ => SpongeMode::Saturate,
         },
-        sharpen_mode: match options.choice(tool, "brush.sharpen_mode").as_deref() {
+        sharpen_mode: match options.choice(tool, sharpen_option).as_deref() {
             Some("unsharp") => SharpenMode::UnsharpMask,
             Some("harsh") => SharpenMode::Harsh,
             _ => SharpenMode::Clarity,
@@ -251,7 +330,19 @@ fn raster_stroke(session: &Session, args: &StrokeArgs, op: BrushOp) -> Result<(R
         return Ok((None, None));
     };
     let mut document = session.document.clone();
-    let changed = paint(&document, &object, &mut pixels, args, op, &settings, &params, mixer.as_mut())?;
+    let restore = if op == BrushOp::Undo {
+        let (_, source) = session.history.brush_source.as_ref()
+            .ok_or_else(|| CommandError::new("UNDO_BRUSH_SOURCE_REQUIRED"))?;
+        let source_layer = source.pixel_layers.get(object.id).map(Cow::Borrowed).or_else(|| {
+            let ([width, height], rgba) = crate::scene::raster_rgba(source.get_object(object.id)?)?;
+            Some(Cow::Owned(PixelLayer::from_rgba(width as u32, height as u32, &rgba)))
+        });
+        let preserve_missing = options.flag(tool, "brush.undo.preserve_missing").unwrap_or(true);
+        Some((source_layer, preserve_missing))
+    } else {
+        None
+    };
+    let changed = paint(&document, &object, &mut pixels, args, op, &settings, &params, mixer.as_mut(), restore, clone_options)?;
     let mixer_load = mixer.map(|(colour, _)| colour.map_or(MixerLoad::Clean, MixerLoad::Colour));
     if !changed { return Ok((None, mixer_load)); }
     let id = install_pixels(&mut document, &session.selection.ids, object, pixels, add_layer);
@@ -259,20 +350,29 @@ fn raster_stroke(session: &Session, args: &StrokeArgs, op: BrushOp) -> Result<(R
 }
 
 pub fn preview(session: &Session, command: &Command) -> Option<Document> {
+    preview_with_layer(session, command, None).map(|(document, _)| document)
+}
+
+pub fn preview_with_layer(
+    session: &Session, command: &Command, live: Option<&mut LiveStroke>,
+) -> Option<(Document, Option<crate::ObjectId>)> {
     if !session.has_document || command.name != STROKE { return None; }
-    let op = operation(&session.active_tool)?;
+    let op = operation_for(session)?;
     let args: StrokeArgs = serde_json::from_value(command.params.clone()).ok()?;
     if !args.valid() { return None; }
     if session.quick_mask.active {
         if !supports_quick_mask(op) { return None; }
         let mut document = session.document.clone();
         document.pixel_selection = Some(quick_mask_draft(session, &args, op).ok()??);
-        return Some(document);
+        return Some((document, None));
     }
     if op == BrushOp::Tone {
-        return tone_draft(session, Some(&args)).ok()?.map(|(document, _, _)| document);
+        return tone_draft(session, Some(&args)).ok()?.map(|(document, _, _)| (document, None));
     }
-    raster_stroke(session, &args, op).ok()?.0.map(|(document, _)| document)
+    if let Some(preview) = live.and_then(|live| live.preview(session, &args, op)) {
+        return Some(preview);
+    }
+    raster_stroke(session, &args, op).ok()?.0.map(|(document, id)| (document, Some(id)))
 }
 
 fn tone_source(session: &Session) -> Result<&Object, CommandError> {
@@ -295,7 +395,9 @@ fn tone_source(session: &Session) -> Result<&Object, CommandError> {
 
 fn tone_brush(session: &mut Session, stroke: Option<&StrokeArgs>) -> CommandResult {
     if !session.has_document { return Err(CommandError::no_document()); }
-    if session.active_tool != TONE_TOOL || session.quick_mask.active { return Err(CommandError::invalid_params()); }
+    if !matches!(session.active_tool.as_str(), TONE_TOOL | ADJUSTMENT_TOOL) || session.quick_mask.active {
+        return Err(CommandError::invalid_params());
+    }
     let Some((document, id, source)) = tone_draft(session, stroke)? else {
         return Ok(json!({"changes": []}));
     };
@@ -313,12 +415,7 @@ fn tone_draft(session: &Session, stroke: Option<&StrokeArgs>) -> Result<Option<(
         Some("inverse_blend") => ToneMode::InverseBlend,
         _ => ToneMode::DodgeBurn,
     };
-    let range = match options.choice(TONE_TOOL, "brush.tone_range").as_deref() {
-        Some("shadows") => ToneRange::Shadows,
-        Some("midtones") => ToneRange::Midtones,
-        Some("highlights") => ToneRange::Highlights,
-        _ => ToneRange::Full,
-    };
+    let range = ToneRange::from_option(options.choice(TONE_TOOL, "brush.tone_range").as_deref().unwrap_or("full"));
     let blend_mode = match options.choice(TONE_TOOL, "brush.tone_blend").as_deref() {
         Some("soft_light") => BlendMode::SoftLight,
         Some("hard_light") => BlendMode::HardLight,
@@ -326,9 +423,15 @@ fn tone_draft(session: &Session, stroke: Option<&StrokeArgs>) -> Result<Option<(
         Some("screen") => BlendMode::Screen,
         _ => BlendMode::Overlay,
     };
-    let spec = ToneLayer { mode, range };
+    let (spec, blend_mode) = if session.active_tool == ADJUSTMENT_TOOL {
+        (adjustment::current(session), BlendMode::Normal)
+    } else {
+        (ToneLayer { mode, range }, blend_mode)
+    };
+    let mode = spec.mode;
     let mut document = session.document.clone();
-    let compatible = |object: &&Object| object.tone_layer == Some(spec) && object.blend_mode == blend_mode
+    let compatible = |object: &&Object| object.tone_layer == Some(spec)
+        && (matches!(mode, ToneMode::Adjustment { .. }) || object.blend_mode == blend_mode)
         && object.parent_id == Some(source.id) && editable(&document, object)
         && document.pixel_layers.get(object.id).is_some();
     let layer = stroke.and_then(|_| {
@@ -348,6 +451,7 @@ fn tone_draft(session: &Session, stroke: Option<&StrokeArgs>) -> Result<Option<(
             ToneMode::DodgeBurn => "tone.dodge_burn_layer",
             ToneMode::Blend => "tone.blend_layer",
             ToneMode::InverseBlend => "tone.inverse_blend_layer",
+            ToneMode::Adjustment { .. } => "tone.adjustment_layer",
         };
         (Object {
             name: dtool_strings::text(name).to_owned(), kind: crate::ObjectKind::Image,
@@ -360,7 +464,7 @@ fn tone_draft(session: &Session, stroke: Option<&StrokeArgs>) -> Result<Option<(
         let mut settings = settings(session, BrushOp::Tone);
         settings.colour = match mode {
             ToneMode::DodgeBurn if stroke.invert => [0, 0, 0, 255],
-            ToneMode::DodgeBurn => [255; 4],
+            ToneMode::DodgeBurn | ToneMode::Adjustment { .. } => [255; 4],
             ToneMode::Blend | ToneMode::InverseBlend => {
                 let [mut r, mut g, mut b, a] = settings.colour;
                 if stroke.invert ^ (mode == ToneMode::InverseBlend) {
@@ -369,7 +473,7 @@ fn tone_draft(session: &Session, stroke: Option<&StrokeArgs>) -> Result<Option<(
                 [r, g, b, a]
             }
         };
-        if !paint(&document, &object, &mut pixels, stroke, BrushOp::Paint, &settings, &OpParams::default(), None)? {
+        if !paint(&document, &object, &mut pixels, stroke, BrushOp::Paint, &settings, &OpParams::default(), None, None, clone_sampling::Options::CURRENT_LAYER)? {
             return Ok(None);
         }
     }
@@ -472,6 +576,8 @@ pub(super) fn install_pixels(
 fn paint(
     document: &Document, object: &Object, pixels: &mut PixelLayer, stroke: &StrokeArgs,
     op: BrushOp, settings: &BrushSettings, params: &OpParams, mixer: Option<&mut (Option<[u8; 4]>, bool)>,
+    restore: Option<(Option<Cow<'_, PixelLayer>>, bool)>,
+    clone_options: clone_sampling::Options,
 ) -> Result<bool, CommandError> {
     let matrix = object_matrix(object);
     let inverse = invert_matrix(&matrix).ok_or_else(CommandError::invalid_params)?;
@@ -485,7 +591,10 @@ fn paint(
         [(x - object.pos[0]) * scale[0], (y - object.pos[1]) * scale[1]]
     };
     let points = stroke.samples(to_raster);
-    let clone_offset = if op == BrushOp::Clone {
+    let anchor = [points[0].x.floor(), points[0].y.floor()];
+    let clone_offset = if clone_options.global.is_some() && op.uses_sample_source() {
+        Some([0, 0])
+    } else if op.uses_sample_source() {
         let source = to_raster(stroke.clone_source.ok_or_else(CommandError::invalid_params)?);
         let offset = [source[0].floor() - points[0].x.floor(), source[1].floor() - points[0].y.floor()];
         if !offset.iter().all(|v| v.is_finite()) { return Err(CommandError::invalid_params()); }
@@ -506,7 +615,44 @@ fn paint(
     let mut raster = RasterViewMut::new(w, h, &mut after);
     if let Some(offset) = clone_offset {
         let dabs = brush::dabs(&paths[0].points, settings);
-        brush::clone_dabs(&mut raster, pixels, &dabs, settings, [x0, y0], offset);
+        let to_source = clone_sampling::Sampler::new(clone_options.transform, matrix, inverse, scale, anchor, offset);
+        if clone_options.scope == clone_sampling::Scope::Current {
+            paint_sampled_dabs(&mut raster, op, &dabs, settings, [x0, y0], clone_options.blend,
+                |position| to_source.sample(pixels, position));
+        } else {
+            let to_world = |[x, y]: [f32; 2]| apply_matrix(&matrix, [
+                object.pos[0] + (x + 0.5) / scale[0],
+                object.pos[1] + (y + 0.5) / scale[1],
+            ]);
+            if let Some(global) = &clone_options.global {
+                let pixels_per_unit = |doc: &Document| {
+                    crate::units::to_px(1.0, doc.units, doc.dpi).ok_or_else(CommandError::invalid_params)
+                };
+                let factor = pixels_per_unit(document)? / pixels_per_unit(&global.document)?;
+                let start = to_world(anchor);
+                let offset = stroke.clone_global_offset.unwrap_or([0.0; 2]);
+                let sample_point = |position| {
+                    let world = to_world(position);
+                    let delta = clone_options.transform.sample_delta(
+                        [world[0] - start[0] + offset[0], world[1] - start[1] + offset[1]],
+                    );
+                    [global.point[0] + delta[0] * factor, global.point[1] + delta[1] * factor]
+                };
+                let region = clone_sampling::CompositeRegion::render(&global.document, rect, sample_point,
+                    |bounds, size| global.render(bounds, size))?;
+                paint_sampled_dabs(&mut raster, op, &dabs, settings, [x0, y0], clone_options.blend, |position| {
+                    region.sample(sample_point(position.map(|axis| axis as f32)))
+                });
+            } else {
+                let region = to_source.composite_region(document, object.id, clone_options.scope, rect, to_world)?;
+                paint_sampled_dabs(&mut raster, op, &dabs, settings, [x0, y0], clone_options.blend, |position| {
+                    region.sample(to_world(to_source.position(position.map(|axis| axis as f32))))
+                });
+            }
+        }
+    } else if let Some((source, preserve_missing)) = restore {
+        let dabs = paths.iter().map(|path| brush::dabs(&path.points, &path.settings(settings)));
+        brush::restore_dabs(&mut raster, source.as_deref(), size, dabs, settings, [x0, y0], preserve_missing);
     } else if let Some((colour, pigment)) = mixer {
         brush::mixer_stroke(&mut raster, &paths[0].points, settings, params.strength, colour, *pigment, [x0, y0]);
     } else if filtering {
@@ -552,6 +698,17 @@ fn paint(
     pixels.set_region(rect, &after);
     pixels.compact();
     Ok(true)
+}
+
+fn paint_sampled_dabs(
+    raster: &mut RasterViewMut, op: BrushOp, dabs: &[brush::Dab], settings: &BrushSettings,
+    origin: [u32; 2], blend: crate::blend::BlendMode, sample: impl Fn([u32; 2]) -> [u8; 4],
+) {
+    if op == BrushOp::Heal {
+        brush::heal_dabs(raster, dabs, settings, origin, sample);
+    } else {
+        brush::clone_dabs(raster, dabs, settings, origin, blend, sample);
+    }
 }
 
 struct StrokePath {

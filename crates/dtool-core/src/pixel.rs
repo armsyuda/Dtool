@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -8,10 +8,17 @@ use crate::object::ObjectId;
 pub const TILE_SIZE: u32 = 256;
 pub const TILE_BYTES: usize = (TILE_SIZE as usize) * (TILE_SIZE as usize) * 4;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct Tile {
-    pub data: Arc<[u8]>,
+    data: Arc<[u8]>,
+    alpha_bounds: OnceLock<Option<[u32; 4]>>,
 }
+
+impl PartialEq for Tile {
+    fn eq(&self, other: &Self) -> bool { self.shares_with(other) || self.data == other.data }
+}
+
+impl Eq for Tile {}
 
 impl Default for Tile {
     fn default() -> Self {
@@ -21,7 +28,7 @@ impl Default for Tile {
 
 impl Tile {
     pub fn new() -> Self {
-        Self { data: Arc::from(vec![0u8; TILE_BYTES]) }
+        Self::from_owned(vec![0u8; TILE_BYTES])
     }
 
     pub fn filled(rgba: [u8; 4]) -> Self {
@@ -29,13 +36,46 @@ impl Tile {
         for _ in 0..(TILE_BYTES / 4) {
             bytes.extend_from_slice(&rgba);
         }
-        Self { data: Arc::from(bytes) }
+        Self::from_owned(bytes)
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Self {
         let mut owned = bytes.to_vec();
         owned.resize(TILE_BYTES, 0);
-        Self { data: Arc::from(owned) }
+        Self::from_owned(owned)
+    }
+
+    fn from_owned(data: Vec<u8>) -> Self {
+        Self { data: Arc::from(data), alpha_bounds: OnceLock::new() }
+    }
+
+    pub(crate) fn shared_bytes(&self) -> Arc<[u8]> {
+        self.data.clone()
+    }
+
+    fn visible_extent(&self, width: u32, height: u32) -> Option<[u32; 4]> {
+        let extent = (*self.alpha_bounds.get_or_init(|| self.scan_alpha(TILE_SIZE, TILE_SIZE)))?;
+        if extent[2] <= width && extent[3] <= height {
+            Some(extent)
+        } else {
+            self.scan_alpha(width, height)
+        }
+    }
+
+    fn scan_alpha(&self, width: u32, height: u32) -> Option<[u32; 4]> {
+        let mut extent = [width, height, 0, 0];
+        for y in 0..height {
+            let row = (y * TILE_SIZE * 4) as usize;
+            let mut pixels = self.data[row..row + width as usize * 4].chunks_exact(4);
+            if let Some(left) = pixels.position(|pixel| pixel[3] != 0) {
+                let right = pixels.rposition(|pixel| pixel[3] != 0).map_or(left + 1, |index| left + index + 2);
+                extent[0] = extent[0].min(left as u32);
+                extent[1] = extent[1].min(y);
+                extent[2] = extent[2].max(right as u32);
+                extent[3] = y + 1;
+            }
+        }
+        (extent[2] > extent[0] && extent[3] > extent[1]).then_some(extent)
     }
 
     pub fn byte_len(&self) -> u64 {
@@ -51,6 +91,7 @@ impl Tile {
     }
 
     pub fn make_mut(&mut self) -> &mut [u8] {
+        self.alpha_bounds.take();
         if Arc::get_mut(&mut self.data).is_none() {
             let copy: Arc<[u8]> = Arc::from(self.data.to_vec());
             self.data = copy;
@@ -153,6 +194,27 @@ impl PixelLayer {
         }
     }
 
+    /// Pixel-space bounds of nonzero alpha, excluding backing tile padding.
+    pub fn visible_bounds(&self) -> Option<[u32; 4]> {
+        let mut extent = [self.width, self.height, 0, 0];
+        let columns = self.tile_columns() as usize;
+        if columns == 0 || self.height == 0 { return None; }
+        for (index, tile) in self.tiles.iter().take(self.tile_count()).enumerate() {
+            let Some(tile) = tile else { continue };
+            let x = (index % columns) as u32 * TILE_SIZE;
+            let y = (index / columns) as u32 * TILE_SIZE;
+            let width = (self.width - x).min(TILE_SIZE);
+            let height = (self.height - y).min(TILE_SIZE);
+            let Some([left, top, right, bottom]) = tile.visible_extent(width, height) else { continue };
+            extent[0] = extent[0].min(x + left);
+            extent[1] = extent[1].min(y + top);
+            extent[2] = extent[2].max(x + right);
+            extent[3] = extent[3].max(y + bottom);
+        }
+        let [left, top, right, bottom] = extent;
+        (right > left && bottom > top).then(|| [left, top, right - left, bottom - top])
+    }
+
     pub fn set(&mut self, x: u32, y: u32, rgba: [u8; 4]) {
         self.set_region([x, y, 1, 1], &rgba);
     }
@@ -212,6 +274,35 @@ impl PixelLayer {
         let zeros = vec![0u8; rw as usize * rh as usize * 4];
         self.set_region(rect, &zeros);
         self.compact();
+    }
+
+    pub fn changed_regions<'a>(&'a self, previous: &'a Self) -> impl Iterator<Item = [u32; 4]> + 'a {
+        let columns = self.tile_columns();
+        self.tiles.iter().take(self.tile_count()).enumerate().filter_map(move |(index, current)| {
+            let current = current.as_ref();
+            let prior = previous.tiles.get(index).and_then(Option::as_ref);
+            if columns == 0 || current == prior { return None; }
+            let origin = [index as u32 % columns, index as u32 / columns].map(|axis| axis * TILE_SIZE);
+            let [width, height] = [self.width - origin[0], self.height - origin[1]].map(|axis| axis.min(TILE_SIZE));
+            if current.is_none() || prior.is_none() {
+                return Some([origin[0], origin[1], width, height]);
+            }
+            let current = &current?.data;
+            let prior = &prior?.data;
+            let mut changed = [width, height, 0, 0];
+            for row in 0..height {
+                let start = (row * TILE_SIZE * 4) as usize;
+                let end = start + width as usize * 4;
+                let (a, b) = (&current[start..end], &prior[start..end]);
+                if a == b { continue; }
+                let pixels = || a.as_chunks::<4>().0.iter().zip(b.as_chunks::<4>().0);
+                let first = pixels().position(|(a, b)| a != b)? as u32;
+                let last = width - pixels().rev().position(|(a, b)| a != b)? as u32;
+                changed = [changed[0].min(first), changed[1].min(row), changed[2].max(last), row + 1];
+            }
+            let [x, y, right, bottom] = changed;
+            (x < right && y < bottom).then(|| [origin[0] + x, origin[1] + y, right - x, bottom - y])
+        })
     }
 
     pub fn compact(&mut self) {

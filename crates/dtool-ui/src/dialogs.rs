@@ -171,11 +171,11 @@ pub(crate) fn new_document_dialog_result(
     let mut can_create = true;
     let mut invalid_dimension = false;
     let mut recent = None;
-    let (key_action, button_action) = show_modal(ui.ctx(), "dialog.new_document", &title, ClosePolicy::CancelOnly, true, |ui| {
-        let viewport = ui.ctx().content_rect();
-        let dialog_width = (viewport.width() - 44.0).clamp(280.0, 1140.0);
-        let body_height = (viewport.height() - 180.0).clamp(130.0, 630.0);
-        let show_recent_column = dialog_width >= 760.0;
+    let (key_action, button_action) = crate::dialog_chrome::show_resizable_modal(
+        ui.ctx(), "dialog.new_document", &title, egui::vec2(1140.0, 720.0), egui::vec2(370.0, 265.0), |ui, size| {
+        let dialog_width = size.x;
+        let body_height = (size.y - if template_tools.is_some() { 116.0 } else { 84.0 }).max(60.0);
+        let show_recent_column = dialog_width >= 820.0;
         let stacked = dialog_width < 560.0;
         let gap = 10.0;
         let inset = 2.0 * (dtool_design::space("sm") + dtool_design::stroke_width("thin"));
@@ -320,26 +320,16 @@ pub(crate) fn new_document_dialog_result(
                 .show(ui, |ui| draw_recent(ui, 68.0));
         }
         if stacked {
-            options_scroll(ui, "new_document.compact", (body_height - 42.0).max(110.0), |ui| {
+            options_scroll(ui, "new_document.compact", (body_height - 36.0).max(48.0), |ui| {
                     dtool_design::dialog_section(ui, |ui| draw_presets(ui, state, 214.0));
                     dtool_design::dialog_section(ui, |ui| draw_settings(ui, state));
                 });
         } else {
-            let height = if show_recent_column { body_height } else { (body_height - 42.0).max(110.0) };
+            let height = if show_recent_column { body_height } else { (body_height - 36.0).max(48.0) };
             let preset_width = dialog_width - settings_width - gap
                 - if show_recent_column { recent_width + gap } else { 0.0 };
             ui.horizontal_top(|ui| {
                 ui.spacing_mut().item_spacing.x = gap;
-                if show_recent_column {
-                    ui.vertical(|ui| {
-                        ui.set_width(recent_width);
-                        dtool_design::dialog_section(ui, |ui| {
-                            ui.set_width(recent_width - inset);
-                            dtool_design::panel_header(ui, text("pref.home.recent"));
-                            draw_recent(ui, (height - 53.0 - inset).max(58.0));
-                        });
-                    });
-                }
                 ui.vertical(|ui| {
                     ui.set_width(preset_width);
                     dtool_design::dialog_section(ui, |ui| {
@@ -354,6 +344,16 @@ pub(crate) fn new_document_dialog_result(
                         options_scroll(ui, "new_document.settings", height - inset, |ui| draw_settings(ui, state));
                     });
                 });
+                if show_recent_column {
+                    ui.vertical(|ui| {
+                        ui.set_width(recent_width);
+                        dtool_design::dialog_section(ui, |ui| {
+                            ui.set_width(recent_width - inset);
+                            dtool_design::panel_header(ui, text("pref.home.recent"));
+                            draw_recent(ui, (height - 53.0 - inset).max(48.0));
+                        });
+                    });
+                }
             });
         }
 
@@ -370,8 +370,8 @@ pub(crate) fn new_document_dialog_result(
         }
         ui.separator();
         text_editing |= state.show_save_preset(ui, !invalid_dimension);
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let minimum = egui::vec2(dtool_design::size("button.width"), dtool_design::size("button.height"));
+        let minimum = egui::vec2(dtool_design::size("button.width"), dtool_design::size("button.height"));
+        ui.allocate_ui_with_layout(egui::vec2(dialog_width, minimum.y), egui::Layout::right_to_left(egui::Align::Center), |ui| {
             can_create = !invalid_dimension && (!state.favourites_only || !state.favourite_names().is_empty());
             let create_clicked = ui.add_enabled_ui(can_create, |ui|
                 dtool_design::primary_button(ui, &ok, minimum)).inner.clicked();
@@ -411,8 +411,8 @@ pub(crate) fn new_document_dialog_result(
 }
 
 pub(super) fn orientation_button(ui: &mut egui::Ui, landscape: bool, selected: bool, label: &str) -> egui::Response {
-    let response = dtool_design::with_icon_selection(ui, |ui| {
-        ui.add_sized([24.0, 23.0], egui::Button::new("").selected(selected))
+    let response = dtool_design::with_dialog_choice(ui, |ui| {
+        ui.add_sized([28.0, 24.0], egui::Button::new("").selected(selected))
     });
     let ink = if selected { dtool_design::selected_icon_ink(ui) } else { ui.style().interact(&response).fg_stroke.color };
     let size = if landscape { egui::vec2(15.0, 10.0) } else { egui::vec2(10.0, 15.0) };
@@ -429,16 +429,16 @@ fn show_document_presets(ui: &mut egui::Ui, state: &mut NewDocumentDialogState, 
     let mut has_results = false;
     let mut interacted = false;
     let mut create = false;
-    egui::ScrollArea::vertical().max_height(height).auto_shrink([false, false]).show(ui, |ui| {
+    options_scroll(ui, "new_document.presets", height, |ui| {
         let (saved, changed, create_saved) = state.show_saved_presets(ui, &filter);
         has_results |= saved;
         interacted |= changed;
         create |= create_saved;
         for (category, names) in [
             ("dialog.new_document.print", print),
-            ("dialog.new_document.digital", digital),
             ("dialog.new_document.print_cmyk", CMYK_DOCUMENT_PRESETS.as_slice()),
             ("dialog.new_document.photo", photo),
+            ("dialog.new_document.digital", digital),
         ] {
             let matches: Vec<_> = names.iter().copied().filter(|name| state.preset_matches(name, &filter)).collect();
             if matches.is_empty() {
@@ -473,19 +473,23 @@ fn show_document_presets(ui: &mut egui::Ui, state: &mut NewDocumentDialogState, 
 }
 
 fn preset_card(ui: &mut egui::Ui, name: &str, width: f32, height: f32, units: Units, selected: bool, favourite: bool) -> (bool, bool, bool) {
-    let (id, card) = ui.allocate_space(egui::vec2(114.0, 100.0));
+    let (id, card) = ui.allocate_space(egui::vec2(116.0, 104.0));
     let response = ui.interact(card, id, egui::Sense::click());
     response.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, ui.is_enabled(), selected, name));
     let visuals = ui.style().interact(&response);
-    let accent = ui.visuals().selection.bg_fill;
-    let fill = if selected { visuals.bg_fill.lerp_to_gamma(accent, 0.16) } else { visuals.bg_fill };
-    let border = if selected { egui::Stroke::new(1.0, accent) } else { visuals.bg_stroke };
+    let accent = dtool_design::theme::surface(ui.ctx(), "dialog.choice_border");
+    let fill = if selected { dtool_design::theme::surface(ui.ctx(), "dialog.choice") }
+        else if response.hovered() || response.is_pointer_button_down_on() || response.has_focus() { visuals.bg_fill }
+        else { dtool_design::theme::surface(ui.ctx(), "dialog.section") };
+    let border = if response.has_focus() { egui::Stroke::new(2.0, ui.visuals().text_color()) }
+        else if selected { egui::Stroke::new(1.0, accent) } else { visuals.bg_stroke };
     ui.painter().rect(card, 5.0, fill, border, egui::StrokeKind::Inside);
     paint_page_preview(ui, egui::pos2(card.center().x, card.top() + 32.0), width, height, 42.0);
     let dimensions = format!("{width} × {height} {}", crate::captions::units_identity(units));
     for (label, y, style, colour) in [
         (name, 65.0, egui::TextStyle::Body, ui.visuals().text_color()),
-        (&dimensions, 84.0, egui::TextStyle::Small, ui.visuals().weak_text_color()),
+        (&dimensions, 84.0, egui::TextStyle::Small,
+            if selected { ui.visuals().text_color() } else { ui.visuals().weak_text_color() }),
     ] {
         let galley = egui::WidgetText::from(label)
             .into_galley(ui, Some(egui::TextWrapMode::Truncate), card.width() - 8.0, style);
@@ -494,7 +498,7 @@ fn preset_card(ui: &mut egui::Ui, name: &str, width: f32, height: f32, units: Un
     }
     let star_rect = egui::Rect::from_min_size(card.right_top() + egui::vec2(-23.0, 3.0), egui::vec2(20.0, 20.0));
     let star = ui.interact(star_rect, id.with("favourite"), egui::Sense::click());
-    let star_colour = if favourite { accent } else { ui.style().interact(&star).fg_stroke.color };
+    let star_colour = if favourite || selected { accent } else { ui.style().interact(&star).fg_stroke.color };
     ui.painter().text(star_rect.center(), egui::Align2::CENTER_CENTER,
         if favourite { "★" } else { "☆" }, egui::TextStyle::Body.resolve(ui.style()), star_colour);
     let action = text(if favourite { "dialog.new_document.unfavourite" } else { "dialog.new_document.favourite" });
@@ -1301,6 +1305,17 @@ pub(crate) fn pick_file_path(title: &str, description: &str, extension: &str, sa
 
 #[cfg(windows)]
 pub(crate) fn pick_folder_path(title: &str) -> std::io::Result<Option<std::path::PathBuf>> {
+    pick_folder(title, 0)
+}
+
+#[cfg(windows)]
+pub(crate) fn pick_folder_path_with_address(title: &str) -> std::io::Result<Option<std::path::PathBuf>> {
+    use windows_sys::Win32::UI::Shell::BIF_EDITBOX;
+    pick_folder(title, BIF_EDITBOX)
+}
+
+#[cfg(windows)]
+fn pick_folder(title: &str, flags: u32) -> std::io::Result<Option<std::path::PathBuf>> {
     use std::os::windows::ffi::OsStringExt;
     use windows_sys::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoTaskMemFree, CoUninitialize};
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetActiveWindow;
@@ -1321,7 +1336,7 @@ pub(crate) fn pick_folder_path(title: &str) -> std::io::Result<Option<std::path:
             hwndOwner: GetActiveWindow(),
             pszDisplayName: display_name.as_mut_ptr(),
             lpszTitle: title.as_ptr(),
-            ulFlags: BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE,
+            ulFlags: BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE | flags,
             ..Default::default()
         };
         let item = SHBrowseForFolderW(&dialog);

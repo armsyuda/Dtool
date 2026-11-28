@@ -501,6 +501,12 @@ fn add(session: &mut Session, command: &Command) -> CommandResult {
     let mut document = session.document.clone();
     let name = command.params.get("name").and_then(Value::as_str).unwrap_or("Frame").to_string();
     let mut object = Object { name, pos, size, kind: crate::object::ObjectKind::PictureFrame, ..Object::default() };
+    let defaults = crate::commands::defaults::for_document(&document);
+    object.stroke = command.params.get("stroke").map(crate::paint::StrokeStyle::deserialize).transpose()
+        .map_err(|_| CommandError::invalid_params())?.unwrap_or_else(|| defaults.stroke_for_document(&document));
+    object.fill = command.params.get("fill").map(crate::paint::Paint::deserialize).transpose()
+        .map_err(|_| CommandError::invalid_params())?.unwrap_or(defaults.fill);
+    object.effects = crate::commands::defaults::effects_for_creation(&document, size, &command.params)?;
     let center = [pos[0] + size[0] * 0.5, pos[1] + size[1] * 0.5];
     crate::artboard::edit::assign_new_object(&document, &mut object, center);
     let id = document.create_object(object);

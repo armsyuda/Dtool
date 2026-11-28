@@ -6,7 +6,7 @@ use dtool_core::table::geometry::{table_grid, CellRect, TableGrid};
 use dtool_core::table::model::{EdgeStyle, Insets, StoryId, TableCell};
 use dtool_core::table::{resolve_cell, resolve_frame};
 
-use dtool_core::paint::{project_table_paint, range_fill, Paint, PaintRole};
+use dtool_core::paint::{project_table_paint, range_fill, Paint, PaintRole, StrokeAlign};
 
 use crate::display_list::{DisplayItem, DisplayList, TableEdgePattern, IDENTITY_MATRIX};
 
@@ -129,14 +129,26 @@ pub fn emit_table(
             let Some(style) = edge else { continue };
             // The frame draws an identical perimeter once, and owns a patterned
             // boundary so the cell grid does not fill the gaps.
-            if perimeter[side] && frame.edges[side].as_ref().is_some_and(|edge| {
+            if perimeter[side] && style.align == StrokeAlign::Inside && frame.edges[side].as_ref().is_some_and(|edge| {
                 edge == style
                     || (!edge.line_style.is_solid() && edge.width_pt > 0.0 && !matches!(edge.paint, Paint::None))
             }) {
                 continue;
             }
             let width = style.width_pt * units_per_point;
-            let mut emit = |rect| emit_edge(list, object.id, origin, rect, side, style, opacity, width);
+            let mut emit = |mut segment: [f32; 4]| {
+                if side % 2 == 1 && style.line_style.is_solid() {
+                    for (vertical, endpoint, sign) in [(0, 0, -1.0), (2, 2, 1.0)] {
+                        if segment[endpoint] == rect[endpoint]
+                            && let Some(neighbour) = format.edges[vertical].as_ref()
+                            && neighbour.paint == style.paint && neighbour.line_style.is_solid()
+                        {
+                            segment[endpoint] += sign * outward_width(neighbour.align, neighbour.width_pt * units_per_point);
+                        }
+                    }
+                }
+                emit_edge(list, object.id, origin, segment, side, style, style.align, opacity, width);
+            };
             if side >= 2 {
                 emit(*rect);
                 continue;
@@ -260,15 +272,15 @@ fn emit_edges(
 ) {
     for (side, edge) in edges.iter().enumerate() {
         if let Some(style) = edge {
-            emit_edge(list, object.id, origin, rect, side, style, opacity, style.width_pt * units_per_point);
+            emit_edge(list, object.id, origin, rect, side, style, StrokeAlign::Inside, opacity, style.width_pt * units_per_point);
         }
     }
 }
 
-fn emit_edge(list: &mut DisplayList, object_id: dtool_core::ObjectId, origin: [f32; 2], rect: [f32; 4], side: usize, style: &EdgeStyle, opacity: f32, width: f32) {
+fn emit_edge(list: &mut DisplayList, object_id: dtool_core::ObjectId, origin: [f32; 2], rect: [f32; 4], side: usize, style: &EdgeStyle, align: StrokeAlign, opacity: f32, width: f32) {
     list.items.push(DisplayItem {
         object_id,
-        bounds: edge_bounds(origin, rect, side, width),
+        bounds: edge_bounds(origin, rect, side, width, align),
         fill: visible(project_table_paint(PaintRole::Edge, None, None, Some(style), None)),
         opacity,
         outline_only: false,
@@ -284,17 +296,27 @@ fn emit_edge(list: &mut DisplayList, object_id: dtool_core::ObjectId, origin: [f
     });
 }
 
-fn edge_bounds(origin: [f32; 2], rect: [f32; 4], side: usize, width_pt: f32) -> [f32; 4] {
+fn outward_width(align: StrokeAlign, width: f32) -> f32 {
+    match align {
+        StrokeAlign::Inside => 0.0,
+        StrokeAlign::Centre => width * 0.5,
+        StrokeAlign::Outside => width,
+    }
+}
+
+fn edge_bounds(origin: [f32; 2], rect: [f32; 4], side: usize, width_pt: f32, align: StrokeAlign) -> [f32; 4] {
     let x0 = rect[0];
     let y0 = rect[1];
     let x1 = rect[2];
     let y1 = rect[3];
     let width = width_pt.max(0.0);
+    let outward = outward_width(align, width);
+    let inward = width - outward;
     let local = match side {
-        0 => [x0, y0, x0 + width, y1],
-        1 => [x0, y0, x1, y0 + width],
-        2 => [x1 - width, y0, x1, y1],
-        _ => [x0, y1 - width, x1, y1],
+        0 => [x0 - outward, y0, x0 + inward, y1],
+        1 => [x0, y0 - outward, x1, y0 + inward],
+        2 => [x1 - inward, y0, x1 + outward, y1],
+        _ => [x0, y1 - inward, x1, y1 + outward],
     };
     offset_xywh(origin, local)
 }
@@ -319,9 +341,9 @@ mod role_emission_contracts {
             cells.push(TableCell { id: alloc.next(), row: 0, col, row_span: 1, col_span: 1, merged_into: None, story: StoryId(u64::from(col) + 1), local: CellFormat::default(), mask: CellFormatMask::default() });
         }
         let mut frame = TableFrameFormat::default();
-        let red_edge = EdgeStyle { paint: Paint::Solid { colour: Colour::new(255, 0, 0, 255) }, width_pt: 1.0, line_style: Default::default() };
+        let red_edge = EdgeStyle { paint: Paint::Solid { colour: Colour::new(255, 0, 0, 255) }, width_pt: 1.0, line_style: Default::default(), align: Default::default() };
         frame.edges = [Some(red_edge.clone()), Some(red_edge.clone()), Some(red_edge.clone()), Some(red_edge)];
-        let table = TableNode { alloc, col_widths_pt: vec![40.0, 40.0], row_heights_pt: vec![20.0], cells, header_rows: 0, footer_rows: 0, format: None, frame_local: frame, frame_mask: FrameFormatMask(dtool_core::table::resolve::FRAME_EDGES.iter().fold(0, |mask, bit| mask | bit)) };
+        let table = TableNode { alloc, col_widths_pt: vec![40.0, 40.0], row_heights_pt: vec![20.0], cells, header_rows: 0, footer_rows: 0, format: None, frame_local: frame, frame_mask: FrameFormatMask(dtool_core::table::resolve::FRAME_EDGES.iter().fold(0, |mask, bit| mask | bit)), text_defaults: None };
         let mut doc = Document::default();
         doc.objects.push(Object { kind: ObjectKind::Table(table), pos: [10.0, 10.0], size: [80.0, 20.0], opacity: 1.0, ..Object::default() });
         doc.objects.push(Object { pos: [0.0, 0.0], size: [5.0, 5.0], opacity: 1.0, fill: Paint::Solid { colour: Colour::new(0, 255, 0, 255) }, ..Object::default() });

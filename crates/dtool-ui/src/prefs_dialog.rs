@@ -351,6 +351,7 @@ pub struct PrefsDialog {
     pub search: String,
     pub actions: Vec<PrefsAction>,
     pub shortcuts: ShortcutsPage,
+    pub(crate) open_pie_settings: bool,
     loaded: bool,
     prefs_path: PathBuf,
     ui_path: PathBuf,
@@ -369,6 +370,7 @@ impl Default for PrefsDialog {
             search: String::new(),
             actions: Vec::new(),
             shortcuts: ShortcutsPage::default(),
+            open_pie_settings: false,
             loaded: false,
             prefs_path: Prefs::default_path(),
             ui_path: UiSettings::default_path(),
@@ -568,7 +570,12 @@ impl PrefsDialog {
             PrefsTab::GridGuideColours => self.show_grid_colours(ui, prefs),
             PrefsTab::HomeScreen => self.show_home(ui, prefs),
             PrefsTab::Tools => self.show_tools(ui, prefs, settings),
-            PrefsTab::Shortcuts => self.shortcuts.show(ui),
+            PrefsTab::Shortcuts => {
+                if ui.button("파이메뉴 설정").clicked() {
+                    self.open_pie_settings = true;
+                }
+                self.shortcuts.show(ui);
+            },
             PrefsTab::Assistant => self.show_assistant(ui, prefs),
             PrefsTab::PhotoshopPlugins => self.show_plugins(ui, prefs),
             PrefsTab::LinkedServices => self.show_linked(ui, prefs),

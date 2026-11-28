@@ -55,32 +55,26 @@ impl DocSetupColourDialog {
             return;
         }
         let labels: Vec<String> = ColourFormat::LIST.iter().map(ToString::to_string).collect();
-        egui::Area::new(egui::Id::new("document.setup.colour"))
-            .order(egui::Order::Foreground)
-            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-            .show(ctx, |ui| {
-                dtool_design::dialog_frame(ui, |ui| {
-                    dtool_design::panel_header(ui, text("doc.setup.colour"));
-                    ui.horizontal(|ui| {
-                        ui.label(text("doc.setup.colour_format"));
-                        let label_refs: Vec<&str> = labels.iter().map(String::as_str).collect();
-                        if !label_refs.is_empty()
-                            && dtool_design::dropdown(ui, "doc.setup.colour_format.list", &mut self.selected_format, &label_refs).changed()
-                        {
-                            if let Some(format) = ColourFormat::LIST.get(self.selected_format).copied() {
-                                document.colour = DocColour::for_format(format, prefs);
-                                write_document_paints(document, format, prefs);
-                            }
-                        }
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label(text("doc.setup.colour_profile"));
-                        ui.label(&document.colour.profile);
-                    });
-                    if dtool_design::button(ui, text("button.close")).clicked() {
-                        self.open = false;
+        crate::dialog_chrome::show_floating(ctx, "document.setup.colour", text("doc.setup.colour"), |ui| {
+            ui.horizontal(|ui| {
+                ui.label(text("doc.setup.colour_format"));
+                let label_refs: Vec<&str> = labels.iter().map(String::as_str).collect();
+                if !label_refs.is_empty()
+                    && dtool_design::dropdown(ui, "doc.setup.colour_format.list", &mut self.selected_format, &label_refs).changed()
+                {
+                    if let Some(format) = ColourFormat::LIST.get(self.selected_format).copied() {
+                        document.colour = DocColour::for_format(format, prefs);
+                        write_document_paints(document, format, prefs);
                     }
-                });
+                }
             });
+            ui.horizontal(|ui| {
+                ui.label(text("doc.setup.colour_profile"));
+                ui.label(&document.colour.profile);
+            });
+            if dtool_design::button(ui, text("button.close")).clicked() {
+                self.open = false;
+            }
+        });
     }
 }

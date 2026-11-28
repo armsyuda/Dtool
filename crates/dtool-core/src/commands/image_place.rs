@@ -23,6 +23,14 @@ pub fn decode_path(path: &Path) -> Result<DecodedImage, CommandError> {
     DECODER.get().ok_or_else(|| CommandError::new("NOT_AVAILABLE"))?(path)
 }
 
+pub(super) fn embedded_bitmap(decoded: DecodedImage) -> Result<ImageResource, CommandError> {
+    let size = decoded.resource.pixel_size.map(|side| side as usize);
+    let mut image = crate::path_brush::encode_resource(size, &decoded.rgba, decoded.resource.dpi)
+        .ok_or_else(CommandError::invalid_params)?;
+    image.name = decoded.resource.name;
+    Ok(image)
+}
+
 fn wants_link(params: &serde_json::Value) -> bool {
     params.get("link").and_then(serde_json::Value::as_bool).unwrap_or(false)
 }

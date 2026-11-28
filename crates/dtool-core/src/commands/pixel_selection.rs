@@ -52,7 +52,7 @@ pub fn record(session: &mut Session, command: &Command, before: Option<PixelSele
     record_change(session, command.name.clone(), command.clone(), before)
 }
 
-pub(super) fn record_mask(session: &mut Session, command: &Command, before: Option<PixelSelection>) -> serde_json::Value {
+pub(crate) fn record_mask(session: &mut Session, command: &Command, before: Option<PixelSelection>) -> serde_json::Value {
     let redo = Command::with_params(crate::command::PIXEL_SELECTION_RESTORE, serde_json::json!({
         "selection": session.document.pixel_selection
     }));

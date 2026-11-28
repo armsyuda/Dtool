@@ -29,7 +29,7 @@ fn selected_compound(session: &Session) -> Option<(&Object, &CompoundSpec)> {
     let [id] = session.selection.ids.as_slice() else { return None };
     let object = session.document.get_object(*id)?;
     match &object.kind {
-        ObjectKind::Compound(spec) if !object.locked => Some((object, spec)),
+        ObjectKind::Compound(spec) if !session.document.is_object_locked(object) => Some((object, spec)),
         _ => None,
     }
 }

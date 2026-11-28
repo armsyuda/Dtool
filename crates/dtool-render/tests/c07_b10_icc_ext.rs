@@ -36,11 +36,11 @@ fn fill_of(doc: &Document, id: ObjectId) -> Paint {
     }).unwrap_or_else(|| panic!("no fill prim for {id:?}"))
 }
 
-fn stroke_of(doc: &Document, id: ObjectId) -> Paint {
+fn boxed_stroke_paint(doc: &Document, id: ObjectId) -> Paint {
     build_scene(doc, &CanvasFlags::default()).prims.into_iter().find_map(|prim| match prim {
-        Prim::Stroke { object, paint, .. } if object == id => Some(paint),
+        Prim::Fill { object, paint, contours, .. } if object == id && contours.len() == 2 => Some(paint),
         _ => None,
-    }).unwrap_or_else(|| panic!("no stroke prim for {id:?}"))
+    }).unwrap_or_else(|| panic!("no stroke outline for {id:?}"))
 }
 
 fn solid(paint: Paint) -> Colour {
@@ -87,7 +87,7 @@ fn c07_b10_stroke_gradient_hatch_mesh_are_converted_rgb_unchanged() {
     let gradient = Paint::Gradient { kind: GradientKind::Linear, stops: vec![GradientStop { offset: 0.0, colour: a }, GradientStop { offset: 1.0, colour: Colour::new(0, 0, 255, 255) }], geom: GradientGeom { start: [0.0, 0.0], end: [20.0, 0.0], ratio: 1.0, ..GradientGeom::default() } };
     let (doc, ids) = doc_with(vec![stroked, boxed(gradient)]);
     assert_eq!(rgb(solid(fill_of(&doc, ids[0]))), (10, 200, 30), "RGB fill unchanged");
-    assert_eq!(rgb(solid(stroke_of(&doc, ids[0]))), expected(&a, &fogra));
+    assert_eq!(rgb(solid(boxed_stroke_paint(&doc, ids[0]))), expected(&a, &fogra));
     match fill_of(&doc, ids[1]) {
         Paint::Gradient { stops, .. } => {
             assert_eq!(rgb(stops[0].colour), expected(&a, &fogra));

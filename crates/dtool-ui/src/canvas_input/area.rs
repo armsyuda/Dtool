@@ -1,6 +1,6 @@
 use super::{click_select_command, screen, Mods};
 use crate::input::primary_button_positions;
-use dtool_core::commands::measure::area::{totals, units, Geometry, Metrics};
+use dtool_core::commands::measure::area::{totals, units_for_objects, Geometry, Metrics};
 use dtool_core::commands::measure::readout_decimals;
 use dtool_core::object::ObjectId;
 use dtool_core::scene::Scene;
@@ -19,7 +19,7 @@ pub(super) struct Area {
     start: Option<[f32; 2]>,
     hover: Option<Hover>,
     selection: Option<SelectionReading>,
-    segment: Option<(f64, [[f32; 2]; 2])>,
+    segment: Option<(f64, Vec<[f32; 2]>)>,
     position: Option<[f32; 2]>,
     segments_mode: bool,
     scale: Option<([f32; 2], f64)>,
@@ -137,7 +137,7 @@ impl Area {
         let painter = ui.painter_at(rect);
         let to_screen = |p| screen(rect, &session.view, p);
         if let Some((_, points)) = &self.segment {
-            painter.line_segment([to_screen(points[0]), to_screen(points[1])], stroke);
+            painter.add(egui::Shape::line(points.iter().copied().map(to_screen).collect(), stroke));
         } else {
             for (points, closed) in &geometry.outlines {
                 let points = points.iter().copied().map(to_screen).collect();
@@ -148,7 +148,8 @@ impl Area {
                 });
             }
         }
-        let (unit, factor) = units(&session.document);
+        let ids = self.hover.as_ref().map(|(id, _, _)| std::slice::from_ref(id)).unwrap_or_default();
+        let (unit, factor) = units_for_objects(&session.document, ids);
         let decimals = readout_decimals(unit, false);
         let area_decimals = readout_decimals(unit, true);
         let metrics = geometry.metrics;
@@ -199,7 +200,12 @@ impl Area {
         } else {
             hover.map(|geometry| geometry.metrics).unwrap_or_default()
         };
-        let (unit, factor) = units(doc);
+        let reading_ids = if *count > 0 {
+            ids.as_slice()
+        } else {
+            self.hover.as_ref().map(|(id, _, _)| std::slice::from_ref(id)).unwrap_or_default()
+        };
+        let (unit, factor) = units_for_objects(doc, reading_ids);
         let decimals = readout_decimals(unit, false);
         let area_decimals = readout_decimals(unit, true);
         let [drawing, real] = doc.drawing_scale.map(f64::from);
@@ -230,18 +236,8 @@ impl Area {
             }
             ui.separator();
             ui.label(text("ctx.area.perimeter"));
-            if ui
-                .selectable_label(!self.segments_mode, text("ctx.area.full_edges"))
-                .clicked()
-            {
-                self.segments_mode = false;
-            }
-            if ui
-                .selectable_label(self.segments_mode, text("ctx.area.segments"))
-                .clicked()
-            {
-                self.segments_mode = true;
-            }
+            dtool_design::choice_value(ui, &mut self.segments_mode, false, text("ctx.area.full_edges"));
+            dtool_design::choice_value(ui, &mut self.segments_mode, true, text("ctx.area.segments"));
             ui.separator();
             ui.label(format!(
                 "{} {:.area_decimals$} {unit}²",

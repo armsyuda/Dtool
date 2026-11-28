@@ -6,6 +6,7 @@ use crate::object::ObjectId;
 use dtool_protocol::{Command, CommandError, CommandResult};
 use kurbo::{ParamCurve, ParamCurveArclen, ParamCurveDeriv};
 use serde_json::{json, Value};
+use std::collections::HashSet;
 
 pub const POINTS_TRANSFORM: &str = "path.points.transform";
 pub const POINT_MOVE: &str = "path.point.move";
@@ -131,6 +132,24 @@ fn locate(contours: &[Contour], id: PointId) -> Option<(usize, usize)> {
     contours.iter().enumerate().find_map(|(c, contour)| contour.points.iter().position(|p| p.id == id).map(|i| (c, i)))
 }
 
+fn selected_positions(contours: &[Contour], params: &Value) -> Result<Vec<(usize, usize)>, CommandError> {
+    let Some(nodes) = params.get("node_indices") else {
+        return point_ids(params)?.into_iter().map(|id| {
+            locate(contours, id).ok_or_else(CommandError::not_found)
+        }).collect();
+    };
+    let positions: Vec<(usize, usize)> =
+        serde_json::from_value(nodes.clone()).map_err(|_| CommandError::invalid_params())?;
+    let mut unique = HashSet::new();
+    if positions.is_empty() || positions.iter().any(|&(contour, index)| {
+        !unique.insert((contour, index))
+            || !contours.get(contour).is_some_and(|contour| index < contour.points.len())
+    }) {
+        return Err(CommandError::invalid_params());
+    }
+    Ok(positions)
+}
+
 fn subpath(params: &Value, contours: &[Contour]) -> Result<usize, CommandError> {
     let index = match params.get("subpath").or_else(|| params.get("contour")) {
         None | Some(Value::Null) => 0,
@@ -171,7 +190,7 @@ fn selection(session: &Session, params: &Value) -> CommandResult {
 fn plan(session: &Session, command: &Command) -> Result<Plan, CommandError> {
     let params = &command.params;
     let id = object_id(params)?;
-    let preserve_transform = matches!(command.name.as_str(), REVERSE | SMOOTH) && preserve_transform(params)?;
+    let preserve_transform = matches!(command.name.as_str(), REVERSE | SMOOTH | POINT_DELETE | POINTS_BRIDGE) && preserve_transform(params)?;
     let mut contours = world_contours(editable_curve_impl(session, id, preserve_transform)?);
     let extra = match command.name.as_str() {
         POINTS_TRANSFORM | POINT_MOVE => transform(&mut contours, params)?,
@@ -297,10 +316,12 @@ fn span_length(contour: &Contour, from: usize) -> f64 {
 }
 
 fn delete_keep_shape(contours: &mut [Contour], params: &Value) -> Result<Value, CommandError> {
-    let ids = point_ids(params)?;
-    for id in &ids {
-        let (c, i) = locate(contours, *id).ok_or_else(CommandError::not_found)?;
+    let mut positions = selected_positions(contours, params)?;
+    let mut ids = Vec::with_capacity(positions.len());
+    for current in 0..positions.len() {
+        let (c, i) = positions[current];
         let contour = &mut contours[c];
+        ids.push(contour.points[i].id.0);
         let n = contour.points.len();
         if n <= 2 {
             return Err(CommandError::invalid_params());
@@ -324,6 +345,11 @@ fn delete_keep_shape(contours: &mut [Contour], params: &Value) -> Result<Value, 
             contour.points[next].handle_in = Some(sub(b, scale(in_dir, reach)));
         }
         contour.points.remove(i);
+        for (later_contour, later_index) in &mut positions[current + 1..] {
+            if *later_contour == c && *later_index > i {
+                *later_index -= 1;
+            }
+        }
         if !contour.closed {
             if let Some(first) = contour.points.first_mut() {
                 first.handle_in = None;
@@ -333,7 +359,7 @@ fn delete_keep_shape(contours: &mut [Contour], params: &Value) -> Result<Value, 
             }
         }
     }
-    Ok(json!({"points": ids.iter().map(|p| p.0).collect::<Vec<_>>(), "keep_shape": true}))
+    Ok(json!({"points": ids, "keep_shape": true}))
 }
 
 fn segment_edit(contours: &mut [Contour], params: &Value) -> Result<Value, CommandError> {
@@ -365,12 +391,12 @@ fn reverse(contour: &mut Contour) {
 }
 
 fn bridge(contours: &mut Vec<Contour>, params: &Value) -> Result<Value, CommandError> {
-    let ids = point_ids(params)?;
-    if ids.len() != 2 {
+    let positions = selected_positions(contours, params)?;
+    let [(ca, ia), (cb, ib)] = positions.as_slice() else {
         return Err(CommandError::invalid_params());
-    }
-    let (ca, ia) = locate(contours, ids[0]).ok_or_else(CommandError::not_found)?;
-    let (cb, ib) = locate(contours, ids[1]).ok_or_else(CommandError::not_found)?;
+    };
+    let (ca, ia, cb, ib) = (*ca, *ia, *cb, *ib);
+    let ids = [contours[ca].points[ia].id.0, contours[cb].points[ib].id.0];
     let end = |c: usize, i: usize| !contours[c].closed && (i == 0 || i + 1 == contours[c].points.len());
     if !end(ca, ia) || !end(cb, ib) {
         return Err(CommandError::new("NOT_AN_ENDPOINT"));
@@ -380,7 +406,7 @@ fn bridge(contours: &mut Vec<Contour>, params: &Value) -> Result<Value, CommandE
             return Err(CommandError::invalid_params());
         }
         contours[ca].closed = true;
-        return Ok(json!({"subpath": ca, "closed": true, "points": [ids[0].0, ids[1].0]}));
+        return Ok(json!({"subpath": ca, "closed": true, "points": ids}));
     }
     let mut first = contours[ca].clone();
     let mut second = contours[cb].clone();
@@ -396,12 +422,22 @@ fn bridge(contours: &mut Vec<Contour>, params: &Value) -> Result<Value, CommandE
     if let Some(head) = second.points.first_mut() {
         head.handle_in = None;
     }
+    let mut next_id = contours.iter().flat_map(|contour| &contour.points)
+        .map(|point| point.id.0).max().unwrap_or_default();
+    let mut used: HashSet<_> = first.points.iter().map(|point| point.id).collect();
+    for point in &mut second.points {
+        if !used.insert(point.id) {
+            next_id = next_id.checked_add(1).ok_or_else(CommandError::invalid_params)?;
+            point.id = PointId(next_id);
+        }
+    }
+    let joined_ids = [ids[0], second.points[0].id.0];
     first.points.extend(second.points);
     first.closed = false;
     let (keep, drop) = if ca < cb { (ca, cb) } else { (cb, ca) };
     contours[keep] = first;
     contours.remove(drop);
-    Ok(json!({"subpath": keep, "closed": false, "removed_subpath": drop, "points": [ids[0].0, ids[1].0]}))
+    Ok(json!({"subpath": keep, "closed": false, "removed_subpath": drop, "points": joined_ids}))
 }
 
 fn smooth(contours: &mut [Contour], params: &Value) -> Result<Value, CommandError> {

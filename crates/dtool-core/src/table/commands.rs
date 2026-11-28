@@ -175,6 +175,8 @@ fn handle_table_create(session: &mut Session, command: &Command) -> CommandResul
     }
     let pos = parse_pos(&command.params)?;
     let insert = parse_insert(&command.params, pos)?;
+    let text_defaults = crate::commands::defaults::for_document(&session.document).text;
+    let text_defaults = (text_defaults != crate::defaults::TextDefaults::default()).then_some(text_defaults);
     let before = insert.then(|| session.document.clone());
 
     let col_width = width / cols as f32;
@@ -196,6 +198,7 @@ fn handle_table_create(session: &mut Session, command: &Command) -> CommandResul
             paint: crate::paint::Paint::Solid { colour: crate::paint::Colour::new(87, 87, 87, 255) },
             width_pt: 1.0,
             line_style: Default::default(),
+            align: Default::default(),
         };
         cell_format.edges = std::array::from_fn(|_| Some(edge.clone()));
         cell_mask.0 |= super::resolve::CELL_EDGES.into_iter().fold(0, |mask, bit| mask | bit);
@@ -234,6 +237,7 @@ fn handle_table_create(session: &mut Session, command: &Command) -> CommandResul
         format: None,
         frame_local: default_frame_format(),
         frame_mask: default_frame_mask(),
+        text_defaults,
     };
 
     let Some(before) = before else {
@@ -663,6 +667,10 @@ fn handle_import(session: &mut Session, command: &Command) -> CommandResult {
         format: None,
         frame_local: default_frame_format(),
         frame_mask: default_frame_mask(),
+        text_defaults: {
+            let defaults = crate::commands::defaults::for_document(&session.document).text;
+            (defaults != crate::defaults::TextDefaults::default()).then_some(defaults)
+        },
     };
 
     session.generation += 1;
@@ -789,7 +797,10 @@ fn parse_edge(value: &serde_json::Value) -> Option<Option<crate::table::model::E
     let line_style = value.get("line_style").map_or(Some(Default::default()), |style| {
         parse_enum(style, &[("solid", "Solid"), ("dashed", "Dashed"), ("dotted", "Dotted")])
     })?;
-    Some(Some(crate::table::model::EdgeStyle { paint, width_pt: width, line_style }))
+    let align = value.get("align").map_or(Some(Default::default()), |align| {
+        parse_enum(align, &[("inside", "Inside"), ("centre", "Centre"), ("center", "Centre"), ("outside", "Outside")])
+    })?;
+    Some(Some(crate::table::model::EdgeStyle { paint, width_pt: width, line_style, align }))
 }
 
 fn parse_borders(value: &serde_json::Value) -> Option<[Option<Option<crate::table::model::EdgeStyle>>; 4]> {
@@ -861,14 +872,19 @@ struct SelectionEdgePatch {
     paint: Option<crate::paint::Paint>,
     width_pt: Option<f32>,
     line_style: Option<crate::paint::LineStyle>,
+    align: Option<crate::paint::StrokeAlign>,
 }
 
 impl SelectionEdgePatch {
     fn apply(&self, current: Option<EdgeStyle>) -> EdgeStyle {
         use crate::paint::{Colour, Paint};
         let fallback_paint = || Paint::Solid { colour: Colour::new(0, 0, 0, 255) };
+        let align_only = self.paint.is_none() && self.width_pt.is_none() && self.line_style.is_none();
         let mut edge = current.unwrap_or_else(|| EdgeStyle {
-            paint: fallback_paint(), width_pt: 1.0, line_style: Default::default(),
+            paint: if align_only { Paint::None } else { fallback_paint() },
+            width_pt: if align_only { 0.0 } else { 1.0 },
+            line_style: Default::default(),
+            align: Default::default(),
         });
         if let Some(paint) = &self.paint {
             if !matches!(paint, Paint::None) && edge.width_pt == 0.0 && self.width_pt.is_none() {
@@ -883,6 +899,7 @@ impl SelectionEdgePatch {
             }
         }
         edge.line_style = self.line_style.unwrap_or(edge.line_style);
+        edge.align = self.align.unwrap_or(edge.align);
         edge
     }
 }
@@ -1060,12 +1077,12 @@ fn handle_cell_format_set(session: &mut Session, command: &Command) -> CommandRe
             Some(patch) => serde_json::from_value::<SelectionEdgePatch>(patch.clone()).map_err(|_| CommandError::invalid_params())?,
             None => {
                 let edge = value.get("edge").and_then(parse_edge).flatten().ok_or_else(CommandError::invalid_params)?;
-                SelectionEdgePatch { paint: Some(edge.paint), width_pt: Some(edge.width_pt), line_style: Some(edge.line_style) }
+                SelectionEdgePatch { paint: Some(edge.paint), width_pt: Some(edge.width_pt), line_style: Some(edge.line_style), align: Some(edge.align) }
             }
         };
         if patch.width_pt.is_some_and(|width| !width.is_finite() || width < 0.0)
             || patch.paint.as_ref().is_some_and(|paint| !crate::paint::validate_paint(paint))
-            || (patch.paint.is_none() && patch.width_pt.is_none() && patch.line_style.is_none())
+            || (patch.paint.is_none() && patch.width_pt.is_none() && patch.line_style.is_none() && patch.align.is_none())
         {
             return Err(CommandError::invalid_params());
         }
@@ -1130,7 +1147,7 @@ fn handle_cell_format_set(session: &mut Session, command: &Command) -> CommandRe
                         continue;
                     }
                     local.edges[index] = Some(if owner || *is_patch { patch.apply(edge) } else {
-                        crate::table::model::EdgeStyle { paint: crate::paint::Paint::None, width_pt: 0.0, line_style: Default::default() }
+                        crate::table::model::EdgeStyle { paint: crate::paint::Paint::None, width_pt: 0.0, line_style: Default::default(), align: Default::default() }
                     });
                     *mask |= edge_bits[index];
                 }
@@ -1157,7 +1174,7 @@ mod cell_format_set_contracts {
                 cells.push(TableCell { id: alloc.next(), row, col, row_span: 1, col_span: 1, merged_into: None, story: StoryId(u64::from(row * 3 + col)), local: CellFormat::default(), mask: CellFormatMask::default() });
             }
         }
-        let table = TableNode { alloc, col_widths_pt: vec![30.0; 3], row_heights_pt: vec![20.0; 2], cells, header_rows: 0, footer_rows: 0, format: None, frame_local: TableFrameFormat::default(), frame_mask: FrameFormatMask::default() };
+        let table = TableNode { alloc, col_widths_pt: vec![30.0; 3], row_heights_pt: vec![20.0; 2], cells, header_rows: 0, footer_rows: 0, format: None, frame_local: TableFrameFormat::default(), frame_mask: FrameFormatMask::default(), text_defaults: None };
         let mut session = Session::new(crate::Document::default());
         session.document.objects.push(Object { id: ObjectId(7), kind: ObjectKind::Table(table), ..Object::default() });
         session

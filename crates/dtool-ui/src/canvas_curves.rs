@@ -39,8 +39,8 @@ pub fn constrain_angle(start: [f32; 2], end: [f32; 2]) -> [f32; 2] {
 }
 
 pub fn drawing_curve_stroke(session: &Session) -> dtool_core::paint::StrokeStyle {
-    let mut stroke = dtool_core::commands::curve_edit::default_stroke();
-    stroke.width *= dtool_core::units::units_per_point(session.document.units, session.document.dpi);
+    let stroke = dtool_core::commands::defaults::for_document(&session.document)
+        .stroke_for_document(&session.document);
     dtool_core::commands::context_toolbar::drawing_stroke(session, &session.active_tool, stroke)
 }
 
@@ -515,6 +515,16 @@ impl Pencil {
         Some(command)
     }
 
+    pub fn finish_blob(&mut self, tolerance: f32, width: f32, erase: bool) -> Option<Command> {
+        let points = simplify(&std::mem::take(&mut self.points), tolerance);
+        self.cancel();
+        if points.len() < 2 {
+            return None;
+        }
+        let command = if erase { "vector.blob.erase" } else { "blob.paint" };
+        Some(Command::with_params(command, json!({ "points": points, "width": width, "select": !erase })))
+    }
+
     pub fn preview(&self) -> Option<Contour> {
         (self.points.len() >= 2).then(|| Contour { points: self.points.iter().enumerate().map(|(i, p)| PathPoint::sharp(PointId(i as u64 + 1), p64(*p))).collect(), closed: false })
     }
@@ -548,7 +558,7 @@ impl PathExtension {
         let mut closest = near;
         for &id in &session.selection.ids {
             let Some(object) = session.document.get_object(id)
-                .filter(|o| !o.locked && o.vector_crop.is_none() && scene.quad(id).is_some()) else { continue };
+                .filter(|o| !session.document.is_object_locked(o) && o.vector_crop.is_none() && scene.quad(id).is_some()) else { continue };
             let matrix = object_matrix(object);
             let Some(inverse) = invert_matrix(&matrix) else { continue };
             for (index, contour) in world_contours(object).into_iter().enumerate() {
@@ -941,7 +951,7 @@ fn batch_curves(mut commands: Vec<Command>) -> Option<Command> {
 
 pub fn editable(session: &Session, id: ObjectId) -> Option<Vec<Contour>> {
     let object = session.document.get_object(id)?;
-    if object.locked || object.curve().is_none() {
+    if session.document.is_object_locked(object) || object.curve().is_none() {
         return None;
     }
     let mut contours = world_contours(object);
@@ -958,7 +968,7 @@ pub fn node_contours(session: &Session, id: ObjectId) -> Option<(Vec<Contour>, b
         return Some((contours, false));
     }
     let object = session.document.get_object(id)?;
-    if object.locked || object.rotation_deg != 0.0 || object.shear_deg != 0.0 {
+    if session.document.is_object_locked(object) || object.rotation_deg != 0.0 || object.shear_deg != 0.0 {
         return None;
     }
     preview_contours(object).map(|contours| (contours, true))
@@ -1104,7 +1114,7 @@ pub(crate) fn node_context_menu(session: &Session) -> bool {
 fn selected_curves(session: &Session) -> impl Iterator<Item = ObjectId> + '_ {
     session.selection.ids.iter().copied().filter(|&id| {
         session.document.get_object(id).is_some_and(|object| {
-            !object.locked && object.pickable && object.curve().is_some()
+            !session.document.is_object_locked(object) && object.pickable && object.curve().is_some()
                 && invert_matrix(&object_matrix(object)).is_some()
         })
     })
@@ -1578,7 +1588,7 @@ impl NodeEdit {
         let id = self.target?;
         let [(subpath, index)] = self.selected.as_slice() else { return None };
         let object = session.document.get_object(id)?;
-        if object.locked || invert_matrix(&object_matrix(object)).is_none() { return None; }
+        if session.document.is_object_locked(object) || invert_matrix(&object_matrix(object)).is_none() { return None; }
         let contour = object.curve()?.contours().nth(*subpath)?;
         let from = contour.points.get(*index)?;
         let to = contour.points.get(index + 1).or_else(|| {
@@ -1602,7 +1612,36 @@ impl NodeEdit {
         if !contour.closed && (*i == 0 || *i + 1 == contour.points.len()) {
             return None;
         }
-        Some(self.preserve_edit_transform(Command::with_params(PATH_BREAK, json!({ "id": id.0, "point": { "id": node.id.0 } }))))
+        Some(self.preserve_edit_transform(Command::with_params(PATH_BREAK, json!({
+            "id": id.0, "subpath": c, "point": { "id": node.id.0 },
+        }))))
+    }
+
+    fn selected_points_command(&self, session: &Session, name: &str, keep_shape: bool) -> Option<Command> {
+        if self.primitive || self.selected.is_empty() || self.has_cross_selection() {
+            return None;
+        }
+        let id = self.target.filter(|id| session.selection.ids.contains(id))?;
+        let command = Command::with_params(name, json!({
+            "id": id.0,
+            "node_indices": self.selected,
+            "keep_shape": keep_shape,
+            "preserve_transform": true,
+        }));
+        session.can_execute(&command).then_some(command)
+    }
+
+    pub(crate) fn join_action(&self, session: &Session) -> (&'static str, Option<Command>) {
+        if self.selected.len() == 2
+            && let Some(command) = self.selected_points_command(session, dtool_core::commands::path_points::POINTS_BRIDGE, false)
+        {
+            return ("ctx.node.bridge", Some(command));
+        }
+        ("ctx.node.join", join_command(session))
+    }
+
+    pub(crate) fn delete_keeping_shape_command(&self, session: &Session) -> Option<Command> {
+        self.selected_points_command(session, dtool_core::commands::path_points::POINT_DELETE, true)
     }
 
     pub(crate) fn reverse_command(&self, session: &Session) -> Option<Command> {
@@ -1618,7 +1657,7 @@ impl NodeEdit {
         if self.has_cross_selection() { return None; }
         let id = self.target?;
         let object = session.document.get_object(id)?;
-        if object.locked || self.primitive || invert_matrix(&object_matrix(object)).is_none() { return None; }
+        if session.document.is_object_locked(object) || self.primitive || invert_matrix(&object_matrix(object)).is_none() { return None; }
         let curve = object.curve()?;
         let mut subpaths: Vec<_> = self.selected.iter().map(|&(subpath, _)| subpath).collect();
         if subpaths.is_empty() { subpaths.push(0); }

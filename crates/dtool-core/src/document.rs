@@ -164,6 +164,9 @@ pub struct Document {
     /// Process-local identity (not saved); clones share it, new/opened documents get a fresh one.
     #[serde(skip)]
     pub instance: DocInstance,
+    // Export views keep these ancestors for clipping and hierarchy without drawing their content.
+    #[serde(skip)]
+    pub render_suppressed_objects: std::collections::HashSet<ObjectId>,
     #[serde(default)]
     pub setup: DocumentSetup,
     #[serde(default)]
@@ -174,6 +177,8 @@ pub struct Document {
     pub slices: Vec<crate::slice::Slice>,
     #[serde(default)]
     pub export_defaults: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub object_defaults: Option<crate::defaults::ObjectDefaults>,
     #[serde(default)]
     pub next_slice_id: u64,
     #[serde(default)]
@@ -318,11 +323,13 @@ impl Document {
         let next_page_id = pages.len() as u64 + 1;
         Document {
             instance: DocInstance::default(),
+            render_suppressed_objects: Default::default(),
             setup: DocumentSetup::default(),
             grid: crate::grid::Grid::default(),
             rulers: crate::rulers::RulerState::default(),
             slices: Vec::new(),
             export_defaults: serde_json::json!({}),
+            object_defaults: None,
             artboard_backing_pages: Default::default(),
             layout_artboard_origins: None,
             preserve_layout_page_order: false,
@@ -668,13 +675,37 @@ impl Document {
         self.objects.iter().find(|o| o.id == id)
     }
 
+    /// A locked parent protects the geometry of its descendants.
+    pub fn is_object_locked(&self, object: &Object) -> bool {
+        if object.locked {
+            return true;
+        }
+        let mut parent_id = object.parent_id;
+        for _ in 0..self.objects.len() {
+            let Some(parent) = parent_id.and_then(|id| self.get_object(id)) else {
+                return false;
+            };
+            if parent.locked {
+                return true;
+            }
+            parent_id = parent.parent_id;
+        }
+        parent_id.is_some()
+    }
+
     pub fn set_units(&mut self, units: Units) {
-        self.units = units;
+        if self.units != units {
+            self.units = units;
+            crate::commands::measure::refresh_saved_dimensions(self);
+        }
     }
 
     pub fn set_drawing_scale(&mut self, scale: [f32; 2]) -> Result<(), dtool_protocol::CommandError> {
         Self::validate_drawing_scale(scale)?;
-        self.drawing_scale = scale;
+        if self.drawing_scale != scale {
+            self.drawing_scale = scale;
+            crate::commands::measure::refresh_saved_dimensions(self);
+        }
         Ok(())
     }
 
@@ -749,11 +780,15 @@ impl Document {
             message_key: format!("error.object_not_found.{}", id.0),
         })?;
 
-        crate::paint::apply_transform_to_paint(&mut obj.fill, scale_x, scale_y, rotate_rad);
-        crate::paint::apply_transform_to_stroke(&mut obj.stroke, scale_x, scale_y, rotate_rad);
+        for fill in std::iter::once(&mut obj.fill).chain(&mut obj.additional_fills) {
+            crate::paint::apply_transform_to_paint(fill, scale_x, scale_y, rotate_rad);
+        }
+        for stroke in std::iter::once(&mut obj.stroke).chain(&mut obj.additional_strokes) {
+            crate::paint::apply_transform_to_stroke(stroke, scale_x, scale_y, rotate_rad);
+        }
         let transform = kurbo::Affine::rotate(rotate_rad) * kurbo::Affine::scale_non_uniform(scale_x, scale_y);
         match &mut obj.transparency {
-            crate::paint::Transparency::Gradient { geom, .. } => *geom = geom.transform(transform.as_coeffs()),
+            crate::paint::Transparency::Gradient { kind, geom, .. } => *geom = geom.transform_for_kind(*kind, transform.as_coeffs()),
             crate::paint::Transparency::InverseBitmap(bitmap) => {
                 bitmap.matrix = (transform * kurbo::Affine::new(bitmap.matrix)).as_coeffs();
             }

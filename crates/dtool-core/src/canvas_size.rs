@@ -458,6 +458,13 @@ fn resample_separable(
     out
 }
 
+pub(crate) fn resize_rgba_lanczos(
+    pixels: &[u8], width: u32, height: u32, new_width: u32, new_height: u32,
+) -> Vec<u8> {
+    let source = PixelLayer::from_rgba(width, height, pixels);
+    resample_separable(&source, new_width, new_height, 3, kernel_lanczos3)
+}
+
 fn resample_lanczos_nonsep(src: &PixelLayer, new_w: u32, new_h: u32) -> Vec<u8> {
     let mut out = vec![0u8; new_w as usize * new_h as usize * 4];
     let radius = 3i64;
@@ -888,8 +895,14 @@ pub fn turn_canvas(doc: &mut Document, t: CanvasTurn) -> Result<(), CommandError
             CanvasTurn::FlipH => [-1.0, 0.0, 0.0, 1.0, 1.0, 0.0],
             CanvasTurn::FlipV => [1.0, 0.0, 0.0, -1.0, 0.0, 1.0],
         });
+        let frame = mask.frame.map(|_| {
+            let [x, y, w, h] = mask.relative_frame().map(f64::from);
+            let rect = transform.transform_rect_bbox(kurbo::Rect::new(x, y, x + w, y + h));
+            [rect.x0 as f32, rect.y0 as f32, rect.width() as f32, rect.height() as f32]
+        });
         Ok(crate::raster_source::LayerMask {
             object: mask.object,
+            frame,
             coverage: PixelSelection::from_coverage(layer.width, layer.height, coverage),
             vector_outline: mask.vector_outline.as_ref()
                 .map(|outline| crate::curve::Curve::from_kurbo(&(transform * outline.to_kurbo()))),

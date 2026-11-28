@@ -1,4 +1,4 @@
-use crate::canvas_curves::{editable, join_command, NodeEdit};
+use crate::canvas_curves::{editable, NodeEdit};
 use crate::fill_stroke::{paint_gradient_well, paint_well_colour_in, FillStrokeWells, WellState};
 use crate::icon_cache::IconCache;
 use crate::panels::colour::ColourTarget;
@@ -46,9 +46,9 @@ pub(crate) fn show_paint_wells(ui: &mut Ui, session: &Session, wells: &FillStrok
 pub(crate) fn show_stroke_controls(ui: &mut Ui, session: &Session) -> Option<Command> {
     let text = dtool_strings::text;
     let objects: Vec<_> = session.selection.ids.iter().filter_map(|id| session.document.get_object(*id)).collect();
-    let can_paint = objects.iter().any(|object| !object.locked);
+    let can_paint = objects.iter().any(|object| !session.document.is_object_locked(object));
     let mut action = None;
-    let ids = objects.iter().filter(|object| !object.locked).map(|object| object.id.0).collect::<Vec<_>>();
+    let ids = objects.iter().filter(|object| !session.document.is_object_locked(object)).map(|object| object.id.0).collect::<Vec<_>>();
     let style = ui.add_enabled(can_paint, egui::Button::new("").min_size(vec2(24.0, 26.0)));
     let style = style.on_hover_text(text("stroke.style"));
     style.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, can_paint, text("stroke.style")));
@@ -97,7 +97,7 @@ pub(crate) fn show_stroke_controls(ui: &mut Ui, session: &Session) -> Option<Com
 
 pub(crate) fn stroke_preview(ctx: &egui::Context, session: &Session) -> Option<crate::stroke_panel::StrokeWidthPreview> {
     let ids: Vec<_> = session.selection.ids.iter().copied().filter(|id| {
-        session.document.get_object(*id).is_some_and(|object| !object.locked)
+        session.document.get_object(*id).is_some_and(|object| !session.document.is_object_locked(object))
     }).collect();
     let raw_ids: Vec<_> = ids.iter().map(|id| id.0).collect();
     let field = egui::Id::new("dtool.context.stroke.width").with((session.context, &raw_ids));
@@ -114,7 +114,7 @@ pub(crate) fn show(ui: &mut Ui, session: &Session, edit: &mut NodeEdit, wells: &
 {
     let text = dtool_strings::text;
     let objects: Vec<_> = session.selection.ids.iter().filter_map(|id| session.document.get_object(*id)).collect();
-    let can_paint = objects.iter().any(|object| !object.locked);
+    let can_paint = objects.iter().any(|object| !session.document.is_object_locked(object));
     let paint = show_paint_wells(ui, session, wells, can_paint);
     let mut action = show_stroke_controls(ui, session);
     ui.separator();
@@ -133,10 +133,11 @@ pub(crate) fn show(ui: &mut Ui, session: &Session, edit: &mut NodeEdit, wells: &
 
     let close = target.and_then(|_| edit.close_command(session));
     let reverse = target.and_then(|_| edit.reverse_command(session));
+    let (join_label, join) = edit.join_action(session);
     for (icon, label, command) in [
         ("ctx-split-after-node", "ctx.node.split_after", target.and_then(|_| edit.split_after_node_command(session))),
         ("ctx-break-curve", "ctx.node.break", target.and_then(|_| edit.break_command(session))),
-        ("ctx-join-curves", "ctx.node.join", join_command(session)),
+        ("ctx-join-curves", join_label, join),
         ("ctx-close-curve", "ctx.node.close", close),
         ("ctx-smooth-curve", "ctx.node.smooth", target.and_then(|_| edit.smooth_command(session))),
         ("ctx-reverse-curve", "context.node.reverse", reverse),

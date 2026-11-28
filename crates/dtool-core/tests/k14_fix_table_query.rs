@@ -38,6 +38,7 @@ fn table_doc() -> (Document, ObjectId) {
         format: None,
         frame_local: TableFrameFormat::default(),
         frame_mask: FrameFormatMask::default(),
+        text_defaults: None,
     };
     table.hydrate_cell_ids().unwrap();
     let mut doc = Document::default();

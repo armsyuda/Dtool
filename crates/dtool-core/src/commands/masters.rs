@@ -45,6 +45,17 @@ pub struct MasterPages {
     pub spreads: Vec<MasterSpread>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub(crate) tag_colours: BTreeMap<u64, String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) page_setup: BTreeMap<u64, MasterPageSetup>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MasterPageSetup {
+    pub margins: crate::document::SetupMargins,
+    pub margin_colour: Option<String>,
+    pub drawing_scale: Option<[f32; 2]>,
+    pub measurement_unit: crate::units::ReadoutUnit,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -117,7 +128,7 @@ impl std::ops::DerefMut for Assignment {
 impl MasterPages {
     pub fn is_empty(&self) -> bool {
         self.roots.is_empty() && self.assignments.is_empty() && self.master_assignments.is_empty()
-            && self.spreads.is_empty() && self.tag_colours.is_empty()
+            && self.spreads.is_empty() && self.tag_colours.is_empty() && self.page_setup.is_empty()
     }
 
     pub fn spread(&self, page: ObjectId) -> Option<&MasterSpread> {
@@ -138,6 +149,10 @@ impl MasterPages {
 
     pub fn tag_colour(&self, page: ObjectId) -> Option<&str> {
         self.tag_colours.get(&self.spread_id(page).0).map(String::as_str)
+    }
+
+    pub fn page_setup(&self, page: ObjectId) -> Option<&MasterPageSetup> {
+        self.page_setup.get(&self.spread_id(page).0)
     }
 
     pub fn has_tag_colours(&self) -> bool {
@@ -380,6 +395,7 @@ fn list(doc: &Document) -> Value {
         value["pages"] = json!(pages);
         value["spine"] = json!(doc.master_pages.spread(root.id).map(|spread| spread.spine));
         value["tag_colour"] = json!(doc.master_pages.tag_colour(root.id));
+        value["page_setup"] = json!(doc.master_pages.page_setup(root.id));
         value
     }).collect();
     json!({"masters": masters, "assignments": doc.master_pages.assignments, "master_assignments": doc.master_pages.master_assignments})
@@ -436,6 +452,22 @@ pub(crate) fn physical_name(name: &str, index: usize) -> String {
 
 fn create(session: &mut Session, command: &Command) -> CommandResult {
     let (name, size) = options(&session.document, &command.params, None)?;
+    let tag_colour = command.params.get("colour").map(|_| super::layer_meta::read_tag_colour(&command.params))
+        .transpose()?.flatten();
+    let setup = command.params.get("page_setup").map(|value| {
+        let setup: MasterPageSetup = serde_json::from_value(value.clone()).map_err(|_| CommandError::invalid_params())?;
+        let m = &setup.margins;
+        if [m.left, m.top, m.right, m.bottom].iter().any(|v| !v.is_finite() || *v < 0.0)
+            || setup.margin_colour.as_ref().is_some_and(|s| {
+                s.len() != 7 || !s.starts_with('#') || !s.as_bytes()[1..].iter().all(u8::is_ascii_hexdigit)
+            }) {
+            return Err(CommandError::invalid_params());
+        }
+        if let Some(scale) = setup.drawing_scale {
+            Document::validate_drawing_scale(scale)?;
+        }
+        Ok::<_, CommandError>(setup)
+    }).transpose()?;
     let sizes = if let Some(sizes) = command.params.get("page_sizes") {
         if command.params.get("page_count").is_some() || command.params.get("size").is_some() {
             return Err(CommandError::invalid_params());
@@ -465,6 +497,12 @@ fn create(session: &mut Session, command: &Command) -> CommandResult {
     })).collect();
     let id = pages[0];
     doc.master_pages.roots.extend(&pages);
+    if let Some(colour) = tag_colour {
+        doc.master_pages.tag_colours.insert(id.0, colour);
+    }
+    if let Some(setup) = setup {
+        doc.master_pages.page_setup.insert(id.0, setup);
+    }
     if pages.len() > 1 {
         doc.master_pages.spreads.push(MasterSpread { pages: pages.clone(), spine });
     }
@@ -552,6 +590,9 @@ fn duplicate(session: &mut Session, command: &Command) -> CommandResult {
     if let Some(colour) = before.master_pages.tag_colour(original) {
         doc.master_pages.tag_colours.insert(id.0, colour.to_owned());
     }
+    if let Some(setup) = before.master_pages.page_setup(original) {
+        doc.master_pages.page_setup.insert(id.0, setup.clone());
+    }
     if let Some(spread) = before.master_pages.spread(original) {
         doc.master_pages.spreads.push(MasterSpread { pages: pages.clone(), spine: spread.spine });
     }
@@ -602,6 +643,7 @@ fn delete_spreads(session: &mut Session, command: &str, ids: &[ObjectId], respon
     let mut doc = before.clone();
     doc.master_pages.roots.retain(|root| !pages.contains(root));
     doc.master_pages.tag_colours.retain(|id, _| !pages.contains(&ObjectId(*id)));
+    doc.master_pages.page_setup.retain(|id, _| !pages.contains(&ObjectId(*id)));
     doc.master_pages.spreads.retain(|spread| !spread.pages.first().is_some_and(|id| pages.contains(id)));
     doc.master_pages.assignments.retain(|assignment| !pages.contains(&assignment.master));
     doc.master_pages.master_assignments.retain(|assignment| !pages.contains(&assignment.target) && !pages.contains(&assignment.inherited.master));
@@ -1341,6 +1383,9 @@ pub(crate) fn inherit_changes(before: &Document, doc: &mut Document, command: &C
     let old_tag_count = doc.master_pages.tag_colours.len();
     doc.master_pages.tag_colours.retain(|id, _| roots.contains(&ObjectId(*id)));
     changed |= doc.master_pages.tag_colours.len() != old_tag_count;
+    let old_setup_count = doc.master_pages.page_setup.len();
+    doc.master_pages.page_setup.retain(|id, _| roots.contains(&ObjectId(*id)));
+    changed |= doc.master_pages.page_setup.len() != old_setup_count;
     let old_spread_count = doc.master_pages.spreads.len();
     doc.master_pages.spreads.retain(|spread| spread.pages.iter().all(|id| roots.contains(id)));
     changed |= old_spread_count != doc.master_pages.spreads.len();

@@ -69,6 +69,17 @@ pub(super) fn run(session: &mut Session, command: &Command, record: bool) -> Com
     let before = session.document.pixel_selection.as_ref().filter(|mask| !mask.is_empty())
         .ok_or_else(|| CommandError::new("NOTHING_SELECTED"))?;
     let (settings, strokes, edge_shift) = parse(command, session.document.dpi)?;
+    let mask_target = if settings.output == RefineOutput::Mask {
+        let id = command.params["id"].as_u64().map(ObjectId).or_else(|| session.selection.key())
+            .or_else(|| session.selection.ids.last().copied()).ok_or_else(|| CommandError::new("NOTHING_SELECTED"))?;
+        let object = session.document.get_object(id).ok_or_else(CommandError::not_found)?;
+        if session.document.is_object_locked(object) {
+            return Err(CommandError::new("LOCKED"));
+        }
+        Some(id)
+    } else {
+        None
+    };
     let dimensions = [before.width, before.height];
     if u64::from(dimensions[0]) * u64::from(dimensions[1]) > MAX_PIXELS {
         return Err(CommandError::new("REQUEST_TOO_LARGE"));
@@ -101,13 +112,11 @@ pub(super) fn run(session: &mut Session, command: &Command, record: bool) -> Com
     }
     if mask.is_empty() { return Err(CommandError::new("NOTHING_SELECTED")); }
     let mut document = session.document.clone();
-    let id = if new_layer {
-        create_layer(&mut document, mask, rgba, settings)
-    } else {
-        let selected = command.params["id"].as_u64().map(ObjectId).or_else(|| session.selection.key())
-            .or_else(|| session.selection.ids.last().copied()).ok_or_else(|| CommandError::new("NOTHING_SELECTED"))?;
+    let id = if let Some(selected) = mask_target {
         apply_mask(&mut document, selected, &mask)?;
         selected
+    } else {
+        create_layer(&mut document, mask, rgba, settings)
     };
     info["id"] = json!(id.0);
     let selection = if new_layer { vec![id] } else { session.selection.ids.clone() };
@@ -122,10 +131,14 @@ pub(super) fn run(session: &mut Session, command: &Command, record: bool) -> Com
 
 fn apply_mask(document: &mut Document, id: ObjectId, selection: &PixelSelection) -> Result<(), CommandError> {
     let object = document.get_object(id).ok_or_else(CommandError::not_found)?;
-    if object.locked { return Err(CommandError::new("LOCKED")); }
-    let dimensions = super::layer_mask::mask_dimensions(document, object).ok_or_else(CommandError::invalid_params)?;
-    let mut coverage = super::layer_mask::resample_selection(document, object, dimensions, selection)
-        .ok_or_else(CommandError::invalid_params)?;
+    let existing = document.layer_masks.iter().find(|mask| mask.object == id);
+    let mut coverage = if let Some(mask) = existing.filter(|mask| mask.frame.is_some()) {
+        let dimensions = [mask.coverage.width as usize, mask.coverage.height as usize];
+        super::layer_mask::resample_selection_in_frame(document, object, dimensions, selection, mask.relative_frame())
+    } else {
+        let dimensions = super::layer_mask::mask_dimensions(document, object).ok_or_else(CommandError::invalid_params)?;
+        super::layer_mask::resample_selection(document, object, dimensions, selection)
+    }.ok_or_else(CommandError::invalid_params)?;
     if let Some(existing) = document.layer_masks.iter_mut().find(|mask| mask.object == id) {
         for y in 0..coverage.height {
             for x in 0..coverage.width {

@@ -207,7 +207,7 @@ fn test_fill_pattern_set() {
 #[test]
 fn test_fill_bitmap_set() {
     let mut session = create_session_with_object(1);
-    let bitmap = Paint::Bitmap(BitmapPaint { resource_id: "img1".to_string(), matrix: IDENTITY, seed: None });
+    let bitmap = Paint::Bitmap(BitmapPaint { resource_id: "img1".to_string(), matrix: IDENTITY, seed: None, single_image: false });
     assert!(write_through_popup(object(&mut session, 1), PaintRole::SourceObject, bitmap));
     assert!(matches!(object(&mut session, 1).fill, Paint::Bitmap(_)));
 }

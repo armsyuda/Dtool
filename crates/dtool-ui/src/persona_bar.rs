@@ -54,6 +54,8 @@ fn toolbar_item(ui: &mut egui::Ui, session: Option<&Session>, name: &str, icons:
     let enabled = editing || match name {
         "doc.new" | "doc.open" => true,
         "doc.save" => session.is_some(),
+        "page.add" => session.is_some_and(|s| s.has_document && s.document.layout_artboard_origins.is_some()),
+        "layer.pixel.add" => session.is_some_and(|s| s.can_execute(&Command::with_params(name, serde_json::json!({"current_surface": true})))),
         crate::context_bar::align::ALIGN_POPUP_COMMAND => session.is_some_and(|s| !s.selection.ids.is_empty()),
         "node.group" => session.is_some_and(|s| s.selection.ids.len() >= 2),
         "node.ungroup" => session.is_some_and(|s| !s.selection.ids.is_empty() && s.selection.ids.iter().all(|&id| {
@@ -92,7 +94,13 @@ fn toolbar_slot(ui: &mut egui::Ui, session: Option<&Session>, name: &str, icons:
 {
     let Some(commands) = crate::persona::toolbar_group(name) else {
         let response = toolbar_item(ui, session, name, icons, editing, false);
-        let action = (!editing && response.clicked()).then(|| Command::new(name));
+        let action = (!editing && response.clicked()).then(|| {
+            if name == "layer.pixel.add" {
+                Command::with_params(name, serde_json::json!({"current_surface": true}))
+            } else {
+                Command::new(name)
+            }
+        });
         if action.is_some() && name == crate::context_bar::align::ALIGN_POPUP_COMMAND {
             crate::context_bar::remember_alignment_origin(ui, &response, name);
         }

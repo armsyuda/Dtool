@@ -47,12 +47,19 @@ pub struct RecoverPoint {
     pub document: crate::document::Document,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrushSource {
+    History(u64),
+    Snapshot(u64),
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct SessionHistory {
     pub snapshots: Vec<DocumentSnapshot>,
     pub next_snapshot_id: u64,
     pub save_with_document: bool,
     pub recover: Option<RecoverPoint>,
+    pub brush_source: Option<(BrushSource, std::sync::Arc<crate::Document>)>,
 }
 
 pub fn change_payload_bytes(change: &crate::undo::Change) -> u64 {

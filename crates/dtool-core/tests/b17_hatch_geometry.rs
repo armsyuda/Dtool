@@ -18,7 +18,9 @@ fn gradient_stops_stay_normalized_and_ordered_after_matrix_transform() {
         assert_eq!(actual, &stops);
         assert!(actual.iter().all(|stop| (0.0..=1.0).contains(&stop.offset)));
         assert!(actual.windows(2).all(|pair| pair[0].offset <= pair[1].offset));
-        assert_eq!(*geom, GradientGeom::from_legacy_matrix(IDENTITY).transform([2.0, 0.0, 0.0, 3.0, 5.0, 7.0]));
+        let expected_sweep = (kind == GradientKind::Conical).then_some([0.0, 1.5]);
+        let expected = GradientGeom::from_legacy_matrix(IDENTITY).transform([2.0, 0.0, 0.0, 3.0, 5.0, 7.0]);
+        assert_eq!(*geom, GradientGeom { sweep_basis: expected_sweep, ..expected });
         assert_eq!(geom.start, [5.0, 7.0]);
         assert_eq!(geom.end, [7.0, 7.0]);
         let decoded: Paint = serde_json::from_value(serde_json::to_value(&paint).unwrap()).unwrap();
@@ -92,7 +94,7 @@ fn hatch_line_order_and_actual_triangle_clip_are_preserved() {
 
 #[test]
 fn eight_canonical_paint_variants_round_trip_without_solid_flattening() {
-    let paints = [Paint::None, Paint::Solid { colour: Colour::new(1, 2, 3, 255) }, Paint::Gradient { kind: GradientKind::Linear, stops: vec![GradientStop { offset: 0.0, colour: Colour::new(0, 0, 0, 255) }, GradientStop { offset: 1.0, colour: Colour::new(255, 255, 255, 255) }], geom: GradientGeom::from_legacy_matrix(IDENTITY) }, Paint::Hatch(hatch()), Paint::Bitmap(BitmapPaint { resource_id: "b17.bitmap".into(), matrix: IDENTITY, seed: Some(3) }), Paint::Pattern(PatternPaint { resource_id: "b17.pattern".into(), matrix: IDENTITY }), Paint::Mesh(MeshPaint::new()), Paint::Diffusion(DiffusionPaint::new(DiffusionCurveCreationMode::Manual))];
+    let paints = [Paint::None, Paint::Solid { colour: Colour::new(1, 2, 3, 255) }, Paint::Gradient { kind: GradientKind::Linear, stops: vec![GradientStop { offset: 0.0, colour: Colour::new(0, 0, 0, 255) }, GradientStop { offset: 1.0, colour: Colour::new(255, 255, 255, 255) }], geom: GradientGeom::from_legacy_matrix(IDENTITY) }, Paint::Hatch(hatch()), Paint::Bitmap(BitmapPaint { resource_id: "b17.bitmap".into(), matrix: IDENTITY, seed: Some(3), single_image: false }), Paint::Pattern(PatternPaint { resource_id: "b17.pattern".into(), matrix: IDENTITY }), Paint::Mesh(MeshPaint::new()), Paint::Diffusion(DiffusionPaint::new(DiffusionCurveCreationMode::Manual))];
     for original in paints {
         let restored: Paint = serde_json::from_value(serde_json::to_value(&original).unwrap()).unwrap();
         assert_eq!(restored, original);

@@ -21,7 +21,7 @@ pub(super) fn operands<'a>(session: &'a Session, params: &Value) -> Result<(&'a 
     let mut sources = Vec::with_capacity(ids.len() - 1);
     for id in ids {
         let object = doc.get_object(id).ok_or_else(CommandError::not_found)?;
-        if object.locked
+        if doc.is_object_locked(object)
             || !matches!(object.kind, ObjectKind::Shape | ObjectKind::Curve(_))
             || object.clip_role != crate::object::ClipRole::None
             || object.page_id != key.page_id

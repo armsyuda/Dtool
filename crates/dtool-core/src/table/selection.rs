@@ -80,6 +80,18 @@ pub fn current(session: &Session) -> TableSelection {
     if selection.table.is_some_and(|id| !session.selection.ids.contains(&id)) { TableSelection::default() } else { selection }
 }
 
+/// Formatting applies to every cell when the table itself is selected.
+pub fn for_format(session: &Session) -> TableSelection {
+    let explicit = current(session);
+    if session.active_tool == "tool.table" && !explicit.cells.is_empty() {
+        return explicit;
+    }
+    let [id] = session.selection.ids.as_slice() else { return TableSelection::default() };
+    let Ok(table) = table(&session.document, *id) else { return TableSelection::default() };
+    TableSelection { table: Some(*id), tracks: None,
+        cells: table.cells.iter().filter(|cell| cell.merged_into.is_none()).map(|cell| cell.id).collect() }
+}
+
 pub fn reconcile(session: &mut Session) {
     session.table_selection = current(session);
 }

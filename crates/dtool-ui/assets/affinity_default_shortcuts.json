@@ -1,0 +1,6566 @@
+{
+ "출처": "%APPDATA%\\Affinity\\Affinity\\3.0\\Workspaces\\<GUID>\\Shortcuts.xml 복사본 (2026-10-21 KST)",
+ "주의": "파일에 저장된 항목만 덤프. 앱 내장 전체 기본 단축키 목록인지 미검증. 워크스페이스 GUID↔페르소나 매핑 미검증.",
+ "그룹": [
+  {
+   "md5": "b6042d015bef4eca7f891b8cdb3e0c47",
+   "워크스페이스": [
+    "2FF941F2-7B3D-4690-8386-9AD30E949E8A",
+    "7C4CC2E1-D695-422B-AD3B-326C60971BE7",
+    "831AAB2C-659F-4906-A8B1-8BA4544DB274",
+    "A448185A-F80F-48A6-8EE0-F00C64EAB00D",
+    "C135858C-354C-4886-BAF5-85952A1611F0",
+    "E9159E4D-661F-4138-A995-81A178A1824C",
+    "EB0D25CF-3F83-4D39-9CA4-3CB995531E58",
+    "ED886338-2FC1-4432-836C-F6CDB9F5D325",
+    "F9015950-29EB-45A6-91EA-D506B1E4F449"
+   ],
+   "항목수": 100,
+   "항목": [
+    {
+     "type": "GlobalCommand",
+     "command": "Serif.Interop.Persona.Commands.SwapLineAndFillCommand",
+     "key": "X",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "GlobalCommand",
+     "command": "Serif.Interop.Persona.Commands.ToggleSnappingCommand",
+     "key": "S",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "GlobalCommand",
+     "command": "Serif.Interop.Persona.Commands.SetFillContextToBlackAndWhiteCommand",
+     "key": "D",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "GlobalCommand",
+     "command": "Serif.Interop.Persona.Commands.QuickMaskPopupCommand",
+     "key": "Q",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "GlobalCommand",
+     "command": "Serif.Interop.Persona.Commands.ToggleFillContextCommand",
+     "key": "Z",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "GlobalCommand",
+     "command": "Serif.Interop.Persona.Commands.SetFillNoneCommand",
+     "key": "C",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.TextAlignCentreCommand",
+     "key": "S",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.TextAlignLeftCommand",
+     "key": "A",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.TextAlignRightCommand",
+     "key": "D",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.TextAlignJustifyCentreCommand",
+     "key": "W",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.TextAlignJustifyLeftCommand",
+     "key": "Q",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.TextAlignJustifyRightCommand",
+     "key": "E",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.TextAlignJustifyAllCommand",
+     "key": "R",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.InsertIndentToHereCommand",
+     "key": "Oem5",
+     "modifierKeys": "Control"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.DecreaseParagraphLeadingCommand",
+     "key": "Up",
+     "modifierKeys": "Alt"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.IncreaseParagraphLeadingCommand",
+     "key": "Down",
+     "modifierKeys": "Alt"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.PreciseDecreaseParagraphLeadingCommand",
+     "key": "Up",
+     "modifierKeys": "Alt, Control"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.PreciseIncreaseParagraphLeadingCommand",
+     "key": "Down",
+     "modifierKeys": "Alt, Control"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.BiggerCommand",
+     "key": "X",
+     "modifierKeys": "Alt, Control, Shift"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.SmallerCommand",
+     "key": "Z",
+     "modifierKeys": "Alt, Control, Shift"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.LoosenSpacingCommand",
+     "key": "Right",
+     "modifierKeys": "Alt"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.TightenSpacingCommand",
+     "key": "Left",
+     "modifierKeys": "Alt"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.LoosenSpacingMoreCommand",
+     "key": "Right",
+     "modifierKeys": "Alt, Shift"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.TightenSpacingMoreCommand",
+     "key": "Left",
+     "modifierKeys": "Alt, Shift"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.VerticalAlignmentBottomCommand",
+     "key": "D",
+     "modifierKeys": "Alt"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.VerticalAlignmentCentreCommand",
+     "key": "S",
+     "modifierKeys": "Alt"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.VerticalAlignmentJustifyCommand",
+     "key": "W",
+     "modifierKeys": "Alt"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.VerticalAlignmentTopCommand",
+     "key": "A",
+     "modifierKeys": "Alt"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.CloseViewCommand",
+     "key": "W",
+     "modifierKeys": "Control"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Affinity.Commands.ExportDocumentCommand",
+     "key": "S",
+     "modifierKeys": "Alt, Control, Shift"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.SaveDocumentCommand",
+     "key": "S",
+     "modifierKeys": "Control"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Affinity.Commands.PrintDocumentCommand",
+     "key": "P",
+     "modifierKeys": "Control"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.SaveDocumentAsCommand",
+     "key": "S",
+     "modifierKeys": "Control, Shift"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Affinity.Commands.NewDocumentCommand",
+     "key": "N",
+     "modifierKeys": "Control"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.PasteToNewDocumentCommand",
+     "key": "N",
+     "modifierKeys": "Alt, Control, Shift"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.CopyCommand",
+     "key": "C",
+     "modifierKeys": "Control"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.DeleteObjectsCommand",
+     "key": "X",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.DuplicateObjectsCommand",
+     "key": "J",
+     "modifierKeys": "Control"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.CutCommand",
+     "key": "X",
+     "modifierKeys": "Control"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.PasteFXCommand",
+     "key": "V",
+     "modifierKeys": "Alt"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.PasteCommand",
+     "key": "V",
+     "modifierKeys": "Control"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.PasteStyleCommand",
+     "key": "V",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.PasteWithoutFormatCommand",
+     "key": "V",
+     "modifierKeys": "Control, Shift"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.SelectAllCommand",
+     "key": "A",
+     "modifierKeys": "Control"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.PreferencesCommand",
+     "key": "OemComma",
+     "modifierKeys": "Control"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.UndoCommand",
+     "key": "Z",
+     "modifierKeys": "Control"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.RedoCommand",
+     "key": "Z",
+     "modifierKeys": "Control, Shift"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Affinity.Commands.ShowResourceManagerCommand",
+     "key": "F5",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.AlignBottomCommand",
+     "key": "S",
+     "modifierKeys": "Alt, Shift"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.AlignCentreCommand",
+     "key": "Q",
+     "modifierKeys": "Alt, Shift"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.AlignLeftCommand",
+     "key": "A",
+     "modifierKeys": "Alt, Shift"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.AlignMiddleCommand",
+     "key": "E",
+     "modifierKeys": "Alt, Shift"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.AlignRightCommand",
+     "key": "D",
+     "modifierKeys": "Alt, Shift"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.SpaceHorizontallyCommand",
+     "key": "Q",
+     "modifierKeys": "Alt, Control, Shift"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.SpaceVerticallyCommand",
+     "key": "E",
+     "modifierKeys": "Alt, Control, Shift"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.AlignTopCommand",
+     "key": "W",
+     "modifierKeys": "Alt, Shift"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.MoveToBackCommand",
+     "key": "D1",
+     "modifierKeys": "Control, Shift"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.MoveToFrontCommand",
+     "key": "D2",
+     "modifierKeys": "Control, Shift"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.BackOneCommand",
+     "key": "D1",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.ForwardOneCommand",
+     "key": "D2",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.GroupNodesCommand",
+     "key": "G",
+     "modifierKeys": "Control"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Affinity.Commands.ShowLayerEffectsDialogCommand",
+     "key": "F4",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.RenameLayerCommand",
+     "key": "F2",
+     "modifierKeys": "Control"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.UngroupNodesCommand",
+     "key": "G",
+     "modifierKeys": "Control, Shift"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.ClipToCanvasCommand",
+     "key": "Oem5",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Affinity.Commands.ToggleUICommand",
+     "key": "Tab",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.ToggleGuidesCommand",
+     "key": "Oem1",
+     "modifierKeys": "Control"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.ToggleHideAllGuidesCommand",
+     "key": "W",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.UnlockCommand",
+     "key": "Oem3",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.LockCommand",
+     "key": "Oem3",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.InvertPixelsCommand",
+     "key": "I",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.ConvertToTextFrameCommand",
+     "key": "F",
+     "modifierKeys": "Control"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.ConvertToPictureFrameCommand",
+     "key": "F",
+     "modifierKeys": "Control, Shift"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.NextSpreadCommand",
+     "key": "Next",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.PreviousSpreadCommand",
+     "key": "PageUp",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.AddLevelsAdjustmentLayerCommand",
+     "key": "F2",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.AddHSLAdjustmentLayerCommand",
+     "key": "F3",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.DeselectPixelsCommand",
+     "key": "D",
+     "modifierKeys": "Control"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.HideCommand",
+     "key": "Oem3",
+     "modifierKeys": "Alt"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.ShowCommand",
+     "key": "Oem3",
+     "modifierKeys": "Alt, Shift"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.ToggleMarginsCommand",
+     "key": "OemQuotes",
+     "modifierKeys": "Control"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.ZoomToActualSizeCommand",
+     "key": "Z",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolType",
+     "tool": "ArtText",
+     "key": "T",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolType",
+     "tool": "FrameText",
+     "key": "T",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolType",
+     "tool": "TableText",
+     "key": "T",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolType",
+     "tool": "VectorFill",
+     "key": "G",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolType",
+     "tool": "Knife",
+     "key": "K",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolType",
+     "tool": "Select",
+     "key": "V",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolType",
+     "tool": "Pen",
+     "key": "P",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolType",
+     "tool": "Pencil",
+     "key": "P",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolType",
+     "tool": "ShapeRectangle",
+     "key": "R",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolType",
+     "tool": "ColourPicker",
+     "key": "F1",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolType",
+     "tool": "ShapeRoundedRectangle",
+     "key": "R",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolType",
+     "tool": "ShapeEllipse",
+     "key": "R",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolType",
+     "tool": "RasterPaintBrush",
+     "key": "B",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolType",
+     "tool": "FormatDropper",
+     "key": "F1",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolType",
+     "tool": "Node",
+     "key": "V",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolType",
+     "tool": "PictureFrameRectangle",
+     "key": "F",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolType",
+     "tool": "RasterFloodFill",
+     "key": "G",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolType",
+     "tool": "VectorTransparency",
+     "key": "G",
+     "modifierKeys": "None"
+    }
+   ]
+  },
+  {
+   "md5": "79f4f521ef3011b63db1e0080d973acd",
+   "워크스페이스": [
+    "455F02EC-0FB4-4BB6-B023-4458CB586E8B"
+   ],
+   "항목수": 277,
+   "항목": [
+    {
+     "type": "GlobalCommand",
+     "command": "Serif.Affinity.Commands.ShowSwitchDocumentDialogCommand",
+     "key": "Tab",
+     "modifierKeys": "Control"
+    },
+    {
+     "type": "GlobalCommand",
+     "command": "Serif.Affinity.Commands.ReverseSwitchDocumentDialogCommand",
+     "key": "Tab",
+     "modifierKeys": "Control, Shift"
+    },
+    {
+     "type": "GlobalCommand",
+     "command": "Serif.Affinity.Commands.CycleViewModeCommand",
+     "char": ",",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "GlobalCommand",
+     "command": "Serif.Affinity.Commands.SwitchToNextViewCommand",
+     "char": "`",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "GlobalCommand",
+     "command": "Serif.Interop.Persona.Commands.ZoomInTabletCommand",
+     "key": "F15",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "GlobalCommand",
+     "command": "Serif.Interop.Persona.Commands.ZoomOutTabletCommand",
+     "key": "F16",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Affinity.Commands.NewDocumentCommand",
+     "key": "N",
+     "modifierKeys": "Control"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.PasteToNewDocumentCommand",
+     "key": "N",
+     "modifierKeys": "Alt, Control, Shift"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.NewPanoramaDocumentCommand",
+     "key": "P",
+     "modifierKeys": "Alt, Control, Shift"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.NewStackDocumentCommand",
+     "key": "O",
+     "modifierKeys": "Alt, Control, Shift"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Affinity.Commands.OpenDocumentCommand",
+     "key": "O",
+     "modifierKeys": "Control"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.CloseViewCommand",
+     "key": "W",
+     "modifierKeys": "Control"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.CloseAllViewsCommand",
+     "key": "W",
+     "modifierKeys": "Alt, Control"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.UndoCommand",
+     "key": "Z",
+     "modifierKeys": "Control"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.RedoCommand",
+     "key": "Z",
+     "modifierKeys": "Control, Shift"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.CutCommand",
+     "key": "X",
+     "modifierKeys": "Control"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.CopyCommand",
+     "key": "C",
+     "modifierKeys": "Control"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.PasteCommand",
+     "key": "V",
+     "modifierKeys": "Control"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.PreferencesCommand",
+     "key": "OemComma",
+     "modifierKeys": "Control"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.ZoomInCommand",
+     "key": "OemPlus",
+     "modifierKeys": "Control"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.ZoomOutCommand",
+     "key": "OemMinus",
+     "modifierKeys": "Control"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.ZoomToFitCommand",
+     "key": "D0",
+     "modifierKeys": "Control"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.ZoomToWidthCommand",
+     "key": "D0",
+     "modifierKeys": "Alt, Shift"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.ZoomTo100Command",
+     "key": "D1",
+     "modifierKeys": "Control"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.ZoomTo200Command",
+     "key": "D2",
+     "modifierKeys": "Control"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.ZoomTo400Command",
+     "key": "D3",
+     "modifierKeys": "Control"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.ZoomTo800Command",
+     "key": "D4",
+     "modifierKeys": "Control"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.ZoomToActualSizeCommand",
+     "key": "D8",
+     "modifierKeys": "Control"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.ZoomToPixelSizeCommand",
+     "key": "D9",
+     "modifierKeys": "Control"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.ResetRotationCommand",
+     "key": "R",
+     "modifierKeys": "Alt, Control, Shift"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.ToggleGuidesCommand",
+     "char": ";",
+     "modifierKeys": "Control"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.ToggleGridCommand",
+     "char": "'",
+     "modifierKeys": "Control"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.ToggleRulersCommand",
+     "key": "R",
+     "modifierKeys": "Control"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Affinity.Commands.ToggleUICommand",
+     "key": "Tab",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Affinity.Commands.HideStudioCommand",
+     "key": "H",
+     "modifierKeys": "Control, Shift"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Affinity.Commands.ShowToolbarCommand",
+     "key": "T",
+     "modifierKeys": "Alt, Control"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Affinity.Commands.ApplyStudioPresetCommand1",
+     "key": "D1",
+     "modifierKeys": "Control, Shift"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Affinity.Commands.ApplyStudioPresetCommand2",
+     "key": "D2",
+     "modifierKeys": "Control, Shift"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Affinity.Commands.ApplyStudioPresetCommand3",
+     "key": "D3",
+     "modifierKeys": "Control, Shift"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Affinity.Commands.ApplyStudioPresetCommand4",
+     "key": "D4",
+     "modifierKeys": "Control, Shift"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Affinity.Commands.ApplyStudioPresetCommand5",
+     "key": "D5",
+     "modifierKeys": "Control, Shift"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Affinity.Commands.ApplyStudioPresetCommand6",
+     "key": "D6",
+     "modifierKeys": "Control, Shift"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Affinity.Commands.ApplyStudioPresetCommand7",
+     "key": "D7",
+     "modifierKeys": "Control, Shift"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Affinity.Commands.ApplyStudioPresetCommand8",
+     "key": "D8",
+     "modifierKeys": "Control, Shift"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Affinity.Commands.ApplyStudioPresetCommand9",
+     "key": "D9",
+     "modifierKeys": "Control, Shift"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Affinity.Commands.ShowHelpCommand",
+     "key": "F1",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolType",
+     "tool": "ToneMapView",
+     "key": "H",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolType",
+     "tool": "ToneMapZoom",
+     "key": "Z",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolType",
+     "tool": "ToneMapOverlayPaint",
+     "key": "B",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolType",
+     "tool": "ToneMapOverlayErase",
+     "key": "E",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolType",
+     "tool": "ToneMapOverlayGradient",
+     "key": "G",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "VectorEraseBrush",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "VectorEraseBrush",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "VectorBlobBrush",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "VectorBlobBrush",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "VectorBrush",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "VectorBrush",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "DevelopEffect",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "DevelopEffect",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "LiquifyEffect",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "LiquifyEffect",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "PanoramaEffect",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "PanoramaEffect",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ToneMapEffect",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ToneMapEffect",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RefineSelection",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RefineSelection",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "Node",
+     "functionEnum": "CycleForwards",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "Node",
+     "functionEnum": "CycleBackwards",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "Node",
+     "functionEnum": "StrokeDecreaseWeightAbsolute",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "Node",
+     "functionEnum": "StrokeIncreaseWeightAbsolute",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "Node",
+     "functionEnum": "CurveBreak",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "Node",
+     "functionEnum": "CurveJoin",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "Node",
+     "functionEnum": "FitToCurveDelete",
+     "key": "Back",
+     "modifierKeys": "Alt"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "Node",
+     "functionEnum": "FitToCurveDelete",
+     "key": "Delete",
+     "modifierKeys": "Alt"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "Corner",
+     "functionEnum": "StrokeDecreaseWeightAbsolute",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "Corner",
+     "functionEnum": "StrokeIncreaseWeightAbsolute",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "Corner",
+     "functionEnum": "CycleForwards",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "Corner",
+     "functionEnum": "CycleBackwards",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "Pen",
+     "functionEnum": "CurveBreak",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "Pen",
+     "functionEnum": "CurveJoin",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "BlemishRemoval",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "BlemishRemoval",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "BlemishRemoval",
+     "functionEnum": "BrushDecreaseHardness",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "BlemishRemoval",
+     "functionEnum": "BrushIncreaseHardness",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "FFTDenoiseEffect",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "FFTDenoiseEffect",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "FFTDenoiseEffect",
+     "functionEnum": "BrushDecreaseHardness",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "FFTDenoiseEffect",
+     "functionEnum": "BrushIncreaseHardness",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterEraseBrush",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterEraseBrush",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterEraseBrush",
+     "functionEnum": "BrushDecreaseHardness",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterEraseBrush",
+     "functionEnum": "BrushIncreaseHardness",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterColourReplacementBrush",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterColourReplacementBrush",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterColourReplacementBrush",
+     "functionEnum": "BrushDecreaseHardness",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterColourReplacementBrush",
+     "functionEnum": "BrushIncreaseHardness",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterPixel",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterPixel",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterPixel",
+     "functionEnum": "BrushDecreaseHardness",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterPixel",
+     "functionEnum": "BrushIncreaseHardness",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterPaintMixerBrush",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterPaintMixerBrush",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterPaintMixerBrush",
+     "functionEnum": "BrushDecreaseHardness",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterPaintMixerBrush",
+     "functionEnum": "BrushIncreaseHardness",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterBackgroundEraseBrush",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterBackgroundEraseBrush",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterBackgroundEraseBrush",
+     "functionEnum": "BrushDecreaseHardness",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterBackgroundEraseBrush",
+     "functionEnum": "BrushIncreaseHardness",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterDodgeBrush",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterDodgeBrush",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterDodgeBrush",
+     "functionEnum": "BrushDecreaseHardness",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterDodgeBrush",
+     "functionEnum": "BrushIncreaseHardness",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterBurnBrush",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterBurnBrush",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterBurnBrush",
+     "functionEnum": "BrushDecreaseHardness",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterBurnBrush",
+     "functionEnum": "BrushIncreaseHardness",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterSpongeBrush",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterSpongeBrush",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterSpongeBrush",
+     "functionEnum": "BrushDecreaseHardness",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterSpongeBrush",
+     "functionEnum": "BrushIncreaseHardness",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterCloneBrush",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterCloneBrush",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterCloneBrush",
+     "functionEnum": "BrushDecreaseHardness",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterCloneBrush",
+     "functionEnum": "BrushIncreaseHardness",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterUndoBrush",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterUndoBrush",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterUndoBrush",
+     "functionEnum": "BrushDecreaseHardness",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterUndoBrush",
+     "functionEnum": "BrushIncreaseHardness",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterBlurBrush",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterBlurBrush",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterBlurBrush",
+     "functionEnum": "BrushDecreaseHardness",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterBlurBrush",
+     "functionEnum": "BrushIncreaseHardness",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterSharpenBrush",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterSharpenBrush",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterSharpenBrush",
+     "functionEnum": "BrushDecreaseHardness",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterSharpenBrush",
+     "functionEnum": "BrushIncreaseHardness",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterMedianBrush",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterMedianBrush",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterMedianBrush",
+     "functionEnum": "BrushDecreaseHardness",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterMedianBrush",
+     "functionEnum": "BrushIncreaseHardness",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterSmudgeBrush",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterSmudgeBrush",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterSmudgeBrush",
+     "functionEnum": "BrushDecreaseHardness",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterSmudgeBrush",
+     "functionEnum": "BrushIncreaseHardness",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterHealingBrush",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterHealingBrush",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterHealingBrush",
+     "functionEnum": "BrushDecreaseHardness",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterHealingBrush",
+     "functionEnum": "BrushIncreaseHardness",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterInpaintingBrush",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterInpaintingBrush",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterInpaintingBrush",
+     "functionEnum": "BrushDecreaseHardness",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterInpaintingBrush",
+     "functionEnum": "BrushIncreaseHardness",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterSelectionBrush",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterSelectionBrush",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterSelectionBrush",
+     "functionEnum": "BrushDecreaseHardness",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterSelectionBrush",
+     "functionEnum": "BrushIncreaseHardness",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterPaintBrush",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterPaintBrush",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterPaintBrush",
+     "functionEnum": "BrushDecreaseHardness",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterPaintBrush",
+     "functionEnum": "BrushIncreaseHardness",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterAdjustmentBrush",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterAdjustmentBrush",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterAdjustmentBrush",
+     "functionEnum": "BrushDecreaseHardness",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterAdjustmentBrush",
+     "functionEnum": "BrushIncreaseHardness",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterFilterBrush",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterFilterBrush",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterFilterBrush",
+     "functionEnum": "BrushDecreaseHardness",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterFilterBrush",
+     "functionEnum": "BrushIncreaseHardness",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterToneBrush",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterToneBrush",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterToneBrush",
+     "functionEnum": "BrushDecreaseHardness",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterToneBrush",
+     "functionEnum": "BrushIncreaseHardness",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "Pencil",
+     "functionEnum": "StrokeDecreaseWeight",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "Pencil",
+     "functionEnum": "StrokeIncreaseWeight",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "Pencil",
+     "functionEnum": "StrokeDecreaseWeightAbsolute",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "Pencil",
+     "functionEnum": "StrokeIncreaseWeightAbsolute",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "Pen",
+     "functionEnum": "StrokeDecreaseWeight",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "Pen",
+     "functionEnum": "StrokeIncreaseWeight",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "Pen",
+     "functionEnum": "StrokeDecreaseWeightAbsolute",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "Pen",
+     "functionEnum": "StrokeIncreaseWeightAbsolute",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "Select",
+     "functionEnum": "StrokeDecreaseWeight",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "Select",
+     "functionEnum": "StrokeIncreaseWeight",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "Select",
+     "functionEnum": "StrokeDecreaseWeightAbsolute",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "Select",
+     "functionEnum": "StrokeIncreaseWeightAbsolute",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeNode",
+     "functionEnum": "StrokeDecreaseWeight",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeNode",
+     "functionEnum": "StrokeIncreaseWeight",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeNode",
+     "functionEnum": "StrokeDecreaseWeightAbsolute",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeNode",
+     "functionEnum": "StrokeIncreaseWeightAbsolute",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeRectangle",
+     "functionEnum": "StrokeDecreaseWeight",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeRectangle",
+     "functionEnum": "StrokeIncreaseWeight",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeRectangle",
+     "functionEnum": "StrokeDecreaseWeightAbsolute",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeRectangle",
+     "functionEnum": "StrokeIncreaseWeightAbsolute",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeEllipse",
+     "functionEnum": "StrokeDecreaseWeight",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeEllipse",
+     "functionEnum": "StrokeIncreaseWeight",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeEllipse",
+     "functionEnum": "StrokeDecreaseWeightAbsolute",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeEllipse",
+     "functionEnum": "StrokeIncreaseWeightAbsolute",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeRoundedRectangle",
+     "functionEnum": "StrokeDecreaseWeight",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeRoundedRectangle",
+     "functionEnum": "StrokeIncreaseWeight",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeRoundedRectangle",
+     "functionEnum": "StrokeDecreaseWeightAbsolute",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeRoundedRectangle",
+     "functionEnum": "StrokeIncreaseWeightAbsolute",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeTriangle",
+     "functionEnum": "StrokeDecreaseWeight",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeTriangle",
+     "functionEnum": "StrokeIncreaseWeight",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeTriangle",
+     "functionEnum": "StrokeDecreaseWeightAbsolute",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeTriangle",
+     "functionEnum": "StrokeIncreaseWeightAbsolute",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeDiamond",
+     "functionEnum": "StrokeDecreaseWeight",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeDiamond",
+     "functionEnum": "StrokeIncreaseWeight",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeDiamond",
+     "functionEnum": "StrokeDecreaseWeightAbsolute",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeDiamond",
+     "functionEnum": "StrokeIncreaseWeightAbsolute",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeTrapezoid",
+     "functionEnum": "StrokeDecreaseWeight",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeTrapezoid",
+     "functionEnum": "StrokeIncreaseWeight",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeTrapezoid",
+     "functionEnum": "StrokeDecreaseWeightAbsolute",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeTrapezoid",
+     "functionEnum": "StrokeIncreaseWeightAbsolute",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapePolygon",
+     "functionEnum": "StrokeDecreaseWeight",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapePolygon",
+     "functionEnum": "StrokeIncreaseWeight",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapePolygon",
+     "functionEnum": "StrokeDecreaseWeightAbsolute",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapePolygon",
+     "functionEnum": "StrokeIncreaseWeightAbsolute",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeStar",
+     "functionEnum": "StrokeDecreaseWeight",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeStar",
+     "functionEnum": "StrokeIncreaseWeight",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeStar",
+     "functionEnum": "StrokeDecreaseWeightAbsolute",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeStar",
+     "functionEnum": "StrokeIncreaseWeightAbsolute",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeDoubleStar",
+     "functionEnum": "StrokeDecreaseWeight",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeDoubleStar",
+     "functionEnum": "StrokeIncreaseWeight",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeDoubleStar",
+     "functionEnum": "StrokeDecreaseWeightAbsolute",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeDoubleStar",
+     "functionEnum": "StrokeIncreaseWeightAbsolute",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapePie",
+     "functionEnum": "StrokeDecreaseWeight",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapePie",
+     "functionEnum": "StrokeIncreaseWeight",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapePie",
+     "functionEnum": "StrokeDecreaseWeightAbsolute",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapePie",
+     "functionEnum": "StrokeIncreaseWeightAbsolute",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeDonut",
+     "functionEnum": "StrokeDecreaseWeight",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeDonut",
+     "functionEnum": "StrokeIncreaseWeight",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeDonut",
+     "functionEnum": "StrokeDecreaseWeightAbsolute",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeDonut",
+     "functionEnum": "StrokeIncreaseWeightAbsolute",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeArrow",
+     "functionEnum": "StrokeDecreaseWeight",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeArrow",
+     "functionEnum": "StrokeIncreaseWeight",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeArrow",
+     "functionEnum": "StrokeDecreaseWeightAbsolute",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeArrow",
+     "functionEnum": "StrokeIncreaseWeightAbsolute",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeCog",
+     "functionEnum": "StrokeDecreaseWeight",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeCog",
+     "functionEnum": "StrokeIncreaseWeight",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeCog",
+     "functionEnum": "StrokeDecreaseWeightAbsolute",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeCog",
+     "functionEnum": "StrokeIncreaseWeightAbsolute",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeCloud",
+     "functionEnum": "StrokeDecreaseWeight",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeCloud",
+     "functionEnum": "StrokeIncreaseWeight",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeCloud",
+     "functionEnum": "StrokeDecreaseWeightAbsolute",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeCloud",
+     "functionEnum": "StrokeIncreaseWeightAbsolute",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeCalloutRoundRect",
+     "functionEnum": "StrokeDecreaseWeight",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeCalloutRoundRect",
+     "functionEnum": "StrokeIncreaseWeight",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeCalloutRoundRect",
+     "functionEnum": "StrokeDecreaseWeightAbsolute",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeCalloutRoundRect",
+     "functionEnum": "StrokeIncreaseWeightAbsolute",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeCalloutEllipse",
+     "functionEnum": "StrokeDecreaseWeight",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeCalloutEllipse",
+     "functionEnum": "StrokeIncreaseWeight",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeCalloutEllipse",
+     "functionEnum": "StrokeDecreaseWeightAbsolute",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeCalloutEllipse",
+     "functionEnum": "StrokeIncreaseWeightAbsolute",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeCrescent",
+     "functionEnum": "StrokeDecreaseWeight",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeCrescent",
+     "functionEnum": "StrokeIncreaseWeight",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeCrescent",
+     "functionEnum": "StrokeDecreaseWeightAbsolute",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeCrescent",
+     "functionEnum": "StrokeIncreaseWeightAbsolute",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeSegment",
+     "functionEnum": "StrokeDecreaseWeight",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeSegment",
+     "functionEnum": "StrokeIncreaseWeight",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeSegment",
+     "functionEnum": "StrokeDecreaseWeightAbsolute",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeSegment",
+     "functionEnum": "StrokeIncreaseWeightAbsolute",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeSquareStar",
+     "functionEnum": "StrokeDecreaseWeight",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeSquareStar",
+     "functionEnum": "StrokeIncreaseWeight",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeSquareStar",
+     "functionEnum": "StrokeDecreaseWeightAbsolute",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeSquareStar",
+     "functionEnum": "StrokeIncreaseWeightAbsolute",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeTear",
+     "functionEnum": "StrokeDecreaseWeight",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeTear",
+     "functionEnum": "StrokeIncreaseWeight",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeTear",
+     "functionEnum": "StrokeDecreaseWeightAbsolute",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeTear",
+     "functionEnum": "StrokeIncreaseWeightAbsolute",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeHeart",
+     "functionEnum": "StrokeDecreaseWeight",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeHeart",
+     "functionEnum": "StrokeIncreaseWeight",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeHeart",
+     "functionEnum": "StrokeDecreaseWeightAbsolute",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeHeart",
+     "functionEnum": "StrokeIncreaseWeightAbsolute",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeCat",
+     "functionEnum": "StrokeDecreaseWeight",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeCat",
+     "functionEnum": "StrokeIncreaseWeight",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeCat",
+     "functionEnum": "StrokeDecreaseWeightAbsolute",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeCat",
+     "functionEnum": "StrokeIncreaseWeightAbsolute",
+     "char": "]",
+     "modifierKeys": "Shift"
+    }
+   ]
+  },
+  {
+   "md5": "cbac02c946a6affffee02dd8954dae51",
+   "워크스페이스": [
+    "63FB3B15-8A29-4FA2-A471-6A0CB8845FAB"
+   ],
+   "항목수": 287,
+   "항목": [
+    {
+     "type": "GlobalCommand",
+     "command": "Serif.Affinity.Commands.ShowSwitchDocumentDialogCommand",
+     "key": "Tab",
+     "modifierKeys": "Control"
+    },
+    {
+     "type": "GlobalCommand",
+     "command": "Serif.Affinity.Commands.ReverseSwitchDocumentDialogCommand",
+     "key": "Tab",
+     "modifierKeys": "Control, Shift"
+    },
+    {
+     "type": "GlobalCommand",
+     "command": "Serif.Interop.Persona.Commands.LiquifyClearMaskCommand",
+     "key": "D",
+     "modifierKeys": "Control"
+    },
+    {
+     "type": "GlobalCommand",
+     "command": "Serif.Affinity.Commands.CycleViewModeCommand",
+     "char": ",",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "GlobalCommand",
+     "command": "Serif.Interop.Persona.Commands.LiquifyInvertMaskCommand",
+     "key": "I",
+     "modifierKeys": "Control"
+    },
+    {
+     "type": "GlobalCommand",
+     "command": "Serif.Interop.Persona.Commands.LiquifyFillMaskCommand",
+     "key": "A",
+     "modifierKeys": "Control"
+    },
+    {
+     "type": "GlobalCommand",
+     "command": "Serif.Affinity.Commands.SwitchToNextViewCommand",
+     "char": "`",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "GlobalCommand",
+     "command": "Serif.Interop.Persona.Commands.ZoomInTabletCommand",
+     "key": "F15",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "GlobalCommand",
+     "command": "Serif.Interop.Persona.Commands.ZoomOutTabletCommand",
+     "key": "F16",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Affinity.Commands.NewDocumentCommand",
+     "key": "N",
+     "modifierKeys": "Control"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.PasteToNewDocumentCommand",
+     "key": "N",
+     "modifierKeys": "Alt, Control, Shift"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.NewPanoramaDocumentCommand",
+     "key": "P",
+     "modifierKeys": "Alt, Control, Shift"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.NewStackDocumentCommand",
+     "key": "O",
+     "modifierKeys": "Alt, Control, Shift"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Affinity.Commands.OpenDocumentCommand",
+     "key": "O",
+     "modifierKeys": "Control"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.CloseViewCommand",
+     "key": "W",
+     "modifierKeys": "Control"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.CloseAllViewsCommand",
+     "key": "W",
+     "modifierKeys": "Alt, Control"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.UndoCommand",
+     "key": "Z",
+     "modifierKeys": "Control"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.RedoCommand",
+     "key": "Z",
+     "modifierKeys": "Control, Shift"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.CutCommand",
+     "key": "X",
+     "modifierKeys": "Control"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.CopyCommand",
+     "key": "C",
+     "modifierKeys": "Control"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.PasteCommand",
+     "key": "V",
+     "modifierKeys": "Control"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.PreferencesCommand",
+     "key": "OemComma",
+     "modifierKeys": "Control"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.ZoomInCommand",
+     "key": "OemPlus",
+     "modifierKeys": "Control"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.ZoomOutCommand",
+     "key": "OemMinus",
+     "modifierKeys": "Control"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.ZoomToFitCommand",
+     "key": "D0",
+     "modifierKeys": "Control"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.ZoomToWidthCommand",
+     "key": "D0",
+     "modifierKeys": "Alt, Shift"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.ZoomTo100Command",
+     "key": "D1",
+     "modifierKeys": "Control"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.ZoomTo200Command",
+     "key": "D2",
+     "modifierKeys": "Control"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.ZoomTo400Command",
+     "key": "D3",
+     "modifierKeys": "Control"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.ZoomTo800Command",
+     "key": "D4",
+     "modifierKeys": "Control"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.ZoomToActualSizeCommand",
+     "key": "D8",
+     "modifierKeys": "Control"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.ZoomToPixelSizeCommand",
+     "key": "D9",
+     "modifierKeys": "Control"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.ResetRotationCommand",
+     "key": "R",
+     "modifierKeys": "Alt, Control, Shift"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.ToggleGuidesCommand",
+     "char": ";",
+     "modifierKeys": "Control"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.ToggleGridCommand",
+     "char": "'",
+     "modifierKeys": "Control"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.ToggleRulersCommand",
+     "key": "R",
+     "modifierKeys": "Control"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Affinity.Commands.ToggleUICommand",
+     "key": "Tab",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Affinity.Commands.HideStudioCommand",
+     "key": "H",
+     "modifierKeys": "Control, Shift"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Affinity.Commands.ShowToolbarCommand",
+     "key": "T",
+     "modifierKeys": "Alt, Control"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Affinity.Commands.ApplyStudioPresetCommand1",
+     "key": "D1",
+     "modifierKeys": "Control, Shift"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Affinity.Commands.ApplyStudioPresetCommand2",
+     "key": "D2",
+     "modifierKeys": "Control, Shift"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Affinity.Commands.ApplyStudioPresetCommand3",
+     "key": "D3",
+     "modifierKeys": "Control, Shift"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Affinity.Commands.ApplyStudioPresetCommand4",
+     "key": "D4",
+     "modifierKeys": "Control, Shift"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Affinity.Commands.ApplyStudioPresetCommand5",
+     "key": "D5",
+     "modifierKeys": "Control, Shift"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Affinity.Commands.ApplyStudioPresetCommand6",
+     "key": "D6",
+     "modifierKeys": "Control, Shift"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Affinity.Commands.ApplyStudioPresetCommand7",
+     "key": "D7",
+     "modifierKeys": "Control, Shift"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Affinity.Commands.ApplyStudioPresetCommand8",
+     "key": "D8",
+     "modifierKeys": "Control, Shift"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Affinity.Commands.ApplyStudioPresetCommand9",
+     "key": "D9",
+     "modifierKeys": "Control, Shift"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Affinity.Commands.ShowHelpCommand",
+     "key": "F1",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolType",
+     "tool": "LiquifyHand",
+     "key": "H",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolType",
+     "tool": "LiquifyZoom",
+     "key": "Z",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolType",
+     "tool": "LiquifyPushForward",
+     "key": "P",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolType",
+     "tool": "LiquifyPushLeft",
+     "key": "L",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolType",
+     "tool": "LiquifyTwirl",
+     "key": "T",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolType",
+     "tool": "LiquifyPinch",
+     "key": "U",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolType",
+     "tool": "LiquifyPunch",
+     "key": "N",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolType",
+     "tool": "LiquifyTurbulence",
+     "key": "B",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolType",
+     "tool": "LiquifyMeshClone",
+     "key": "C",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolType",
+     "tool": "LiquifyReconstruct",
+     "key": "R",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolType",
+     "tool": "LiquifyFreeze",
+     "key": "F",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolType",
+     "tool": "LiquifyThaw",
+     "key": "W",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "VectorEraseBrush",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "VectorEraseBrush",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "VectorBlobBrush",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "VectorBlobBrush",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "VectorBrush",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "VectorBrush",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "DevelopEffect",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "DevelopEffect",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "LiquifyEffect",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "LiquifyEffect",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "PanoramaEffect",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "PanoramaEffect",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ToneMapEffect",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ToneMapEffect",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RefineSelection",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RefineSelection",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "Node",
+     "functionEnum": "CycleForwards",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "Node",
+     "functionEnum": "CycleBackwards",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "Node",
+     "functionEnum": "StrokeDecreaseWeightAbsolute",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "Node",
+     "functionEnum": "StrokeIncreaseWeightAbsolute",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "Node",
+     "functionEnum": "CurveBreak",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "Node",
+     "functionEnum": "CurveJoin",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "Node",
+     "functionEnum": "FitToCurveDelete",
+     "key": "Back",
+     "modifierKeys": "Alt"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "Node",
+     "functionEnum": "FitToCurveDelete",
+     "key": "Delete",
+     "modifierKeys": "Alt"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "Corner",
+     "functionEnum": "StrokeDecreaseWeightAbsolute",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "Corner",
+     "functionEnum": "StrokeIncreaseWeightAbsolute",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "Corner",
+     "functionEnum": "CycleForwards",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "Corner",
+     "functionEnum": "CycleBackwards",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "Pen",
+     "functionEnum": "CurveBreak",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "Pen",
+     "functionEnum": "CurveJoin",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "BlemishRemoval",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "BlemishRemoval",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "BlemishRemoval",
+     "functionEnum": "BrushDecreaseHardness",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "BlemishRemoval",
+     "functionEnum": "BrushIncreaseHardness",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "FFTDenoiseEffect",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "FFTDenoiseEffect",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "FFTDenoiseEffect",
+     "functionEnum": "BrushDecreaseHardness",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "FFTDenoiseEffect",
+     "functionEnum": "BrushIncreaseHardness",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterEraseBrush",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterEraseBrush",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterEraseBrush",
+     "functionEnum": "BrushDecreaseHardness",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterEraseBrush",
+     "functionEnum": "BrushIncreaseHardness",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterColourReplacementBrush",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterColourReplacementBrush",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterColourReplacementBrush",
+     "functionEnum": "BrushDecreaseHardness",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterColourReplacementBrush",
+     "functionEnum": "BrushIncreaseHardness",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterPixel",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterPixel",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterPixel",
+     "functionEnum": "BrushDecreaseHardness",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterPixel",
+     "functionEnum": "BrushIncreaseHardness",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterPaintMixerBrush",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterPaintMixerBrush",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterPaintMixerBrush",
+     "functionEnum": "BrushDecreaseHardness",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterPaintMixerBrush",
+     "functionEnum": "BrushIncreaseHardness",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterBackgroundEraseBrush",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterBackgroundEraseBrush",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterBackgroundEraseBrush",
+     "functionEnum": "BrushDecreaseHardness",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterBackgroundEraseBrush",
+     "functionEnum": "BrushIncreaseHardness",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterDodgeBrush",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterDodgeBrush",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterDodgeBrush",
+     "functionEnum": "BrushDecreaseHardness",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterDodgeBrush",
+     "functionEnum": "BrushIncreaseHardness",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterBurnBrush",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterBurnBrush",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterBurnBrush",
+     "functionEnum": "BrushDecreaseHardness",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterBurnBrush",
+     "functionEnum": "BrushIncreaseHardness",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterSpongeBrush",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterSpongeBrush",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterSpongeBrush",
+     "functionEnum": "BrushDecreaseHardness",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterSpongeBrush",
+     "functionEnum": "BrushIncreaseHardness",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterCloneBrush",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterCloneBrush",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterCloneBrush",
+     "functionEnum": "BrushDecreaseHardness",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterCloneBrush",
+     "functionEnum": "BrushIncreaseHardness",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterUndoBrush",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterUndoBrush",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterUndoBrush",
+     "functionEnum": "BrushDecreaseHardness",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterUndoBrush",
+     "functionEnum": "BrushIncreaseHardness",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterBlurBrush",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterBlurBrush",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterBlurBrush",
+     "functionEnum": "BrushDecreaseHardness",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterBlurBrush",
+     "functionEnum": "BrushIncreaseHardness",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterSharpenBrush",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterSharpenBrush",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterSharpenBrush",
+     "functionEnum": "BrushDecreaseHardness",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterSharpenBrush",
+     "functionEnum": "BrushIncreaseHardness",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterMedianBrush",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterMedianBrush",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterMedianBrush",
+     "functionEnum": "BrushDecreaseHardness",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterMedianBrush",
+     "functionEnum": "BrushIncreaseHardness",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterSmudgeBrush",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterSmudgeBrush",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterSmudgeBrush",
+     "functionEnum": "BrushDecreaseHardness",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterSmudgeBrush",
+     "functionEnum": "BrushIncreaseHardness",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterHealingBrush",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterHealingBrush",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterHealingBrush",
+     "functionEnum": "BrushDecreaseHardness",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterHealingBrush",
+     "functionEnum": "BrushIncreaseHardness",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterInpaintingBrush",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterInpaintingBrush",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterInpaintingBrush",
+     "functionEnum": "BrushDecreaseHardness",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterInpaintingBrush",
+     "functionEnum": "BrushIncreaseHardness",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterSelectionBrush",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterSelectionBrush",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterSelectionBrush",
+     "functionEnum": "BrushDecreaseHardness",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterSelectionBrush",
+     "functionEnum": "BrushIncreaseHardness",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterPaintBrush",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterPaintBrush",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterPaintBrush",
+     "functionEnum": "BrushDecreaseHardness",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterPaintBrush",
+     "functionEnum": "BrushIncreaseHardness",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterAdjustmentBrush",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterAdjustmentBrush",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterAdjustmentBrush",
+     "functionEnum": "BrushDecreaseHardness",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterAdjustmentBrush",
+     "functionEnum": "BrushIncreaseHardness",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterFilterBrush",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterFilterBrush",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterFilterBrush",
+     "functionEnum": "BrushDecreaseHardness",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterFilterBrush",
+     "functionEnum": "BrushIncreaseHardness",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterToneBrush",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterToneBrush",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterToneBrush",
+     "functionEnum": "BrushDecreaseHardness",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterToneBrush",
+     "functionEnum": "BrushIncreaseHardness",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "Pencil",
+     "functionEnum": "StrokeDecreaseWeight",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "Pencil",
+     "functionEnum": "StrokeIncreaseWeight",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "Pencil",
+     "functionEnum": "StrokeDecreaseWeightAbsolute",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "Pencil",
+     "functionEnum": "StrokeIncreaseWeightAbsolute",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "Pen",
+     "functionEnum": "StrokeDecreaseWeight",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "Pen",
+     "functionEnum": "StrokeIncreaseWeight",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "Pen",
+     "functionEnum": "StrokeDecreaseWeightAbsolute",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "Pen",
+     "functionEnum": "StrokeIncreaseWeightAbsolute",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "Select",
+     "functionEnum": "StrokeDecreaseWeight",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "Select",
+     "functionEnum": "StrokeIncreaseWeight",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "Select",
+     "functionEnum": "StrokeDecreaseWeightAbsolute",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "Select",
+     "functionEnum": "StrokeIncreaseWeightAbsolute",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeNode",
+     "functionEnum": "StrokeDecreaseWeight",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeNode",
+     "functionEnum": "StrokeIncreaseWeight",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeNode",
+     "functionEnum": "StrokeDecreaseWeightAbsolute",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeNode",
+     "functionEnum": "StrokeIncreaseWeightAbsolute",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeRectangle",
+     "functionEnum": "StrokeDecreaseWeight",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeRectangle",
+     "functionEnum": "StrokeIncreaseWeight",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeRectangle",
+     "functionEnum": "StrokeDecreaseWeightAbsolute",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeRectangle",
+     "functionEnum": "StrokeIncreaseWeightAbsolute",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeEllipse",
+     "functionEnum": "StrokeDecreaseWeight",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeEllipse",
+     "functionEnum": "StrokeIncreaseWeight",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeEllipse",
+     "functionEnum": "StrokeDecreaseWeightAbsolute",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeEllipse",
+     "functionEnum": "StrokeIncreaseWeightAbsolute",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeRoundedRectangle",
+     "functionEnum": "StrokeDecreaseWeight",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeRoundedRectangle",
+     "functionEnum": "StrokeIncreaseWeight",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeRoundedRectangle",
+     "functionEnum": "StrokeDecreaseWeightAbsolute",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeRoundedRectangle",
+     "functionEnum": "StrokeIncreaseWeightAbsolute",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeTriangle",
+     "functionEnum": "StrokeDecreaseWeight",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeTriangle",
+     "functionEnum": "StrokeIncreaseWeight",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeTriangle",
+     "functionEnum": "StrokeDecreaseWeightAbsolute",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeTriangle",
+     "functionEnum": "StrokeIncreaseWeightAbsolute",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeDiamond",
+     "functionEnum": "StrokeDecreaseWeight",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeDiamond",
+     "functionEnum": "StrokeIncreaseWeight",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeDiamond",
+     "functionEnum": "StrokeDecreaseWeightAbsolute",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeDiamond",
+     "functionEnum": "StrokeIncreaseWeightAbsolute",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeTrapezoid",
+     "functionEnum": "StrokeDecreaseWeight",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeTrapezoid",
+     "functionEnum": "StrokeIncreaseWeight",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeTrapezoid",
+     "functionEnum": "StrokeDecreaseWeightAbsolute",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeTrapezoid",
+     "functionEnum": "StrokeIncreaseWeightAbsolute",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapePolygon",
+     "functionEnum": "StrokeDecreaseWeight",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapePolygon",
+     "functionEnum": "StrokeIncreaseWeight",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapePolygon",
+     "functionEnum": "StrokeDecreaseWeightAbsolute",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapePolygon",
+     "functionEnum": "StrokeIncreaseWeightAbsolute",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeStar",
+     "functionEnum": "StrokeDecreaseWeight",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeStar",
+     "functionEnum": "StrokeIncreaseWeight",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeStar",
+     "functionEnum": "StrokeDecreaseWeightAbsolute",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeStar",
+     "functionEnum": "StrokeIncreaseWeightAbsolute",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeDoubleStar",
+     "functionEnum": "StrokeDecreaseWeight",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeDoubleStar",
+     "functionEnum": "StrokeIncreaseWeight",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeDoubleStar",
+     "functionEnum": "StrokeDecreaseWeightAbsolute",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeDoubleStar",
+     "functionEnum": "StrokeIncreaseWeightAbsolute",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapePie",
+     "functionEnum": "StrokeDecreaseWeight",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapePie",
+     "functionEnum": "StrokeIncreaseWeight",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapePie",
+     "functionEnum": "StrokeDecreaseWeightAbsolute",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapePie",
+     "functionEnum": "StrokeIncreaseWeightAbsolute",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeDonut",
+     "functionEnum": "StrokeDecreaseWeight",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeDonut",
+     "functionEnum": "StrokeIncreaseWeight",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeDonut",
+     "functionEnum": "StrokeDecreaseWeightAbsolute",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeDonut",
+     "functionEnum": "StrokeIncreaseWeightAbsolute",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeArrow",
+     "functionEnum": "StrokeDecreaseWeight",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeArrow",
+     "functionEnum": "StrokeIncreaseWeight",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeArrow",
+     "functionEnum": "StrokeDecreaseWeightAbsolute",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeArrow",
+     "functionEnum": "StrokeIncreaseWeightAbsolute",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeCog",
+     "functionEnum": "StrokeDecreaseWeight",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeCog",
+     "functionEnum": "StrokeIncreaseWeight",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeCog",
+     "functionEnum": "StrokeDecreaseWeightAbsolute",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeCog",
+     "functionEnum": "StrokeIncreaseWeightAbsolute",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeCloud",
+     "functionEnum": "StrokeDecreaseWeight",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeCloud",
+     "functionEnum": "StrokeIncreaseWeight",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeCloud",
+     "functionEnum": "StrokeDecreaseWeightAbsolute",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeCloud",
+     "functionEnum": "StrokeIncreaseWeightAbsolute",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeCalloutRoundRect",
+     "functionEnum": "StrokeDecreaseWeight",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeCalloutRoundRect",
+     "functionEnum": "StrokeIncreaseWeight",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeCalloutRoundRect",
+     "functionEnum": "StrokeDecreaseWeightAbsolute",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeCalloutRoundRect",
+     "functionEnum": "StrokeIncreaseWeightAbsolute",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeCalloutEllipse",
+     "functionEnum": "StrokeDecreaseWeight",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeCalloutEllipse",
+     "functionEnum": "StrokeIncreaseWeight",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeCalloutEllipse",
+     "functionEnum": "StrokeDecreaseWeightAbsolute",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeCalloutEllipse",
+     "functionEnum": "StrokeIncreaseWeightAbsolute",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeCrescent",
+     "functionEnum": "StrokeDecreaseWeight",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeCrescent",
+     "functionEnum": "StrokeIncreaseWeight",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeCrescent",
+     "functionEnum": "StrokeDecreaseWeightAbsolute",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeCrescent",
+     "functionEnum": "StrokeIncreaseWeightAbsolute",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeSegment",
+     "functionEnum": "StrokeDecreaseWeight",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeSegment",
+     "functionEnum": "StrokeIncreaseWeight",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeSegment",
+     "functionEnum": "StrokeDecreaseWeightAbsolute",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeSegment",
+     "functionEnum": "StrokeIncreaseWeightAbsolute",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeSquareStar",
+     "functionEnum": "StrokeDecreaseWeight",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeSquareStar",
+     "functionEnum": "StrokeIncreaseWeight",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeSquareStar",
+     "functionEnum": "StrokeDecreaseWeightAbsolute",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeSquareStar",
+     "functionEnum": "StrokeIncreaseWeightAbsolute",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeTear",
+     "functionEnum": "StrokeDecreaseWeight",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeTear",
+     "functionEnum": "StrokeIncreaseWeight",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeTear",
+     "functionEnum": "StrokeDecreaseWeightAbsolute",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeTear",
+     "functionEnum": "StrokeIncreaseWeightAbsolute",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeHeart",
+     "functionEnum": "StrokeDecreaseWeight",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeHeart",
+     "functionEnum": "StrokeIncreaseWeight",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeHeart",
+     "functionEnum": "StrokeDecreaseWeightAbsolute",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeHeart",
+     "functionEnum": "StrokeIncreaseWeightAbsolute",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeCat",
+     "functionEnum": "StrokeDecreaseWeight",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeCat",
+     "functionEnum": "StrokeIncreaseWeight",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeCat",
+     "functionEnum": "StrokeDecreaseWeightAbsolute",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeCat",
+     "functionEnum": "StrokeIncreaseWeightAbsolute",
+     "char": "]",
+     "modifierKeys": "Shift"
+    }
+   ]
+  },
+  {
+   "md5": "cc29f4fe9ea1b2c932c91fff545a0725",
+   "워크스페이스": [
+    "65498ADB-10B8-4D77-9740-38EF8BA49338"
+   ],
+   "항목수": 311,
+   "항목": [
+    {
+     "type": "GlobalCommand",
+     "command": "Serif.Affinity.Commands.ShowSwitchDocumentDialogCommand",
+     "key": "Tab",
+     "modifierKeys": "Control"
+    },
+    {
+     "type": "GlobalCommand",
+     "command": "Serif.Affinity.Commands.ReverseSwitchDocumentDialogCommand",
+     "key": "Tab",
+     "modifierKeys": "Control, Shift"
+    },
+    {
+     "type": "GlobalCommand",
+     "command": "Serif.Interop.Persona.Commands.CycleSnappingPlanesCommand",
+     "char": "'",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "GlobalCommand",
+     "command": "Serif.Interop.Persona.Commands.SetFillNoneCommand",
+     "char": "/",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "GlobalCommand",
+     "command": "Serif.Interop.Persona.Commands.SetFillContextToBlackAndWhiteCommand",
+     "key": "D",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "GlobalCommand",
+     "command": "Serif.Interop.Persona.Commands.SwapLineAndFillCommand",
+     "key": "X",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "GlobalCommand",
+     "command": "Serif.Affinity.Commands.SwitchToNextViewCommand",
+     "char": "`",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "GlobalCommand",
+     "command": "Serif.Interop.Persona.Commands.QuickMaskPopupCommand",
+     "key": "Q",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "GlobalCommand",
+     "command": "Serif.Interop.Persona.Commands.ToggleFillContextCommand",
+     "key": "X",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "GlobalCommand",
+     "command": "Serif.Interop.Persona.Commands.ToggleFrequencyLayerCommand",
+     "key": "F",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "GlobalCommand",
+     "command": "Serif.Interop.Persona.Commands.ToggleSnappingCommand",
+     "char": ";",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "GlobalCommand",
+     "command": "Serif.Interop.Persona.Commands.ZoomInTabletCommand",
+     "key": "F15",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "GlobalCommand",
+     "command": "Serif.Interop.Persona.Commands.ZoomOutTabletCommand",
+     "key": "F16",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "GlobalCommand",
+     "command": "Serif.Interop.Persona.Commands.SetBlendModeNormalCommand",
+     "key": "N",
+     "modifierKeys": "Alt, Shift"
+    },
+    {
+     "type": "GlobalCommand",
+     "command": "Serif.Interop.Persona.Commands.SetBlendModeDarkenCommand",
+     "key": "K",
+     "modifierKeys": "Alt, Shift"
+    },
+    {
+     "type": "GlobalCommand",
+     "command": "Serif.Interop.Persona.Commands.SetBlendModeMultiplyCommand",
+     "key": "M",
+     "modifierKeys": "Alt, Shift"
+    },
+    {
+     "type": "GlobalCommand",
+     "command": "Serif.Interop.Persona.Commands.SetBlendModeColourBurnCommand",
+     "key": "B",
+     "modifierKeys": "Alt, Shift"
+    },
+    {
+     "type": "GlobalCommand",
+     "command": "Serif.Interop.Persona.Commands.SetBlendModeLinearBurnCommand",
+     "key": "A",
+     "modifierKeys": "Alt, Shift"
+    },
+    {
+     "type": "GlobalCommand",
+     "command": "Serif.Interop.Persona.Commands.SetBlendModeAddCommand",
+     "key": "W",
+     "modifierKeys": "Alt, Shift"
+    },
+    {
+     "type": "GlobalCommand",
+     "command": "Serif.Interop.Persona.Commands.SetBlendModeLightenCommand",
+     "key": "G",
+     "modifierKeys": "Alt, Shift"
+    },
+    {
+     "type": "GlobalCommand",
+     "command": "Serif.Interop.Persona.Commands.SetBlendModeScreenCommand",
+     "key": "S",
+     "modifierKeys": "Alt, Shift"
+    },
+    {
+     "type": "GlobalCommand",
+     "command": "Serif.Interop.Persona.Commands.SetBlendModeColourDodgeCommand",
+     "key": "D",
+     "modifierKeys": "Alt, Shift"
+    },
+    {
+     "type": "GlobalCommand",
+     "command": "Serif.Interop.Persona.Commands.SetBlendModeOverlayCommand",
+     "key": "O",
+     "modifierKeys": "Alt, Shift"
+    },
+    {
+     "type": "GlobalCommand",
+     "command": "Serif.Interop.Persona.Commands.SetBlendModeSoftLightCommand",
+     "key": "F",
+     "modifierKeys": "Alt, Shift"
+    },
+    {
+     "type": "GlobalCommand",
+     "command": "Serif.Interop.Persona.Commands.SetBlendModeHardightCommand",
+     "key": "H",
+     "modifierKeys": "Alt, Shift"
+    },
+    {
+     "type": "GlobalCommand",
+     "command": "Serif.Interop.Persona.Commands.SetBlendModeVividLightCommand",
+     "key": "V",
+     "modifierKeys": "Alt, Shift"
+    },
+    {
+     "type": "GlobalCommand",
+     "command": "Serif.Interop.Persona.Commands.SetBlendModeLinearLightCommand",
+     "key": "J",
+     "modifierKeys": "Alt, Shift"
+    },
+    {
+     "type": "GlobalCommand",
+     "command": "Serif.Interop.Persona.Commands.SetBlendModePinLightCommand",
+     "key": "Z",
+     "modifierKeys": "Alt, Shift"
+    },
+    {
+     "type": "GlobalCommand",
+     "command": "Serif.Interop.Persona.Commands.SetBlendModeHardMixCommand",
+     "key": "L",
+     "modifierKeys": "Alt, Shift"
+    },
+    {
+     "type": "GlobalCommand",
+     "command": "Serif.Interop.Persona.Commands.SetBlendModeDifferenceCommand",
+     "key": "E",
+     "modifierKeys": "Alt, Shift"
+    },
+    {
+     "type": "GlobalCommand",
+     "command": "Serif.Interop.Persona.Commands.SetBlendModeExclusionCommand",
+     "key": "X",
+     "modifierKeys": "Alt, Shift"
+    },
+    {
+     "type": "GlobalCommand",
+     "command": "Serif.Interop.Persona.Commands.SetBlendModeHueCommand",
+     "key": "U",
+     "modifierKeys": "Alt, Shift"
+    },
+    {
+     "type": "GlobalCommand",
+     "command": "Serif.Interop.Persona.Commands.SetBlendModeSaturationCommand",
+     "key": "T",
+     "modifierKeys": "Alt, Shift"
+    },
+    {
+     "type": "GlobalCommand",
+     "command": "Serif.Interop.Persona.Commands.SetBlendModeColourCommand",
+     "key": "C",
+     "modifierKeys": "Alt, Shift"
+    },
+    {
+     "type": "GlobalCommand",
+     "command": "Serif.Interop.Persona.Commands.SetBlendModeLuminosityCommand",
+     "key": "Y",
+     "modifierKeys": "Alt, Shift"
+    },
+    {
+     "type": "GlobalCommand",
+     "command": "Serif.Interop.Persona.Commands.SetNextBlendModeCommand",
+     "key": "OemPlus",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "GlobalCommand",
+     "command": "Serif.Interop.Persona.Commands.SetPreviousBlendModeCommand",
+     "key": "OemMinus",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "GlobalCommand",
+     "command": "Serif.Affinity.Commands.SwitchToWorkspaceCommand1",
+     "key": "F2",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "GlobalCommand",
+     "command": "Serif.Affinity.Commands.SwitchToWorkspaceCommand2",
+     "key": "F3",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "GlobalCommand",
+     "command": "Serif.Affinity.Commands.SwitchToWorkspaceCommand3",
+     "key": "F4",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "GlobalCommand",
+     "command": "Serif.Affinity.Commands.SwitchToWorkspaceCommand4",
+     "key": "F5",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "GlobalCommand",
+     "command": "Serif.Affinity.Commands.SwitchToWorkspaceCommand5",
+     "key": "F6",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "GlobalCommand",
+     "command": "Serif.Affinity.Commands.SwitchToWorkspaceCommand6",
+     "key": "F7",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "GlobalCommand",
+     "command": "Serif.Affinity.Commands.SwitchToWorkspaceCommand7",
+     "key": "F8",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "GlobalCommand",
+     "command": "Serif.Affinity.Commands.SwitchToWorkspaceCommand8",
+     "key": "F9",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Affinity.Commands.NewDocumentCommand",
+     "key": "N",
+     "modifierKeys": "Control"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.NewPanoramaDocumentCommand",
+     "key": "P",
+     "modifierKeys": "Alt, Control, Shift"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.NewStackDocumentCommand",
+     "key": "O",
+     "modifierKeys": "Alt, Control, Shift"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.PasteToNewDocumentCommand",
+     "key": "N",
+     "modifierKeys": "Alt, Control, Shift"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Affinity.Commands.OpenDocumentCommand",
+     "key": "O",
+     "modifierKeys": "Control"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.CloseViewCommand",
+     "key": "W",
+     "modifierKeys": "Control"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.CloseAllViewsCommand",
+     "key": "W",
+     "modifierKeys": "Alt, Control"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.UndoCommand",
+     "key": "Z",
+     "modifierKeys": "Control"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.RedoCommand",
+     "key": "Z",
+     "modifierKeys": "Control, Shift"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.CutCommand",
+     "key": "X",
+     "modifierKeys": "Control"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.CopyCommand",
+     "key": "C",
+     "modifierKeys": "Control"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.PasteCommand",
+     "key": "V",
+     "modifierKeys": "Control"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.PreferencesCommand",
+     "key": "OemComma",
+     "modifierKeys": "Control"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.ZoomInCommand",
+     "key": "OemPlus",
+     "modifierKeys": "Control"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.ZoomOutCommand",
+     "key": "OemMinus",
+     "modifierKeys": "Control"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.ZoomToFitCommand",
+     "key": "D0",
+     "modifierKeys": "Control"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.ZoomToWidthCommand",
+     "key": "D0",
+     "modifierKeys": "Alt, Shift"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.ZoomTo100Command",
+     "key": "D1",
+     "modifierKeys": "Control"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.ZoomTo200Command",
+     "key": "D2",
+     "modifierKeys": "Control"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.ZoomTo400Command",
+     "key": "D3",
+     "modifierKeys": "Control"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.ZoomTo800Command",
+     "key": "D4",
+     "modifierKeys": "Control"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.ZoomToActualSizeCommand",
+     "key": "D8",
+     "modifierKeys": "Control"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.ZoomToPixelSizeCommand",
+     "key": "D9",
+     "modifierKeys": "Control"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.ResetRotationCommand",
+     "key": "R",
+     "modifierKeys": "Alt, Control, Shift"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.ToggleGuidesCommand",
+     "char": ";",
+     "modifierKeys": "Control"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.ToggleGridCommand",
+     "char": "'",
+     "modifierKeys": "Control"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Interop.Persona.Commands.ToggleRulersCommand",
+     "key": "R",
+     "modifierKeys": "Control"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Affinity.Commands.ToggleUICommand",
+     "key": "Tab",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Affinity.Commands.HideStudioCommand",
+     "key": "H",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Affinity.Commands.ShowToolbarCommand",
+     "key": "T",
+     "modifierKeys": "Alt, Control"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Affinity.Commands.ApplyStudioPresetCommand1",
+     "key": "D1",
+     "modifierKeys": "Control, Shift"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Affinity.Commands.ApplyStudioPresetCommand2",
+     "key": "D2",
+     "modifierKeys": "Control, Shift"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Affinity.Commands.ApplyStudioPresetCommand3",
+     "key": "D3",
+     "modifierKeys": "Control, Shift"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Affinity.Commands.ApplyStudioPresetCommand4",
+     "key": "D4",
+     "modifierKeys": "Control, Shift"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Affinity.Commands.ApplyStudioPresetCommand5",
+     "key": "D5",
+     "modifierKeys": "Control, Shift"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Affinity.Commands.ApplyStudioPresetCommand6",
+     "key": "D6",
+     "modifierKeys": "Control, Shift"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Affinity.Commands.ApplyStudioPresetCommand7",
+     "key": "D7",
+     "modifierKeys": "Control, Shift"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Affinity.Commands.ApplyStudioPresetCommand8",
+     "key": "D8",
+     "modifierKeys": "Control, Shift"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Affinity.Commands.ApplyStudioPresetCommand9",
+     "key": "D9",
+     "modifierKeys": "Control, Shift"
+    },
+    {
+     "type": "Command",
+     "command": "Serif.Affinity.Commands.ShowHelpCommand",
+     "key": "F1",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "VectorEraseBrush",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "VectorEraseBrush",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "VectorBlobBrush",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "VectorBlobBrush",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "VectorBrush",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "VectorBrush",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "DevelopEffect",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "DevelopEffect",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "LiquifyEffect",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "LiquifyEffect",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "PanoramaEffect",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "PanoramaEffect",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ToneMapEffect",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ToneMapEffect",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RefineSelection",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RefineSelection",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "Node",
+     "functionEnum": "CycleForwards",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "Node",
+     "functionEnum": "CycleBackwards",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "Node",
+     "functionEnum": "StrokeDecreaseWeightAbsolute",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "Node",
+     "functionEnum": "StrokeIncreaseWeightAbsolute",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "Node",
+     "functionEnum": "CurveBreak",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "Node",
+     "functionEnum": "CurveJoin",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "Node",
+     "functionEnum": "FitToCurveDelete",
+     "key": "Back",
+     "modifierKeys": "Alt"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "Node",
+     "functionEnum": "FitToCurveDelete",
+     "key": "Delete",
+     "modifierKeys": "Alt"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "Corner",
+     "functionEnum": "StrokeDecreaseWeightAbsolute",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "Corner",
+     "functionEnum": "StrokeIncreaseWeightAbsolute",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "Corner",
+     "functionEnum": "CycleForwards",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "Corner",
+     "functionEnum": "CycleBackwards",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "Pen",
+     "functionEnum": "CurveBreak",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "Pen",
+     "functionEnum": "CurveJoin",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "BlemishRemoval",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "BlemishRemoval",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "BlemishRemoval",
+     "functionEnum": "BrushDecreaseHardness",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "BlemishRemoval",
+     "functionEnum": "BrushIncreaseHardness",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "FFTDenoiseEffect",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "FFTDenoiseEffect",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "FFTDenoiseEffect",
+     "functionEnum": "BrushDecreaseHardness",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "FFTDenoiseEffect",
+     "functionEnum": "BrushIncreaseHardness",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterEraseBrush",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterEraseBrush",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterEraseBrush",
+     "functionEnum": "BrushDecreaseHardness",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterEraseBrush",
+     "functionEnum": "BrushIncreaseHardness",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterColourReplacementBrush",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterColourReplacementBrush",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterColourReplacementBrush",
+     "functionEnum": "BrushDecreaseHardness",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterColourReplacementBrush",
+     "functionEnum": "BrushIncreaseHardness",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterPixel",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterPixel",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterPixel",
+     "functionEnum": "BrushDecreaseHardness",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterPixel",
+     "functionEnum": "BrushIncreaseHardness",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterPaintMixerBrush",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterPaintMixerBrush",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterPaintMixerBrush",
+     "functionEnum": "BrushDecreaseHardness",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterPaintMixerBrush",
+     "functionEnum": "BrushIncreaseHardness",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterBackgroundEraseBrush",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterBackgroundEraseBrush",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterBackgroundEraseBrush",
+     "functionEnum": "BrushDecreaseHardness",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterBackgroundEraseBrush",
+     "functionEnum": "BrushIncreaseHardness",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterDodgeBrush",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterDodgeBrush",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterDodgeBrush",
+     "functionEnum": "BrushDecreaseHardness",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterDodgeBrush",
+     "functionEnum": "BrushIncreaseHardness",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterBurnBrush",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterBurnBrush",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterBurnBrush",
+     "functionEnum": "BrushDecreaseHardness",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterBurnBrush",
+     "functionEnum": "BrushIncreaseHardness",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterSpongeBrush",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterSpongeBrush",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterSpongeBrush",
+     "functionEnum": "BrushDecreaseHardness",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterSpongeBrush",
+     "functionEnum": "BrushIncreaseHardness",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterCloneBrush",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterCloneBrush",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterCloneBrush",
+     "functionEnum": "BrushDecreaseHardness",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterCloneBrush",
+     "functionEnum": "BrushIncreaseHardness",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterUndoBrush",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterUndoBrush",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterUndoBrush",
+     "functionEnum": "BrushDecreaseHardness",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterUndoBrush",
+     "functionEnum": "BrushIncreaseHardness",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterBlurBrush",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterBlurBrush",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterBlurBrush",
+     "functionEnum": "BrushDecreaseHardness",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterBlurBrush",
+     "functionEnum": "BrushIncreaseHardness",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterSharpenBrush",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterSharpenBrush",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterSharpenBrush",
+     "functionEnum": "BrushDecreaseHardness",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterSharpenBrush",
+     "functionEnum": "BrushIncreaseHardness",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterMedianBrush",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterMedianBrush",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterMedianBrush",
+     "functionEnum": "BrushDecreaseHardness",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterMedianBrush",
+     "functionEnum": "BrushIncreaseHardness",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterSmudgeBrush",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterSmudgeBrush",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterSmudgeBrush",
+     "functionEnum": "BrushDecreaseHardness",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterSmudgeBrush",
+     "functionEnum": "BrushIncreaseHardness",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterHealingBrush",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterHealingBrush",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterHealingBrush",
+     "functionEnum": "BrushDecreaseHardness",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterHealingBrush",
+     "functionEnum": "BrushIncreaseHardness",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterInpaintingBrush",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterInpaintingBrush",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterInpaintingBrush",
+     "functionEnum": "BrushDecreaseHardness",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterInpaintingBrush",
+     "functionEnum": "BrushIncreaseHardness",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterSelectionBrush",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterSelectionBrush",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterSelectionBrush",
+     "functionEnum": "BrushDecreaseHardness",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterSelectionBrush",
+     "functionEnum": "BrushIncreaseHardness",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterPaintBrush",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterPaintBrush",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterPaintBrush",
+     "functionEnum": "BrushDecreaseHardness",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterPaintBrush",
+     "functionEnum": "BrushIncreaseHardness",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterAdjustmentBrush",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterAdjustmentBrush",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterAdjustmentBrush",
+     "functionEnum": "BrushDecreaseHardness",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterAdjustmentBrush",
+     "functionEnum": "BrushIncreaseHardness",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterFilterBrush",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterFilterBrush",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterFilterBrush",
+     "functionEnum": "BrushDecreaseHardness",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterFilterBrush",
+     "functionEnum": "BrushIncreaseHardness",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterToneBrush",
+     "functionEnum": "BrushDecreaseSize",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterToneBrush",
+     "functionEnum": "BrushIncreaseSize",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterToneBrush",
+     "functionEnum": "BrushDecreaseHardness",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "RasterToneBrush",
+     "functionEnum": "BrushIncreaseHardness",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "Pencil",
+     "functionEnum": "StrokeDecreaseWeight",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "Pencil",
+     "functionEnum": "StrokeIncreaseWeight",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "Pencil",
+     "functionEnum": "StrokeDecreaseWeightAbsolute",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "Pencil",
+     "functionEnum": "StrokeIncreaseWeightAbsolute",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "Pen",
+     "functionEnum": "StrokeDecreaseWeight",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "Pen",
+     "functionEnum": "StrokeIncreaseWeight",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "Pen",
+     "functionEnum": "StrokeDecreaseWeightAbsolute",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "Pen",
+     "functionEnum": "StrokeIncreaseWeightAbsolute",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "Select",
+     "functionEnum": "StrokeDecreaseWeight",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "Select",
+     "functionEnum": "StrokeIncreaseWeight",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "Select",
+     "functionEnum": "StrokeDecreaseWeightAbsolute",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "Select",
+     "functionEnum": "StrokeIncreaseWeightAbsolute",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeNode",
+     "functionEnum": "StrokeDecreaseWeight",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeNode",
+     "functionEnum": "StrokeIncreaseWeight",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeNode",
+     "functionEnum": "StrokeDecreaseWeightAbsolute",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeNode",
+     "functionEnum": "StrokeIncreaseWeightAbsolute",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeRectangle",
+     "functionEnum": "StrokeDecreaseWeight",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeRectangle",
+     "functionEnum": "StrokeIncreaseWeight",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeRectangle",
+     "functionEnum": "StrokeDecreaseWeightAbsolute",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeRectangle",
+     "functionEnum": "StrokeIncreaseWeightAbsolute",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeEllipse",
+     "functionEnum": "StrokeDecreaseWeight",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeEllipse",
+     "functionEnum": "StrokeIncreaseWeight",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeEllipse",
+     "functionEnum": "StrokeDecreaseWeightAbsolute",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeEllipse",
+     "functionEnum": "StrokeIncreaseWeightAbsolute",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeRoundedRectangle",
+     "functionEnum": "StrokeDecreaseWeight",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeRoundedRectangle",
+     "functionEnum": "StrokeIncreaseWeight",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeRoundedRectangle",
+     "functionEnum": "StrokeDecreaseWeightAbsolute",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeRoundedRectangle",
+     "functionEnum": "StrokeIncreaseWeightAbsolute",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeTriangle",
+     "functionEnum": "StrokeDecreaseWeight",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeTriangle",
+     "functionEnum": "StrokeIncreaseWeight",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeTriangle",
+     "functionEnum": "StrokeDecreaseWeightAbsolute",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeTriangle",
+     "functionEnum": "StrokeIncreaseWeightAbsolute",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeDiamond",
+     "functionEnum": "StrokeDecreaseWeight",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeDiamond",
+     "functionEnum": "StrokeIncreaseWeight",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeDiamond",
+     "functionEnum": "StrokeDecreaseWeightAbsolute",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeDiamond",
+     "functionEnum": "StrokeIncreaseWeightAbsolute",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeTrapezoid",
+     "functionEnum": "StrokeDecreaseWeight",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeTrapezoid",
+     "functionEnum": "StrokeIncreaseWeight",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeTrapezoid",
+     "functionEnum": "StrokeDecreaseWeightAbsolute",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeTrapezoid",
+     "functionEnum": "StrokeIncreaseWeightAbsolute",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapePolygon",
+     "functionEnum": "StrokeDecreaseWeight",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapePolygon",
+     "functionEnum": "StrokeIncreaseWeight",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapePolygon",
+     "functionEnum": "StrokeDecreaseWeightAbsolute",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapePolygon",
+     "functionEnum": "StrokeIncreaseWeightAbsolute",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeStar",
+     "functionEnum": "StrokeDecreaseWeight",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeStar",
+     "functionEnum": "StrokeIncreaseWeight",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeStar",
+     "functionEnum": "StrokeDecreaseWeightAbsolute",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeStar",
+     "functionEnum": "StrokeIncreaseWeightAbsolute",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeDoubleStar",
+     "functionEnum": "StrokeDecreaseWeight",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeDoubleStar",
+     "functionEnum": "StrokeIncreaseWeight",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeDoubleStar",
+     "functionEnum": "StrokeDecreaseWeightAbsolute",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeDoubleStar",
+     "functionEnum": "StrokeIncreaseWeightAbsolute",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapePie",
+     "functionEnum": "StrokeDecreaseWeight",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapePie",
+     "functionEnum": "StrokeIncreaseWeight",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapePie",
+     "functionEnum": "StrokeDecreaseWeightAbsolute",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapePie",
+     "functionEnum": "StrokeIncreaseWeightAbsolute",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeDonut",
+     "functionEnum": "StrokeDecreaseWeight",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeDonut",
+     "functionEnum": "StrokeIncreaseWeight",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeDonut",
+     "functionEnum": "StrokeDecreaseWeightAbsolute",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeDonut",
+     "functionEnum": "StrokeIncreaseWeightAbsolute",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeArrow",
+     "functionEnum": "StrokeDecreaseWeight",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeArrow",
+     "functionEnum": "StrokeIncreaseWeight",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeArrow",
+     "functionEnum": "StrokeDecreaseWeightAbsolute",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeArrow",
+     "functionEnum": "StrokeIncreaseWeightAbsolute",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeCog",
+     "functionEnum": "StrokeDecreaseWeight",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeCog",
+     "functionEnum": "StrokeIncreaseWeight",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeCog",
+     "functionEnum": "StrokeDecreaseWeightAbsolute",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeCog",
+     "functionEnum": "StrokeIncreaseWeightAbsolute",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeCloud",
+     "functionEnum": "StrokeDecreaseWeight",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeCloud",
+     "functionEnum": "StrokeIncreaseWeight",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeCloud",
+     "functionEnum": "StrokeDecreaseWeightAbsolute",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeCloud",
+     "functionEnum": "StrokeIncreaseWeightAbsolute",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeCalloutRoundRect",
+     "functionEnum": "StrokeDecreaseWeight",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeCalloutRoundRect",
+     "functionEnum": "StrokeIncreaseWeight",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeCalloutRoundRect",
+     "functionEnum": "StrokeDecreaseWeightAbsolute",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeCalloutRoundRect",
+     "functionEnum": "StrokeIncreaseWeightAbsolute",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeCalloutEllipse",
+     "functionEnum": "StrokeDecreaseWeight",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeCalloutEllipse",
+     "functionEnum": "StrokeIncreaseWeight",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeCalloutEllipse",
+     "functionEnum": "StrokeDecreaseWeightAbsolute",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeCalloutEllipse",
+     "functionEnum": "StrokeIncreaseWeightAbsolute",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeCrescent",
+     "functionEnum": "StrokeDecreaseWeight",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeCrescent",
+     "functionEnum": "StrokeIncreaseWeight",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeCrescent",
+     "functionEnum": "StrokeDecreaseWeightAbsolute",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeCrescent",
+     "functionEnum": "StrokeIncreaseWeightAbsolute",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeSegment",
+     "functionEnum": "StrokeDecreaseWeight",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeSegment",
+     "functionEnum": "StrokeIncreaseWeight",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeSegment",
+     "functionEnum": "StrokeDecreaseWeightAbsolute",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeSegment",
+     "functionEnum": "StrokeIncreaseWeightAbsolute",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeSquareStar",
+     "functionEnum": "StrokeDecreaseWeight",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeSquareStar",
+     "functionEnum": "StrokeIncreaseWeight",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeSquareStar",
+     "functionEnum": "StrokeDecreaseWeightAbsolute",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeSquareStar",
+     "functionEnum": "StrokeIncreaseWeightAbsolute",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeTear",
+     "functionEnum": "StrokeDecreaseWeight",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeTear",
+     "functionEnum": "StrokeIncreaseWeight",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeTear",
+     "functionEnum": "StrokeDecreaseWeightAbsolute",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeTear",
+     "functionEnum": "StrokeIncreaseWeightAbsolute",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeHeart",
+     "functionEnum": "StrokeDecreaseWeight",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeHeart",
+     "functionEnum": "StrokeIncreaseWeight",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeHeart",
+     "functionEnum": "StrokeDecreaseWeightAbsolute",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeHeart",
+     "functionEnum": "StrokeIncreaseWeightAbsolute",
+     "char": "]",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeCat",
+     "functionEnum": "StrokeDecreaseWeight",
+     "char": "[",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeCat",
+     "functionEnum": "StrokeIncreaseWeight",
+     "char": "]",
+     "modifierKeys": "None"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeCat",
+     "functionEnum": "StrokeDecreaseWeightAbsolute",
+     "char": "[",
+     "modifierKeys": "Shift"
+    },
+    {
+     "type": "ToolKey",
+     "tool": "ShapeCat",
+     "functionEnum": "StrokeIncreaseWeightAbsolute",
+     "char": "]",
+     "modifierKeys": "Shift"
+    }
+   ]
+  }
+ ]
+}

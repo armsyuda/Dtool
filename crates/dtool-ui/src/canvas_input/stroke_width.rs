@@ -1,6 +1,7 @@
 use dtool_core::object::{Object, ObjectId};
 use dtool_core::paint::Paint;
 use dtool_core::{Session, scene::Scene};
+use crate::app_canvas::{clear_geometry_preview, stage_geometry_preview};
 use dtool_protocol::Command;
 use egui::{Pos2, Rect, Response, Stroke, Ui, Vec2};
 use serde_json::json;
@@ -47,12 +48,17 @@ struct WidthDrag {
     weight: f32,
     lock_width: bool,
     lock_order: bool,
-    snap_ends: bool,
+    snap_nodes: bool,
+    snap_weights: bool,
+    new_point: bool,
 }
 
 #[derive(Debug, Clone)]
 struct Path {
     positions: Vec<Vec2>,
+    local: Vec<Vec2>,
+    matrix: [f32; 6],
+    nodes: Vec<f32>,
     distances: Vec<f32>,
     length: f32,
 }
@@ -61,6 +67,7 @@ struct Path {
 struct Sample {
     pos: Vec2,
     tangent: Vec2,
+    width_axis: Vec2,
     at: f32,
 }
 
@@ -68,46 +75,90 @@ impl Sample {
     fn normal(self) -> Vec2 {
         egui::vec2(-self.tangent.y, self.tangent.x)
     }
+
+    fn handle_offset(self, half_width: f32, radius: f32) -> Vec2 {
+        self.width_axis.normalized() * (self.width_axis.length() * half_width).max(radius * 0.7)
+    }
+
+    fn normal_offset(self, point: Vec2) -> f32 {
+        (point - self.pos).dot(self.normal()) / self.width_axis.dot(self.normal())
+    }
 }
 
 impl Path {
-    fn of(object: &Object) -> Option<Self> {
+    fn of(object: &Object) -> Vec<Self> {
+        let Some(outline) = dtool_core::outline::object_outline(object) else { return Vec::new() };
         let matrix = dtool_core::geometry::object_matrix(object);
-        let (mut points, closed) = dtool_core::scene::doc_contours(object, &matrix).into_iter().next()?;
-        points.dedup();
-        if closed && points.first() != points.last() {
-            points.push(*points.first()?);
+        if dtool_core::geometry::invert_matrix(&matrix).is_none() { return Vec::new(); }
+        let transform = |p: [f64; 2]| {
+            let [x, y] = dtool_core::geometry::apply_matrix(&matrix, [
+                p[0] as f32 + object.pos[0], p[1] as f32 + object.pos[1],
+            ]);
+            egui::vec2(x, y)
+        };
+        let point_key = |position: Vec2| [position.x.to_bits(), position.y.to_bits()];
+        let node_positions: std::collections::HashSet<_> = outline.elements().iter()
+            .filter_map(|element| element.end_point())
+            .map(|p| point_key(egui::vec2(p.x as f32, p.y as f32))).collect();
+        dtool_core::outline::flatten_subpaths(&outline, dtool_core::boolean::DEFAULT_TOLERANCE)
+            .into_iter().filter_map(|(mut points, closed)| {
+                points.dedup_by_key(|p| p.map(|v| v as f32));
+                if closed && points.first() != points.last() {
+                    points.push(*points.first()?);
+                }
+                let local: Vec<_> = points.iter().map(|p| egui::vec2(p[0] as f32, p[1] as f32)).collect();
+                let positions = points.into_iter().map(transform).collect();
+                let distances: Vec<_> = std::iter::once(0.0).chain(local.windows(2).scan(0.0, |length, pair| {
+                    *length += (pair[1] - pair[0]).length();
+                    Some(*length)
+                })).collect();
+                let length = *distances.last()?;
+                if !length.is_finite() || length <= f32::EPSILON { return None; }
+                let nodes = local.iter().zip(&distances).filter_map(|(position, distance)| {
+                    node_positions.contains(&point_key(*position)).then_some(distance / length)
+                }).collect();
+                Some(Self { positions, local, matrix, nodes, distances, length })
+            }).collect()
+    }
+
+    fn segment(&self, end: usize, fraction: f32) -> Sample {
+        let start = self.positions[end - 1];
+        let edge = self.positions[end] - start;
+        let direction = (self.local[end] - self.local[end - 1]).normalized();
+        let [a, b, c, d, _, _] = self.matrix;
+        Sample {
+            pos: start + edge * fraction,
+            tangent: edge.normalized(),
+            width_axis: egui::vec2(c * direction.x - a * direction.y, d * direction.x - b * direction.y),
+            at: (self.distances[end - 1] + (self.distances[end] - self.distances[end - 1]) * fraction) / self.length,
         }
-        let positions: Vec<_> = points.into_iter().map(|p| egui::vec2(p[0], p[1])).collect();
-        let mut distances = vec![0.0];
-        for pair in positions.windows(2) {
-            distances.push(distances.last()? + (pair[1] - pair[0]).length());
-        }
-        let length = *distances.last()?;
-        (length > f32::EPSILON).then_some(Self { positions, distances, length })
     }
 
     fn sample(&self, at: f32) -> Sample {
         let distance = at * self.length;
         let end = self.distances.partition_point(|d| *d <= distance).clamp(1, self.distances.len() - 1);
-        let start = self.positions[end - 1];
-        let tangent = (self.positions[end] - start).normalized();
-        Sample { pos: start + tangent * (distance - self.distances[end - 1]), tangent, at }
+        self.segment(end, ((distance - self.distances[end - 1])
+            / (self.distances[end] - self.distances[end - 1])).clamp(0.0, 1.0))
     }
 
     fn nearest(&self, point: Vec2) -> Sample {
-        let mut best = (f32::INFINITY, self.sample(0.0));
-        for (i, pair) in self.positions.windows(2).enumerate() {
+        self.positions.windows(2).enumerate().filter_map(|(i, pair)| {
             let segment = pair[1] - pair[0];
-            let fraction = ((point - pair[0]).dot(segment) / segment.length_sq()).clamp(0.0, 1.0);
-            let pos = pair[0] + segment * fraction;
-            let distance = (point - pos).length_sq();
-            if distance < best.0 {
-                let at = (self.distances[i] + segment.length() * fraction) / self.length;
-                best = (distance, Sample { pos, tangent: segment.normalized(), at });
-            }
-        }
-        best.1
+            let length_sq = segment.length_sq();
+            (length_sq > 0.0 && self.distances[i + 1] > self.distances[i]).then(|| {
+                let fraction = ((point - pair[0]).dot(segment) / length_sq).clamp(0.0, 1.0);
+                self.segment(i + 1, fraction)
+            })
+        }).min_by(|a, b| (a.pos - point).length_sq().total_cmp(&(b.pos - point).length_sq()))
+            .unwrap_or_else(|| self.sample(0.0))
+    }
+
+    fn snap_node(&self, sample: Sample, radius: f32) -> f32 {
+        self.nodes.iter().copied()
+            .map(|at| (at, (self.sample(at).pos - sample.pos).length_sq()))
+            .filter(|(_, distance)| *distance <= radius * radius)
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map_or(sample.at, |(at, _)| at)
     }
 }
 
@@ -124,57 +175,77 @@ fn patch(id: ObjectId, width: Option<f32>, profile: Vec<[f32; 2]>) -> Command {
     Command::with_params("stroke.set", json!({ "id": id.0, "width": width, "pressure": profile }))
 }
 
-fn eligible(object: &Object) -> bool {
-    !object.locked && object.pickable && object.stroke.width > 0.0 && object.stroke.paint != Paint::None
+fn eligible(session: &Session, object: &Object) -> bool {
+    object.pickable && object.stroke.width > 0.0 && object.stroke.paint != Paint::None
+        && !session.document.is_object_locked(object)
 }
 
-fn handle_at(path: &Path, profile: &[[f32; 2]], width: f32, point: Vec2, radius: f32) -> Option<usize> {
+fn handle_at(path: &Path, profile: &[[f32; 2]], width: f32, point: Vec2, radius: f32) -> Option<(usize, f32)> {
     profile.iter().enumerate().filter_map(|(i, &[at, weight])| {
         let sample = path.sample(at);
-        let offset = sample.normal() * (width * weight * 0.5).max(radius * 0.7);
+        let offset = sample.handle_offset(width * weight * 0.5, radius);
         let distance = [sample.pos, sample.pos + offset, sample.pos - offset].iter()
             .map(|p| (*p - point).length_sq()).fold(f32::INFINITY, f32::min);
         (distance <= radius * radius).then_some((i, distance))
-    }).min_by(|a, b| a.1.total_cmp(&b.1)).map(|(i, _)| i)
+    }).min_by(|a, b| a.1.total_cmp(&b.1))
 }
 
 impl WidthDrag {
-    fn edit(&self, pointer: Vec2, radius: f32) -> (f32, Vec<[f32; 2]>, f32) {
+    fn edit(&self, pointer: Vec2, radius: f32, modifiers: egui::Modifiers) -> (f32, Vec<[f32; 2]>, f32) {
         let original = self.path.sample(self.at);
-        let start_offset = (self.start - original.pos).dot(original.normal());
-        let sign = if start_offset.abs() >= radius * 0.45 {
+        let start_offset = original.normal_offset(self.start);
+        let movement = pointer - self.start;
+        let sign = if (self.start - original.pos).dot(original.normal()).abs() >= radius * 0.45 {
             start_offset.signum()
         } else {
-            (pointer - self.start).dot(original.normal()).signum()
+            (movement.dot(original.normal()) / original.width_axis.dot(original.normal())).signum()
         };
-        let sample = self.path.nearest(pointer);
-        let mut at = if (pointer - self.start).dot(original.tangent).abs() >= radius * 0.5 {
-            sample.at
-        } else {
-            self.at
-        };
-        if self.snap_ends {
-            let threshold = radius / self.path.length;
-            if at <= threshold { at = 0.0; }
-            if at >= 1.0 - threshold { at = 1.0; }
+        let mut at = self.at;
+        if !modifiers.shift && movement.dot(original.tangent).abs() >= radius * 0.5 {
+            let sample = self.path.nearest(pointer);
+            at = if self.snap_nodes { self.path.snap_node(sample, radius) } else { sample.at };
         }
         if self.lock_order {
             let min = self.index.checked_sub(1).map_or(0.0, |i| (self.profile[i][0] + 0.0001).min(self.at));
             let max = self.profile.get(self.index + 1).map_or(1.0, |p| (p[0] - 0.0001).max(self.at));
             at = at.clamp(min, max);
+        } else if at != self.at {
+            while at != self.at && self.profile.iter().any(|p| p[0] == at) {
+                at = if at > self.at { at.next_down() } else { at.next_up() };
+            }
         }
-        let normal = self.path.sample(at).normal();
-        let centre = self.path.sample(at).pos;
-        let offset = (pointer - centre).dot(normal);
-        let half_width = self.width * self.weight * 0.5;
-        let target = (half_width + (offset - start_offset) * sign).max(0.0) * 2.0;
-        let width = if self.lock_width { self.width } else { self.width.max(target) };
+        let sample = self.path.sample(at);
+        let original_width = self.width * self.weight;
+        let mut target = if modifiers.command {
+            original_width
+        } else {
+            (original_width + (sample.normal_offset(pointer) - start_offset) * sign * 2.0).max(0.0)
+        };
+        if self.snap_weights && !modifiers.command {
+            let threshold = radius * 0.7 / sample.width_axis.length();
+            if let Some((width, _)) = self.profile.iter().enumerate()
+                .filter(|(i, _)| *i != self.index)
+                .map(|(_, point)| self.width * point[1])
+                .map(|width| (width, (width - target).abs()))
+                .filter(|(_, delta)| *delta <= threshold)
+                .min_by(|a, b| a.1.total_cmp(&b.1))
+            {
+                target = width;
+            }
+        }
+        let width = if self.lock_width {
+            target = target.min(self.width);
+            self.width
+        } else {
+            self.width.max(target)
+        };
         let mut profile = self.profile.clone();
         profile.remove(self.index);
         for entry in &mut profile {
             entry[1] *= self.width / width;
         }
-        Self::insert(&mut profile, [at, target / width]);
+        let index = if at == self.at { self.index } else { profile.partition_point(|p| p[0] < at) };
+        profile.insert(index, [at, target / width]);
         (width, profile, at)
     }
 
@@ -187,6 +258,16 @@ impl WidthDrag {
         }
         at
     }
+}
+
+fn hit_path(object: &Object, point: Vec2, radius: f32) -> Option<(Path, Option<usize>, Sample)> {
+    Path::of(object).into_iter().filter_map(|path| {
+        let handle = handle_at(&path, &object.stroke.pressure, object.stroke.width, point, radius);
+        let sample = path.nearest(point);
+        let distance = (sample.pos - point).length_sq();
+        (handle.is_some() || distance <= radius * radius)
+            .then(|| ((handle.is_none(), handle.map_or(distance, |(_, d)| d)), (path, handle.map(|(i, _)| i), sample)))
+    }).min_by(|(a, _), (b, _)| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1))).map(|(_, hit)| hit)
 }
 
 impl WidthTool {
@@ -205,27 +286,25 @@ impl WidthTool {
         let (down, up) = primary_button_positions(ui);
         let point = |pos| { let [x, y] = to_doc(pos); egui::vec2(x, y) };
         let radius = 7.0 / session.view.zoom.max(1e-4);
+        let modifiers = ui.input(|input| input.events.iter().rev().find_map(|event| match event {
+            egui::Event::PointerButton { button: egui::PointerButton::Primary, modifiers, .. } if up.is_some() => Some(*modifiers),
+            _ => None,
+        }).unwrap_or(input.modifiers));
         let screen_pointer = ui.input(|input| input.pointer.latest_pos());
         let pointer = screen_pointer.map(point);
         let selected = match session.selection.ids.as_slice() {
-            [id] => session.document.get_object(*id).filter(|object| eligible(object) && scene.quad(*id).is_some()),
+            [id] => session.document.get_object(*id).filter(|object| eligible(session, object) && scene.quad(*id).is_some()),
             _ => None,
         };
         if let Some(at) = screen_pointer.filter(|at| response.hovered()
             || (self.drag.is_some() && response.rect.contains(*at)))
         {
             ui.ctx().set_cursor_icon(egui::CursorIcon::None);
-            let normal = self.drag.as_ref().map(|drag| drag.path.sample(drag.at).normal())
+            let normal = self.drag.as_ref().map(|drag| drag.path.sample(drag.at).width_axis.normalized())
                 .or_else(|| {
                     let object = selected?;
-                    let path = Path::of(object)?;
-                    let point = point(at);
-                    let profile = &object.stroke.pressure;
-                    if let Some(index) = handle_at(&path, profile, object.stroke.width, point, radius) {
-                        return Some(path.sample(profile[index][0]).normal());
-                    }
-                    let sample = path.nearest(point);
-                    ((sample.pos - point).length() <= radius).then(|| sample.normal())
+                    let (path, index, sample) = hit_path(object, point(at), radius)?;
+                    Some(index.map_or(sample, |i| path.sample(object.stroke.pressure[i][0])).width_axis.normalized())
                 })
                 .map(|normal| egui::emath::Rot2::from_angle(session.view.rotation_deg.to_radians()) * normal)
                 .unwrap_or(Vec2::Y);
@@ -235,7 +314,7 @@ impl WidthTool {
             && keyboard && ui.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace))
             && let Some(index) = self.selected.filter(|(id, _)| *id == object.id)
                 .and_then(|(_, at)| object.stroke.pressure.iter().position(|point| point[0] == at))
-                .or_else(|| handle_at(&Path::of(object)?, &object.stroke.pressure, object.stroke.width, pointer?, radius))
+                .or_else(|| hit_path(object, pointer?, radius)?.1)
         {
             self.selected = None;
             let mut profile = object.stroke.pressure.clone();
@@ -247,20 +326,21 @@ impl WidthTool {
             && !egui::Popup::is_any_open(ui.ctx())).map(point)
         {
             response.request_focus();
-            let hit = |object: &Object| {
-                let path = Path::of(object)?;
-                let index = handle_at(&path, &object.stroke.pressure, object.stroke.width, at, radius);
-                let sample = path.nearest(at);
-                (index.is_some() || (sample.pos - at).length() <= radius).then_some((path, index, sample.at))
-            };
+            let hit = |object: &Object| hit_path(object, at, radius);
             let candidate = selected.and_then(|object| hit(object).map(|info| (object, info))).or_else(|| {
-                session.document.objects.iter().rev().filter(|object| eligible(object) && scene.quad(object.id).is_some())
+                session.document.objects.iter().rev()
+                    .filter(|object| eligible(session, object) && scene.quad(object.id).is_some())
                     .find_map(|object| hit(object).map(|info| (object, info)))
             });
-            if let Some((object, (path, index, t))) = candidate {
+            if let Some((object, (path, index, sample))) = candidate {
                 let id = object.id;
                 let width = object.stroke.width;
                 let mut profile = object.stroke.pressure.clone();
+                let flag = |id| session.tool_options.flag("tool.stroke_width", id).unwrap_or(false);
+                let snap_nodes = flag("stroke_width.snap_ends");
+                let t = if snap_nodes { path.snap_node(sample, radius) } else { sample.at };
+                let index = index.or_else(|| profile.iter().position(|point| point[0] == t));
+                let new_point = index.is_none();
                 let index = index.unwrap_or_else(|| {
                     let weight = weight_at(&profile, t);
                     if profile.is_empty() {
@@ -268,11 +348,11 @@ impl WidthTool {
                     }
                     WidthDrag::insert(&mut profile, [t, weight])
                 });
-                let flag = |id| session.tool_options.flag("tool.stroke_width", id).unwrap_or(false);
                 self.drag = Some(WidthDrag {
                     id, path, at: profile[index][0], start: at, width, weight: profile[index][1],
                     profile, index, lock_width: flag("stroke_width.lock_width"),
-                    lock_order: flag("stroke_width.lock_order"), snap_ends: flag("stroke_width.snap_ends"),
+                    lock_order: flag("stroke_width.lock_order"), snap_nodes,
+                    snap_weights: flag("stroke_width.snap_weights"), new_point,
                 });
                 if session.selection.ids.as_slice() != [id]
                     && let Some(command) = click_select_command(Some(id), &session.selection.ids, false)
@@ -286,43 +366,53 @@ impl WidthTool {
         }
         if let Some(up) = up {
             let drag = self.drag.take()?;
+            clear_geometry_preview(ui);
             let pointer = point(up);
             if (pointer - drag.start).length() < radius * 0.25 {
+                if !drag.new_point && response.double_clicked() {
+                    self.selected = None;
+                    let mut profile = drag.profile;
+                    profile.remove(drag.index);
+                    return Some(patch(drag.id, None, profile));
+                }
                 self.selected = Some((drag.id, drag.at));
-                return Some(patch(drag.id, None, drag.profile));
+                return drag.new_point.then(|| patch(drag.id, None, drag.profile));
             }
-            let (width, profile, at) = drag.edit(pointer, radius);
+            let (width, profile, at) = drag.edit(pointer, radius, modifiers);
             self.selected = Some((drag.id, at));
-            return Some(patch(drag.id, Some(width), profile));
+            return (drag.new_point || width != drag.width || profile != drag.profile)
+                .then(|| patch(drag.id, Some(width), profile));
         }
         if !ui.input(|input| input.pointer.primary_down()) {
-            self.drag = None;
+            if self.drag.take().is_some() { clear_geometry_preview(ui); }
+        } else if let (Some(drag), Some(pointer)) = (&self.drag, pointer) {
+            if (pointer - drag.start).length() >= radius * 0.25 {
+                let (width, profile, _) = drag.edit(pointer, radius, modifiers);
+                stage_geometry_preview(ui, session, patch(drag.id, Some(width), profile));
+            } else {
+                clear_geometry_preview(ui);
+            }
         }
         None
     }
 
     pub(super) fn paint(&self, ui: &Ui, rect: Rect, session: &Session, stroke: Stroke) {
+        let stroke = Stroke::new(stroke.width, super::SELECTION_BLUE);
         let [id] = session.selection.ids.as_slice() else { return };
-        let Some(object) = session.document.get_object(*id).filter(|object| eligible(object)) else { return };
+        let Some(object) = session.document.get_object(*id).filter(|object| eligible(session, object)) else { return };
         let view = &session.view;
         let radius = 7.0 / view.zoom.max(1e-4);
         let display = |point: Vec2| screen(rect, view, [point.x, point.y]);
-        let current;
-        let (path, width, profile, active) = if let Some(drag) = &self.drag {
-            let pointer = ui.input(|input| input.pointer.latest_pos()).map(|p| {
-                let [x, y] = dtool_core::view_to_doc(view, [p.x - rect.min.x, p.y - rect.min.y]);
-                egui::vec2(x, y)
-            }).unwrap_or(drag.start);
-            current = drag.edit(pointer, radius);
-            (&drag.path, current.0, current.1.as_slice(), Some(current.2))
+        let painter = ui.painter_at(rect);
+        let (width, profile, active) = if let Some(drag) = self.drag.as_ref().filter(|drag| drag.id == *id) {
+            (drag.width, drag.profile.as_slice(), Some(drag.at))
         } else {
-            let Some(path) = Path::of(object) else { return };
-            let painter = ui.painter_at(rect);
-            let active = self.selected.filter(|(target, _)| target == id).map(|(_, at)| at);
-            paint_profile(&painter, &path, object.stroke.width, &object.stroke.pressure, active, radius, stroke, display);
-            return;
+            (object.stroke.width, object.stroke.pressure.as_slice(),
+                self.selected.filter(|(target, _)| target == id).map(|(_, at)| at))
         };
-        paint_profile(&ui.painter_at(rect), path, width, profile, active, radius, stroke, display);
+        for path in Path::of(object) {
+            paint_profile(&painter, &path, width, profile, active, radius, stroke, display);
+        }
     }
 }
 
@@ -333,7 +423,7 @@ fn paint_profile(
     painter.add(egui::Shape::line(path.positions.iter().copied().map(&display).collect(), Stroke::new(1.0, stroke.color.gamma_multiply(0.65))));
     for &[at, weight] in profile {
         let sample = path.sample(at);
-        let delta = sample.normal() * (width * weight * 0.5).max(radius * 0.7);
+        let delta = sample.handle_offset(width * weight * 0.5, radius);
         let ends = [display(sample.pos - delta), display(sample.pos + delta)];
         painter.line_segment(ends, stroke);
         for end in ends {

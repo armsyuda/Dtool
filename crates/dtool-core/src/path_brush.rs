@@ -291,6 +291,7 @@ impl Ink {
             matrix: [dx, 0.0, 0.0, dy,
                 f64::from(x - origin[0]) - dx * border as f64, f64::from(y - origin[1]) - dy * border as f64],
             seed: None,
+            single_image: false,
         }))
     }
 

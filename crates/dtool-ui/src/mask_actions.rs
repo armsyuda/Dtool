@@ -46,7 +46,7 @@ pub fn has_pixel_selection(session: &Session) -> bool {
 
 pub fn enabled(session: &Session, action: MaskAction) -> bool {
     let Some(id) = target(session) else { return false };
-    if session.document.get_object(id).is_some_and(|object| object.locked) {
+    if session.document.get_object(id).is_some_and(|object| session.document.is_object_locked(object)) {
         return false;
     }
     match action {

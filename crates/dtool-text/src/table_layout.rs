@@ -71,21 +71,10 @@ fn line_run(line: Line, metrics: &FontMetrics) -> ShapedRun {
     }
 }
 
-fn cell_story(doc: &Document, core: &dtool_core::Story, format: &CellFormat) -> (crate::story::Story, CharStyle) {
-    let styled = format.paragraph_style.as_deref().and_then(|name| {
-        let props = doc.text_styles.resolve(dtool_core::text_styles::StyleKind::Paragraph, name).ok()?;
-        let mut styled = core.clone();
-        for range in styled.paras.iter_mut().filter_map(dtool_core::serde_json::Value::as_object_mut) {
-            let direct = std::mem::take(range);
-            *range = props.clone();
-            range.extend(direct);
-        }
-        let mut base = props;
-        base.insert("start".into(), 0.into());
-        base.insert("end".into(), core.text.chars().count().into());
-        styled.paras.insert(0, dtool_core::serde_json::Value::Object(base));
-        Some(styled)
-    });
+fn cell_story(doc: &Document, table: &TableNode, core: &dtool_core::Story, format: &CellFormat) -> (crate::story::Story, CharStyle) {
+    let preview = crate::font_preview::previewed_core_story(doc, core);
+    let core = preview.as_ref().unwrap_or(core);
+    let styled = dtool_core::table::resolve::styled_cell_story(doc, table, core, format);
     let mut story = crate::bridge::story_in_document(styled.as_ref().unwrap_or(core), doc);
     let len = story.text.chars().count();
     // Legacy point-unit cells without character runs already use one-em line spacing.
@@ -184,7 +173,7 @@ pub(crate) fn measure_for_fit(doc: &Document, table: &TableNode, rows: bool, sel
         let (along_insets, other_insets) = if rows { (vertical_insets, horizontal_insets) } else { (horizontal_insets, vertical_insets) };
         let sideways = matches!(format.rotation, CellRotation::R90 | CellRotation::R270);
         let fit_block = rows != sideways;
-        let (story, style) = stories.get(&cell.story).map(|core| cell_story(doc, core, &format))
+        let (story, style) = stories.get(&cell.story).map(|core| cell_story(doc, table, core, &format))
             .unwrap_or_else(|| (crate::story::Story::default(), default_style(doc)));
         let size = if fit_block {
             let width = (cross_extent - other_insets).max(f32::EPSILON);
@@ -250,7 +239,7 @@ fn layout_table_impl(
 
         let (story, style, mut story_lines) = match doc.stories.iter().find(|s| s.id == cell.story) {
             Some(core) => {
-                let (story, style) = cell_story(doc, core, &format);
+                let (story, style) = cell_story(doc, table, core, &format);
                 let lines = crate::layout::layout_story(lib, &story, Some(line_width.max(f32::EPSILON)));
                 (Some((core, story)), style, lines)
             }

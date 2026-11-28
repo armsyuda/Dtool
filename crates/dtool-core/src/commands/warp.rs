@@ -165,25 +165,7 @@ pub fn live_warp_points(doc: &crate::Document, object_id: ObjectId, points: &[[f
 /// Recover layout coordinates from a pointer over a warped object.
 pub fn unwarp_point(doc: &crate::Document, object_id: ObjectId, point: [f32; 2]) -> [f32; 2] {
     let Some(warp) = LiveWarp::for_object(doc, object_id) else { return point };
-    let target = point.map(f64::from);
-    let mut estimate = target;
-    let h = 0.01;
-    for _ in 0..12 {
-        let centre = warp.point(estimate);
-        let [ex, ey] = [centre[0] - target[0], centre[1] - target[1]];
-        if ex.hypot(ey) <= h {
-            return estimate.map(|value| value as f32);
-        }
-        let [x, y] = estimate;
-        let dx = warp.point([x + h, y]);
-        let dy = warp.point([x, y + h]);
-        let [a, b] = [(dx[0] - centre[0]) / h, (dx[1] - centre[1]) / h];
-        let [c, d] = [(dy[0] - centre[0]) / h, (dy[1] - centre[1]) / h];
-        let det = a * d - b * c;
-        if !det.is_finite() || det.abs() < 1e-8 { break; }
-        estimate = [x - (d * ex - c * ey) / det, y - (a * ey - b * ex) / det];
-    }
-    point
+    warp.inverse_point(point.map(f64::from)).map_or(point, |position| position.map(|value| value as f32))
 }
 
 /// Deform every contour in a world-space outline, including the closing edges.
@@ -240,6 +222,29 @@ impl LiveWarp {
             point = crate::warp::evaluate(&group.mesh, *bounds, point);
         }
         point
+    }
+
+    pub(crate) fn inverse_point(&self, target: [f64; 2]) -> Option<[f64; 2]> {
+        let mut estimate = target;
+        let step = 0.01;
+        for _ in 0..12 {
+            let centre = self.point(estimate);
+            let [ex, ey] = [centre[0] - target[0], centre[1] - target[1]];
+            if ex.hypot(ey) <= step {
+                return Some(estimate);
+            }
+            let [x, y] = estimate;
+            let dx = self.point([x + step, y]);
+            let dy = self.point([x, y + step]);
+            let [a, b] = [(dx[0] - centre[0]) / step, (dx[1] - centre[1]) / step];
+            let [c, d] = [(dy[0] - centre[0]) / step, (dy[1] - centre[1]) / step];
+            let det = a * d - b * c;
+            if !det.is_finite() || det.abs() < 1e-8 {
+                break;
+            }
+            estimate = [x - (d * ex - c * ey) / det, y - (a * ey - b * ex) / det];
+        }
+        None
     }
 
     pub(crate) fn outline(&self, outline: &BezPath) -> BezPath {

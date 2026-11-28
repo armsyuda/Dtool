@@ -9,7 +9,7 @@ fn square(side: f32) -> Vec<Vec<[f32; 2]>> {
 }
 
 fn centre(doc: &Document, id: &str) -> Option<[u8; 4]> {
-    let bitmap = BitmapPaint { resource_id: id.into(), matrix: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0], seed: None };
+    let bitmap = BitmapPaint { resource_id: id.into(), matrix: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0], seed: None, single_image: false };
     let rgba = rasterize_bitmap(doc, &bitmap, &square(10.0), [0.0, 0.0], [0.0, 0.0, 10.0, 10.0], [10, 10])?;
     let o = (5 * 10 + 5) * 4;
     Some([rgba[o], rgba[o + 1], rgba[o + 2], rgba[o + 3]])

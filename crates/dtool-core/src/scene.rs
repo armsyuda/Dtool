@@ -443,7 +443,7 @@ fn push_object_body(doc: &Document, object: &Object, paint: &ObjectPaint,
             let world = crate::geometry::compose(&paint.matrix, &translation);
             let transform = crate::geometry::compose(&inverse_translation, &world).map(f64::from);
             match &mut value {
-                Paint::Gradient { geom, .. } => *geom = geom.transform(transform),
+                Paint::Gradient { kind, geom, .. } => *geom = geom.transform_for_kind(*kind, transform),
                 Paint::Bitmap(bitmap) => {
                     bitmap.matrix = (kurbo::Affine::new(transform) * kurbo::Affine::new(bitmap.matrix)).as_coeffs();
                 }
@@ -615,7 +615,7 @@ pub fn isolate_allows(doc: &Document, flags: &CanvasFlags, id: ObjectId) -> bool
 }
 
 pub fn is_drawn(doc: &Document, id: ObjectId) -> bool {
-    effective_pickable(doc, id)
+    !doc.render_suppressed_objects.contains(&id) && effective_pickable(doc, id)
 }
 
 pub fn is_drawn_with_flags(doc: &Document, flags: &CanvasFlags, id: ObjectId) -> bool {
@@ -735,6 +735,7 @@ pub(crate) struct BitmapSampler {
     size: [usize; 2],
     data: Vec<u8>,
     matrix: kurbo::Affine,
+    single_image: bool,
 }
 
 impl BitmapSampler {
@@ -744,7 +745,7 @@ impl BitmapSampler {
             return None;
         }
         let (size, data) = bitmap_source(doc, &bitmap.resource_id)?;
-        Some(Self { size, data, matrix: transform })
+        Some(Self { size, data, matrix: transform, single_image: bitmap.single_image })
     }
 
     pub fn pixel(&self, local: [f64; 2]) -> &[u8] {
@@ -753,8 +754,13 @@ impl BitmapSampler {
         let lx = local[0] - e;
         let ly = local[1] - f;
         let [width, height] = self.size;
-        let x = (((d * lx - c * ly) / det).floor() as i64).rem_euclid(width as i64) as usize;
-        let y = (((-b * lx + a * ly) / det).floor() as i64).rem_euclid(height as i64) as usize;
+        let x = ((d * lx - c * ly) / det).floor() as i64;
+        let y = ((-b * lx + a * ly) / det).floor() as i64;
+        if self.single_image && (x < 0 || y < 0 || x >= width as i64 || y >= height as i64) {
+            return &[0, 0, 0, 0];
+        }
+        let x = x.rem_euclid(width as i64) as usize;
+        let y = y.rem_euclid(height as i64) as usize;
         let start = (y * width + x) * 4;
         &self.data[start..start + 4]
     }
@@ -919,6 +925,10 @@ fn blend(pixels: &mut [u8], offset: usize, colour: Colour, opacity: f32) {
     }
     let alpha = (f32::from(colour.a) / 255.0) * opacity.clamp(0.0, 1.0);
     if !(alpha > 0.0) {
+        return;
+    }
+    if alpha == 1.0 || pixels[offset + 3] == 0 {
+        pixels[offset..offset + 4].copy_from_slice(&[colour.r, colour.g, colour.b, (alpha * 255.0).round() as u8]);
         return;
     }
     let old_a = f32::from(pixels[offset + 3]) / 255.0;
@@ -1134,7 +1144,14 @@ fn blit_image(
     if columns.is_empty() || rows.is_empty() {
         return;
     }
-    let source = if let Some(ink) = brush.as_ref() {
+    let tiled = doc.pixel_layers.get(object.id).filter(|_| {
+        frame.is_none() && brush.is_none()
+            && !doc.layer_masks.iter().any(|mask| mask.object == object.id)
+            && !doc.objects.iter().any(|child| child.parent_id == Some(object.id) && child.tone_layer.is_some())
+    });
+    let source = if tiled.is_some() {
+        None
+    } else if let Some(ink) = brush.as_ref() {
         let scale = view.map(|v| v.zoom).unwrap_or_else(|| {
             (width as f32 / bounds[2]).max(height as f32 / bounds[3])
         });
@@ -1144,10 +1161,10 @@ fn blit_image(
     } else {
         crate::raster_source::rgba(doc, object)
     };
-    let Some(([rw, rh], data)) = source else {
-        return;
-    };
-    if rw == 0 || rh == 0 || data.len() != rw * rh * 4 {
+    let Some([rw, rh]) = tiled.map(|layer| [layer.width as usize, layer.height as usize])
+        .or_else(|| source.as_ref().map(|(size, _)| *size)) else { return; };
+    let data = source.as_ref().map(|(_, data)| data.as_slice()).unwrap_or_default();
+    if rw == 0 || rh == 0 || tiled.is_none() && data.len() != rw * rh * 4 {
         return;
     }
     let inverse = display.map(|matrix| matrix.inverse().as_coeffs().map(|v| v as f32));
@@ -1157,7 +1174,7 @@ fn blit_image(
         in_clip(Some(clip), x, y)
     };
     if let Some(geometry) = frame {
-        blit_framed(pixels, &data, [rw, rh], geometry, quad, opacity, bounds, width, height, view, in_image_clip, [columns, rows]);
+        blit_framed(pixels, data, [rw, rh], geometry, quad, opacity, bounds, width, height, view, in_image_clip, [columns, rows]);
         return;
     }
     let local_sampling = if !sample_in_quad && view.is_none() && brush.is_none()
@@ -1210,9 +1227,12 @@ fn blit_image(
                 }
                 (((uv[0] * rw as f32) as usize).min(rw - 1), ((uv[1] * rh as f32) as usize).min(rh - 1))
             };
-            let src = (sy * rw + sx) * 4;
-            let colour = Colour::new(data[src], data[src + 1], data[src + 2], data[src + 3]);
-            blend(pixels, ((py * width + px) * 4) as usize, colour, opacity);
+            let [r, g, b, a] = if let Some(layer) = tiled {
+                layer.get(sx as u32, sy as u32)
+            } else {
+                data.as_chunks::<4>().0[sy * rw + sx]
+            };
+            blend(pixels, ((py * width + px) * 4) as usize, Colour::new(r, g, b, a), opacity);
         }
     }
 }
@@ -1720,15 +1740,16 @@ fn draw_vector_masked_ink(
         }
         mask_rect = None;
     }
-    let mut mask = vec![0; pixels.len()];
-    let white = Paint::Solid { colour: Colour::new(255, 255, 255, 255) };
-    fill_paint(doc, &mut mask, &contours, [0.0, 0.0], &white, 1.0, bounds, width, height, view, mask_rect, Default::default());
     let mut ink = vec![0; pixels.len()];
     draw(&mut ink);
-    for (pixel, coverage) in ink.chunks_exact_mut(4).zip(mask.chunks_exact(4)) {
-        pixel[3] = ((u16::from(pixel[3]) * u16::from(coverage[3]) + 127) / 255) as u8;
-    }
-    crate::blend_composite::composite(pixels, &ink, None, 1.0);
+    let white = Paint::Solid { colour: Colour::new(255, 255, 255, 255) };
+    // Apply coverage on the original grid as the mask is sampled. Pixels
+    // outside the mask never need a second surface or another blending pass.
+    sample_fill(doc, &contours, [0.0, 0.0], &white, bounds, [width, height], view, mask_rect, |offset, coverage| {
+        let [r, g, b, alpha] = ink[offset..offset + 4].try_into().unwrap();
+        let alpha = ((u16::from(alpha) * u16::from(coverage.a) + 127) / 255) as u8;
+        crate::blend::blend_pixel_normal(pixels, offset, [r, g, b, alpha], 1.0);
+    });
 }
 
 pub fn rasterize_scene(
@@ -1747,28 +1768,35 @@ pub fn rasterize_scene(
     if let Some(blended) = crate::blend_composite::rasterize(doc, scene, bounds, width, height, view, rasterize_scene) {
         return blended;
     }
-    let mut clips: Vec<Option<[f32; 4]>> = Vec::new();
+    let mut clips: Vec<([f32; 4], bool)> = Vec::new();
     let display = (scene.display_rotation != 0.0)
         .then(|| kurbo::Affine::rotate(f64::from(scene.display_rotation).to_radians()));
     for prim in &scene.prims {
+        let clip = clips.last().map(|(rect, _)| *rect);
         match prim {
-            Prim::Clip { rect, .. } => match rect {
-                Some(rect) => {
-                    let next = clips.last().copied().flatten().map(|cur| intersect_rect(cur, *rect)).unwrap_or(*rect);
-                    clips.push(Some(next));
-                }
-                None => {
-                    clips.pop();
-                }
-            },
+            Prim::Clip { rect: Some(rect), .. } => {
+                let next = clip.map_or(*rect, |current| intersect_rect(current, *rect));
+                // In document space the clip bounds all enclosed ink. Avoid
+                // resolving vector masks and allocating layers for offscreen clips.
+                let visible = display.is_some() || {
+                    let [x, y, w, h] = next;
+                    image_window(
+                        [[x, y], [x + w, y], [x + w, y + h], [x, y + h]],
+                        None, bounds, [width, height], view,
+                    ).iter().all(|axis| !axis.is_empty())
+                };
+                clips.push((next, visible));
+            }
+            Prim::Clip { rect: None, .. } => { clips.pop(); }
+            _ if clips.last().is_some_and(|(_, visible)| !visible) => {}
             Prim::Page { .. } | Prim::Mark { .. } | Prim::Handle { .. } => {}
             Prim::Fill { contours, origin, paint, opacity, .. } => {
-                let clip = if display.is_none() { clips.last().copied().flatten() } else { None };
+                let clip = if display.is_none() { clip } else { None };
                 fill_paint(doc, &mut pixels, contours, *origin, paint, *opacity, bounds, width, height, view, clip, Default::default());
             }
             Prim::Appearance { inks, origin, opacity, tint, .. } => {
                 let mut layer = vec![0; pixels.len()];
-                let clip = if display.is_none() { clips.last().copied().flatten() } else { None };
+                let clip = if display.is_none() { clip } else { None };
                 for ink in inks {
                     fill_paint(doc, &mut layer, &ink.contours, *origin, &ink.paint, 1.0, bounds, width, height, view, clip, ink.blend);
                 }
@@ -1786,7 +1814,6 @@ pub fn rasterize_scene(
             }
             Prim::Image { object, quad, opacity, sample_in_quad } => {
                 if let Some(object) = doc.get_object(*object) {
-                    let clip = clips.last().copied().flatten();
                     draw_vector_masked_ink(doc, &mut pixels, object.id, clip, bounds, [width, height], view, display, false, |target| {
                         blit_image(target, doc, object, *quad, *sample_in_quad, *opacity, bounds, width, height, view, clip, display);
                     });
@@ -1795,7 +1822,6 @@ pub fn rasterize_scene(
             Prim::Text { object, lines, opacity } => {
                 if has_live_text_warp(doc, *object) { continue; }
                 let path_text = doc.get_object(*object).is_some_and(|item| matches!(item.kind, ObjectKind::PathText(_)));
-                let clip = clips.last().copied().flatten();
                 // In display space the rotated vector mask clips the complete
                 // text layer, including its decorations.
                 let ink_clip = if display.is_none() { clip } else { None };
@@ -1814,7 +1840,6 @@ pub fn rasterize_scene(
                 });
             }
             Prim::Stroke { object, points, closed, width: stroke_w, paint, opacity } => {
-                let clip = clips.last().copied().flatten();
                 let item = doc.get_object(*object);
                 if matches!(paint, Paint::Solid { .. } | Paint::Gradient { .. })
                     && let Some(item) = item
@@ -1825,17 +1850,16 @@ pub fn rasterize_scene(
                     stroke_points(&mut pixels, points, *closed, *stroke_w, paint, item.map_or([0.0; 2], |object| object.pos), *opacity, bounds, width, height, view, clip);
                 }
             }
-            Prim::Label { at, text, size, paint, opacity, .. } => {
-                let line = crate::text_lines::TextLine {
-                    object: ObjectId(0),
-                    origin: [at[0], at[1]],
-                    text: text.clone(),
-                    size: *size,
-                    width: text.chars().count() as f32 * (*size * 0.5).max(0.1),
-                    para_end: false,
-                    paint: paint.clone(),
-                };
-                fill_text_line(&mut pixels, &line, *opacity, bounds, width, height, view, clips.last().copied().flatten());
+            Prim::Label { object, at, angle_deg, text, size, paint, opacity } => {
+                let Some(mut contours) = crate::text_lines::label_outlines(text, *size) else { continue };
+                let (sin, cos) = angle_deg.to_radians().sin_cos();
+                for point in contours.iter_mut().flatten() {
+                    let [x, y] = *point;
+                    *point = [at[0] + x * cos - y * sin, at[1] + x * sin + y * cos];
+                }
+                draw_vector_masked_ink(doc, &mut pixels, *object, clip, bounds, [width, height], view, None, false, |target| {
+                    fill_paint(doc, target, &contours, *at, paint, *opacity, bounds, width, height, view, clip, Default::default());
+                });
             }
         }
     }
